@@ -6,6 +6,7 @@ use super::framing::{read_packet, read_packet_framed, to_io_invalid, write_packe
 use super::play_events::PlayEvent;
 use crossbeam_channel::Sender;
 use mc_protocol::packets;
+use mc_world::{WorldGen, DEFAULT_SEED};
 use std::net::SocketAddr;
 use tokio::net::TcpStream;
 use tracing::{debug, info, warn};
@@ -17,20 +18,29 @@ use std::time::{Duration, Instant};
 
 /// 默认压缩禁用（阈值 -1，原行为）。
 pub async fn handle_login(stream: TcpStream, addr: SocketAddr, tx: &Sender<NewConnection>) -> io::Result<()> {
-    handle_login_configured(stream, addr, tx, packets::COMPRESSION_DISABLED_THRESHOLD, None).await
+    handle_login_configured(
+        stream,
+        addr,
+        tx,
+        packets::COMPRESSION_DISABLED_THRESHOLD,
+        DEFAULT_SEED,
+        None,
+    )
+    .await
 }
 
 /// 阈值可配：threshold>=0 时 Success 前先发 SetCompression，其后走压缩帧。
 pub async fn handle_login_with_threshold(stream: TcpStream, addr: SocketAddr, tx: &Sender<NewConnection>, threshold: i32) -> io::Result<()> {
-    handle_login_configured(stream, addr, tx, threshold, None).await
+    handle_login_configured(stream, addr, tx, threshold, DEFAULT_SEED, None).await
 }
 
-/// 完整登录入口：压缩阈值 + Play 事件通道（Serve 从 NetConfig 透传）。
+/// 完整登录入口：压缩阈值 + 世界 seed + Play 事件通道（Serve 从 NetConfig 透传）。
 pub async fn handle_login_configured(
     mut stream: TcpStream,
     addr: SocketAddr,
     tx: &Sender<NewConnection>,
     threshold: i32,
+    seed: i64,
     events: Option<Sender<PlayEvent>>,
 ) -> io::Result<()> {
     let (id, payload) = read_packet(&mut stream).await?;
@@ -80,7 +90,7 @@ pub async fn handle_login_configured(
         return Ok(());
     }
     notify_login_success(tx, addr, &profile);
-    enter_play_with_events(stream, addr, profile, threshold, events).await?;
+    enter_play_with_events(stream, addr, profile, threshold, seed, events).await?;
     Ok(())
 }
 
@@ -176,34 +186,42 @@ pub fn notify_login_success(tx: &Sender<NewConnection>, addr: SocketAddr, profil
 }
 
 /// 进入 Play：拿住 socket，按序真下发后进循环。threshold透传，压缩开启后Play包走压缩帧。
-/// 旧签名保留（无 ECS 事件通道）；Serve 走 [`enter_play_with_events`]。
+/// 旧签名保留（无 ECS 事件通道/默认 seed）；Serve 走 [`enter_play_with_events`]。
 pub async fn enter_play(stream: TcpStream, addr: SocketAddr, profile: mc_core::PlayerProfile, threshold: i32) -> io::Result<()> {
-    enter_play_with_events(stream, addr, profile, threshold, None).await
+    enter_play_with_events(stream, addr, profile, threshold, DEFAULT_SEED, None).await
 }
 
-/// 进入 Play（带 Play 事件通道）：Join 序列发送后进入循环，移动/KeepAlive 事件投递 ECS。
+/// 进入 Play（带世界 seed + Play 事件通道）：Join 序列发送后进入循环。
 pub async fn enter_play_with_events(
     mut stream: TcpStream,
     addr: SocketAddr,
     profile: mc_core::PlayerProfile,
     threshold: i32,
+    seed: i64,
     events: Option<Sender<PlayEvent>>,
 ) -> io::Result<()> {
-    info!("enter_play uuid={} name={} threshold={threshold}", profile.uuid, profile.username);
-    // 出生点与中心区块统一由 mc-world::SPAWN_POS 推导（369,67,381 → chunk 23,23），
-    // 避免网络层与 world 层各写一份坐标。
-    let spawn = mc_world::SPAWN_POS;
-    let center = mc_core::ChunkPos(spawn.0.div_euclid(16), spawn.2.div_euclid(16));
-    let mut view = ChunkView::new(center);
-    let keepalive_id = send_join_sequence(&mut stream, &profile, threshold, &mut view).await?;
+    let world = WorldGen::new(seed);
+    let spawn = world.spawn_pos();
     info!(
-        "play join sent uuid={} name={} keepalive={} view_sent={}",
+        "enter_play uuid={} name={} threshold={} seed={} spawn=({},{},{})",
+        profile.uuid, profile.username, threshold, seed, spawn.0, spawn.1, spawn.2
+    );
+    // 出生点与中心区块由 WorldGen 按 seed 计算（x/z 固定 369/381 → chunk 23,23）。
+    let center = world.spawn_chunk();
+    let mut view = ChunkView::new(center);
+    let keepalive_id = send_join_sequence(&mut stream, &profile, threshold, &mut view, &world).await?;
+    info!(
+        "play join sent uuid={} name={} keepalive={} view_sent={} seed={} spawn=({},{},{})",
         profile.uuid,
         profile.username,
         keepalive_id,
-        view.sent_count()
+        view.sent_count(),
+        seed,
+        spawn.0,
+        spawn.1,
+        spawn.2
     );
-    play_loop(&mut stream, addr, &profile, keepalive_id, threshold, view, events).await
+    play_loop(&mut stream, addr, &profile, keepalive_id, threshold, view, &world, events).await
 }
 
 /// 压缩感知写包：threshold>=0 走压缩帧，否则普通帧。
@@ -215,15 +233,15 @@ async fn write_packet_any(stream: &mut TcpStream, packet_id: i32, payload: &[u8]
     }
 }
 
-/// 单块 ChunkData 包体（真实 palette/heightmap/light，来自 mc-world）。
-fn play_chunk_body(pos: mc_core::ChunkPos) -> Vec<u8> {
-    let chunk = mc_world::chunk_for(pos);
+/// 单块 ChunkData 包体（按 seed 生成真实 palette/heightmap/light）。
+fn play_chunk_body(world: &WorldGen, pos: mc_core::ChunkPos) -> Vec<u8> {
+    let chunk = world.generate(pos);
     let chunk_data = packets::PlayChunkData {
         chunk_x: pos.0,
         chunk_z: pos.1,
-        heightmaps_nbt: mc_world::chunk_heightmaps_bytes(),
-        section_bytes: mc_world::chunk_network_bytes(&chunk),
-        light_bytes: mc_world::chunk_light_bytes(),
+        heightmaps_nbt: chunk.heightmaps_bytes(),
+        section_bytes: chunk.network_bytes(),
+        light_bytes: chunk.light_bytes(),
     };
     let mut body = Vec::new();
     chunk_data.encode_body(&mut body);
@@ -232,13 +250,18 @@ fn play_chunk_body(pos: mc_core::ChunkPos) -> Vec<u8> {
 
 /// 发一批 ChunkData：ChunkBatchStart → N×ChunkData → ChunkBatchFinished(batch_size=N)。
 /// 空批次不发（客户端 ChunkBatchSizeCalculator 只接受正 batch_size）。
-async fn send_chunk_batch(stream: &mut TcpStream, add: &[mc_core::ChunkPos], threshold: i32) -> io::Result<()> {
+async fn send_chunk_batch(
+    stream: &mut TcpStream,
+    world: &WorldGen,
+    add: &[mc_core::ChunkPos],
+    threshold: i32,
+) -> io::Result<()> {
     if add.is_empty() {
         return Ok(());
     }
     write_packet_any(stream, packets::PLAY_CHUNK_BATCH_START_ID, &[], threshold).await?;
     for pos in add {
-        let body = play_chunk_body(*pos);
+        let body = play_chunk_body(world, *pos);
         write_packet_any(stream, packets::PLAY_CHUNK_DATA_ID, &body, threshold).await?;
     }
     let mut body = Vec::new();
@@ -261,13 +284,14 @@ async fn send_join_sequence(
     profile: &mc_core::PlayerProfile,
     threshold: i32,
     view: &mut ChunkView,
+    world: &WorldGen,
 ) -> io::Result<i64> {
     let mut body = Vec::new();
     packets::LoginPlay::default().encode_body(&mut body);
     write_packet_any(stream, packets::PLAY_LOGIN_PLAY_ID, &body, threshold).await?;
     debug!("play {} login play sent", profile.username);
-    let spawn = mc_world::SPAWN_POS;
-    let center = mc_core::ChunkPos(spawn.0.div_euclid(16), spawn.2.div_euclid(16));
+    let spawn = world.spawn_pos();
+    let center = world.spawn_chunk();
     body.clear();
     packets::SetCenterChunk { chunk_x: center.0, chunk_z: center.1 }.encode_body(&mut body);
     write_packet_any(stream, packets::PLAY_SET_CENTER_CHUNK_ID, &body, threshold).await?;
@@ -282,7 +306,7 @@ async fn send_join_sequence(
     // 与 mc-server 视距队列 / ChunkView 一致。
     let update = view.plan(center);
     debug_assert_eq!(update.add.len(), super::chunk_view::PLAY_VIEW_CHUNK_COUNT);
-    send_chunk_batch(stream, &update.add, threshold).await?;
+    send_chunk_batch(stream, world, &update.add, threshold).await?;
     body.clear();
     packets::PlayerPositionSync {
         teleport_id: 1,
@@ -321,6 +345,7 @@ async fn maybe_move_view(
     stream: &mut TcpStream,
     profile: &mc_core::PlayerProfile,
     view: &mut ChunkView,
+    world: &WorldGen,
     x: f64,
     z: f64,
     threshold: i32,
@@ -336,7 +361,7 @@ async fn maybe_move_view(
     write_packet_any(stream, packets::PLAY_SET_CENTER_CHUNK_ID, &body, threshold).await?;
     let update = view.plan(center);
     send_unload_chunks(stream, &update.remove, threshold).await?;
-    send_chunk_batch(stream, &update.add, threshold).await?;
+    send_chunk_batch(stream, world, &update.add, threshold).await?;
     info!(
         "play view move uuid={} name={} center=({},{}) add={} remove={} sent_total={}",
         profile.uuid,
@@ -357,6 +382,7 @@ async fn play_loop(
     mut seq: i64,
     threshold: i32,
     mut view: ChunkView,
+    world: &WorldGen,
     events: Option<Sender<PlayEvent>>,
 ) -> io::Result<()> {
     // net 线程的 last_seen 只认 KeepAlive 回显（移动包不刷新，避免客户端只发移动不回心跳）；
@@ -408,7 +434,7 @@ async fn play_loop(
                             _ => None,
                         };
                         if let Some((x, z)) = pos {
-                            if let Err(e) = maybe_move_view(stream, profile, &mut view, x, z, threshold).await {
+                            if let Err(e) = maybe_move_view(stream, profile, &mut view, world, x, z, threshold).await {
                                 debug!("play uuid={} view move failed ({e}), closing", profile.uuid);
                                 break;
                             }
@@ -566,7 +592,7 @@ mod tests {
         }
         // 依次发 0x1E/0x1F/0x20/0x21，服务端转发 ECS（本测试无通道，只log）且不断开；
         // 坐标保持在出生区块，避免触发跨区块动态补发。
-        let spawn = mc_world::SPAWN_POS;
+        let spawn = WorldGen::new(DEFAULT_SEED).spawn_pos();
         let x = spawn.0 as f64 + 0.5;
         let z = spawn.2 as f64 + 0.5;
         let mut body = Vec::new();

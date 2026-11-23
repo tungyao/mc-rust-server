@@ -6,8 +6,8 @@ use std::path::Path;
 
 /// 默认视距（格数/区块半径），与 Play LoginPlay view_distance=10 对齐；只管透传，不管移动视距。
 pub const DEFAULT_VIEW_DISTANCE: i32 = 10;
-/// 默认种子，与 mc-world 空世界 WORLD_SEED 对齐。
-pub const DEFAULT_SEED: i64 = 123456789;
+/// 默认种子，与 `mc_world::DEFAULT_SEED` 一致（123456789）。
+pub const DEFAULT_SEED: i64 = mc_world::DEFAULT_SEED;
 /// 默认压缩阈值：-1 = 禁用（原行为，不发 SetCompression，全链路明文帧）。
 /// >=0 = Login Success 前发 SetCompression(threshold)，Login/Configuration/Play 后续包全走压缩帧。
 pub const DEFAULT_COMPRESSION_THRESHOLD: i32 = -1;

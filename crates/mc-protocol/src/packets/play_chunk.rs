@@ -241,9 +241,10 @@ pub fn encode_block_section(block_states: &[i32], biome_id: i32, out: &mut Vec<u
 
 /// 真实 MOTION_BLOCKING 高度图（777 结构化 Heightmaps，非 NBT）：
 /// count(1) + type(4) + long数(37) + 37×i64be。
-/// `height` 是相对 `min_y` 的地表高度（最高非空气方块 y + 1 - min_y）。
-/// 256 列同值（当前平原地形），BPE=9、每 long 7 项，`ceil(256/7)=37` longs。
-pub fn motion_blocking_heightmap_uniform(height: i32) -> Vec<u8> {
+/// `columns[z*16+x]` 是该列相对 `min_y` 的高度值（最高非空气方块 y + 1 - min_y）。
+/// BPE=9、每 long 7 项，`ceil(256/7)=37` longs；值超过 9 位会被截断，调用方需保证
+/// 0..=511（主世界 -64..319 相对高度最大 384）。
+pub fn motion_blocking_heightmap(columns: &[i32; 256]) -> Vec<u8> {
     let mut out = Vec::with_capacity(3 + HEIGHTMAP_EMPTY_LONGS * 8);
     write_varint(1, &mut out); // 1 个 heightmap
     write_varint(HEIGHTMAP_MOTION_BLOCKING_ID, &mut out); // MOTION_BLOCKING
@@ -253,14 +254,20 @@ pub fn motion_blocking_heightmap_uniform(height: i32) -> Vec<u8> {
     for li in 0..HEIGHTMAP_EMPTY_LONGS {
         let mut word: u64 = 0;
         for k in 0..per_long {
-            if li * per_long + k >= 256 {
+            let idx = li * per_long + k;
+            if idx >= 256 {
                 break;
             }
-            word |= (height as u64) << (k * bpe);
+            word |= ((columns[idx] as u64) & 0x1ff) << (k * bpe);
         }
         write_i64_be(word as i64, &mut out);
     }
     out
+}
+
+/// 256 列同值的高度图（旧平原测试/兼容入口，内部走 [`motion_blocking_heightmap`]）。
+pub fn motion_blocking_heightmap_uniform(height: i32) -> Vec<u8> {
+    motion_blocking_heightmap(&[height; 256])
 }
 
 /// 最小光照数据（全0+空数组，最小可接受）：4×BitSet空 + Sky/Block数组数0。
@@ -597,6 +604,32 @@ mod tests {
             assert_eq!((last >> (k * 9)) & 0x1ff, 129);
         }
         assert_eq!(last >> 36, 0);
+    }
+    #[test]
+    fn motion_blocking_heightmap_columns_packed() {
+        let mut cols = [0i32; 256];
+        for (i, c) in cols.iter_mut().enumerate() {
+            *c = 80 + (i % 40) as i32; // 80..119，全部在 9 bit 内
+        }
+        let h = motion_blocking_heightmap(&cols);
+        assert_eq!(&h[..3], &[0x01, 0x04, 0x25]);
+        assert_eq!(h.len(), 3 + 37 * 8);
+        for li in 0..37 {
+            let word = u64::from_be_bytes(h[3 + li * 8..3 + li * 8 + 8].try_into().unwrap());
+            for k in 0..7 {
+                let idx = li * 7 + k;
+                if idx >= 256 {
+                    assert_eq!((word >> (k * 9)) & 0x1ff, 0, "padding must be zero");
+                } else {
+                    assert_eq!((word >> (k * 9)) & 0x1ff, cols[idx] as u64, "column {idx}");
+                }
+            }
+        }
+        // 均匀版本仍等价于 256 列同值。
+        assert_eq!(
+            motion_blocking_heightmap_uniform(129),
+            motion_blocking_heightmap(&[129; 256])
+        );
     }
     #[test]
     fn play_unload_chunk_is_packed_long() {

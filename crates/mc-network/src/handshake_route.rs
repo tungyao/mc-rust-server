@@ -35,6 +35,7 @@ pub async fn handle_connection(mut stream: TcpStream, addr: SocketAddr, tx: Send
                 addr,
                 &tx,
                 config.compression_threshold,
+                config.seed,
                 config.play_events.clone(),
             )
             .await?;

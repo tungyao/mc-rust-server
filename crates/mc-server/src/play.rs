@@ -7,6 +7,7 @@ use std::collections::VecDeque;
 use std::net::SocketAddr;
 use tracing::info;
 
+use crate::config::ServerConfig;
 use crate::TickCounter;
 
 /// 初始视距半径（切比雪夫）：`(2*4+1)^2=81` 块，只兼容 26.3 脚手架值。
@@ -41,10 +42,12 @@ pub struct PlayScaffold {
     pub view_center: Option<mc_core::ChunkPos>,
 }
 
-/// 出生点所在区块（视距中心）：`SPAWN_POS(369,67,381)` → chunk `(23,23)`。
+/// 出生点所在区块（视距中心）：x/z 固定 369/381 → chunk `(23,23)`，y 由 WorldGen 决定。
 pub fn spawn_center_chunk() -> mc_core::ChunkPos {
-    let spawn = mc_world::SPAWN_POS;
-    mc_core::ChunkPos(spawn.0.div_euclid(16), spawn.2.div_euclid(16))
+    mc_core::ChunkPos(
+        mc_world::SPAWN_BLOCK_X.div_euclid(16),
+        mc_world::SPAWN_BLOCK_Z.div_euclid(16),
+    )
 }
 
 /// Login 成功队列排空 + 初始视距入队 + 每 tick 限流 1 块（仅编码/log 自检）。
@@ -53,14 +56,16 @@ pub fn spawn_center_chunk() -> mc_core::ChunkPos {
 /// 包 ID 已按P4A对照表核对777。
 /// TODO(P13/socket→ECS)：socket 句柄交接进 ECS 后，在此真写 Join Game / Set Center Chunk /
 /// Chunk Data / Player Position Sync；视距队列按 Player 实体拆分，本处共享队列仅脚手架。
-pub fn login_join_system(mut play: ResMut<PlayScaffold>) {
+pub fn login_join_system(cfg: Res<ServerConfig>, mut play: ResMut<PlayScaffold>) {
+    // 与 net 线程 / ECS 使用同一个 ServerConfig.seed。
+    let world = mc_world::WorldGen::new(cfg.seed);
     // 1) 新登录：逐个触发一次 Join 下发（当前为 log，socket 真发包在 net 线程已做），
     //    并按 spawn 中心 radius=4 触发初始视距（81 块入队）。
     if !play.pending_login.is_empty() {
         let batch = std::mem::take(&mut play.pending_login);
         for addr in batch {
             play.joined += 1;
-            let center = spawn_center_chunk();
+            let center = world.spawn_chunk();
             // SetCenter 编码自检（log 占位，真写待 socket 进 ECS）。
             let mut center_buf = Vec::new();
             mc_protocol::packets::encode_set_center_chunk_packet(
@@ -75,11 +80,12 @@ pub fn login_join_system(mut play: ResMut<PlayScaffold>) {
             debug_assert_eq!(view.len(), VIEW_CHUNK_COUNT);
             play.view_center = Some(center);
             play.pending_chunks.extend(view);
-            let spawn = mc_world::SPAWN_POS;
+            let spawn = world.spawn_pos();
             info!(
-                "ready to join #{} addr={} spawn=({},{},{}) center=({},{}) view_enqueued={} center_bytes={} (join已由net线程enter_play真下发; TODO socket句柄进ECS后在此真写 Join 0x32 + Chunk 0x2E + Position Sync 0x49)",
+                "ready to join #{} addr={} seed={} spawn=({},{},{}) center=({},{}) view_enqueued={} center_bytes={} (join已由net线程enter_play真下发; TODO socket句柄进ECS后在此真写 Join 0x32 + Chunk 0x2E + Position Sync 0x49)",
                 play.joined,
                 addr,
+                cfg.seed,
                 spawn.0,
                 spawn.1,
                 spawn.2,
@@ -90,19 +96,19 @@ pub fn login_join_system(mut play: ResMut<PlayScaffold>) {
             );
         }
     }
-    // 2) 限流下发：每 tick 只发 1 块（防 tick lag），用 chunk_network_bytes 占位组 ChunkData。
+    // 2) 限流下发：每 tick 只发 1 块（防 tick lag），用 WorldGen 真实区块组 ChunkData。
     for _ in 0..CHUNKS_PER_TICK {
         let Some(pos) = play.pending_chunks.pop_front() else {
             break;
         };
-        let chunk = mc_world::chunk_for(pos);
-        let section_bytes = mc_world::chunk_network_bytes(&chunk);
+        let chunk = world.generate(pos);
+        let section_bytes = chunk.network_bytes();
         let data = mc_protocol::packets::PlayChunkData {
             chunk_x: pos.0,
             chunk_z: pos.1,
-            heightmaps_nbt: mc_world::chunk_heightmaps_bytes(),
+            heightmaps_nbt: chunk.heightmaps_bytes(),
             section_bytes,
-            light_bytes: mc_world::chunk_light_bytes(),
+            light_bytes: chunk.light_bytes(),
         };
         let mut buf = Vec::new();
         mc_protocol::packets::encode_play_chunk_data_packet(&data, &mut buf);
@@ -152,6 +158,7 @@ mod tests {
             ..Default::default()
         };
         let mut world = World::new();
+        world.insert_resource(ServerConfig::default());
         world.insert_resource(play);
         let mut sched = Schedule::default();
         sched.add_systems(login_join_system);
@@ -174,13 +181,14 @@ mod tests {
     fn initial_view_is_81_around_spawn_one_per_tick() {
         // 单玩家：spawn 中心 radius=4 共 81 块，每 tick 只发 1 块
         let center = spawn_center_chunk();
-        // 跟随 SPAWN_POS：369>>4=23, 381>>4=23（负坐标用 div_euclid，见 spawn_center_chunk）。
+        // 跟随固定出生 x/z：369>>4=23, 381>>4=23（负坐标用 div_euclid）。
         assert_eq!(center, mc_core::ChunkPos(23, 23));
         let play = PlayScaffold {
             pending_login: vec!["127.0.0.1:20001".parse().unwrap()],
             ..Default::default()
         };
         let mut world = World::new();
+        world.insert_resource(ServerConfig::default());
         world.insert_resource(play);
         let mut sched = Schedule::default();
         sched.add_systems(login_join_system);
@@ -202,6 +210,7 @@ mod tests {
     #[test]
     fn empty_queue_sends_nothing() {
         let mut world = World::new();
+        world.insert_resource(ServerConfig::default());
         world.insert_resource(PlayScaffold::default());
         let mut sched = Schedule::default();
         sched.add_systems(login_join_system);
@@ -213,7 +222,7 @@ mod tests {
     }
     #[test]
     fn scaffold_encode_does_not_panic() {
-        // Join Game + 中心 chunk + 空 chunk + 出生同步 + KeepAlive 全走一遍 encode
+        // Join Game + 中心 chunk + 生成区块 + 出生同步 + KeepAlive 全走一遍 encode
         let login = mc_protocol::packets::LoginPlay::default();
         let mut buf = Vec::new();
         mc_protocol::packets::encode_login_play_packet(&login, &mut buf);
@@ -224,14 +233,14 @@ mod tests {
         mc_protocol::packets::encode_set_center_chunk_packet(&center, &mut buf);
         assert!(!buf.is_empty());
 
-        let chunk = mc_world::chunk_for(mc_core::ChunkPos(0, 0));
-        let section_bytes = mc_world::chunk_network_bytes(&chunk);
+        let gen = mc_world::WorldGen::new(mc_world::DEFAULT_SEED);
+        let chunk = gen.generate(mc_core::ChunkPos(0, 0));
         let data = mc_protocol::packets::PlayChunkData {
             chunk_x: 0,
             chunk_z: 0,
-            heightmaps_nbt: mc_world::chunk_heightmaps_bytes(),
-            section_bytes,
-            light_bytes: mc_world::chunk_light_bytes(),
+            heightmaps_nbt: chunk.heightmaps_bytes(),
+            section_bytes: chunk.network_bytes(),
+            light_bytes: chunk.light_bytes(),
         };
         let mut buf = Vec::new();
         mc_protocol::packets::encode_play_chunk_data_packet(&data, &mut buf);
@@ -245,7 +254,7 @@ mod tests {
         );
         assert!(!buf.is_empty());
 
-        let spawn = mc_world::SPAWN_POS;
+        let spawn = gen.spawn_pos();
         let sync = mc_protocol::packets::PlayerPositionSync {
             teleport_id: 1,
             x: spawn.0 as f64 + 0.5,

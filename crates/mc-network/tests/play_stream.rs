@@ -5,6 +5,7 @@
 use mc_network::{NetConfig, PlayEvent, serve};
 use mc_protocol::packets::{self, Handshake, HandshakeNextState, HANDSHAKE_PACKET_ID};
 use mc_protocol::read_varint;
+use mc_world::{WorldGen, DEFAULT_SEED};
 use std::sync::Arc;
 use std::sync::atomic::AtomicUsize;
 use std::time::Duration;
@@ -13,6 +14,13 @@ use tokio::net::{TcpListener, TcpStream};
 
 const VIEW_SIDE: i32 = 4;
 const INITIAL_JOIN_PACKETS: usize = 4 + 81 + 3; // Login/SetCenter/GameEvent/BatchStart + 81 + Finished/Pos/KeepAlive
+
+#[derive(Debug)]
+struct JoinObservation {
+    center: packets::SetCenterChunk,
+    spawn: packets::PlayerPositionSync,
+    first_chunk: packets::PlayChunkData,
+}
 
 async fn read_varint_async(stream: &mut TcpStream) -> std::io::Result<i32> {
     let mut num = 0i32;
@@ -70,6 +78,14 @@ async fn send_handshake(stream: &mut TcpStream, port: u16, next: HandshakeNextSt
 
 /// 走完 Login + Configuration + 初始 81 块 Join 序列，返回处于 Play 的连接。
 async fn login_and_join(addr: std::net::SocketAddr, name: &str) -> TcpStream {
+    login_and_join_observed(addr, name).await.0
+}
+
+/// 同 [`login_and_join`]，额外抓取 SetCenter/PositionSync/第一块 ChunkData 供 seed 断言。
+async fn login_and_join_observed(
+    addr: std::net::SocketAddr,
+    name: &str,
+) -> (TcpStream, JoinObservation) {
     let mut s = TcpStream::connect(addr).await.unwrap();
     send_handshake(&mut s, addr.port(), HandshakeNextState::Login).await;
 
@@ -102,10 +118,30 @@ async fn login_and_join(addr: std::net::SocketAddr, name: &str) -> TcpStream {
     packets::encode_config_finish_ack_packet(&mut fack);
     s.write_all(&fack).await.unwrap();
 
+    let mut center = None;
+    let mut spawn = None;
+    let mut first_chunk = None;
     for _ in 0..INITIAL_JOIN_PACKETS {
-        read_frame_timeout(&mut s, Duration::from_secs(10)).await.unwrap();
+        let (id, payload) = read_frame_timeout(&mut s, Duration::from_secs(10)).await.unwrap();
+        match id {
+            packets::PLAY_SET_CENTER_CHUNK_ID if center.is_none() => {
+                center = Some(packets::SetCenterChunk::decode_body(&payload).unwrap().0);
+            }
+            packets::PLAY_PLAYER_POSITION_SYNC_ID if spawn.is_none() => {
+                spawn = Some(packets::PlayerPositionSync::decode_body(&payload).unwrap().0);
+            }
+            packets::PLAY_CHUNK_DATA_ID if first_chunk.is_none() => {
+                first_chunk = Some(packets::PlayChunkData::decode_body(&payload).unwrap().0);
+            }
+            _ => {}
+        }
     }
-    s
+    let obs = JoinObservation {
+        center: center.expect("join must send SetCenterChunk"),
+        spawn: spawn.expect("join must send PlayerPositionSync"),
+        first_chunk: first_chunk.expect("join must send ChunkData"),
+    };
+    (s, obs)
 }
 
 async fn send_move(stream: &mut TcpStream, x: f64, z: f64) {
@@ -159,6 +195,31 @@ async fn serve_honors_net_config_compression_threshold() {
     assert_eq!(id, packets::LOGIN_SUCCESS_PACKET_ID);
     let (success, _) = packets::decode_login_success(&payload).unwrap();
     assert_eq!(success.username, "CompressedProbe");
+}
+
+#[tokio::test]
+async fn net_config_seed_drives_spawn_and_chunk_terrain() {
+    let seed = 987654321i64;
+    let config = NetConfig::new(100, "seed".into(), Arc::new(AtomicUsize::new(0))).with_seed(seed);
+    let addr = spawn_server(config).await;
+    let (_s, obs) = login_and_join_observed(addr, "SeedProbe").await;
+    let world = WorldGen::new(seed);
+    let spawn = world.spawn_pos();
+    assert_eq!(obs.spawn.x, spawn.0 as f64 + 0.5, "PositionSync x");
+    assert_eq!(obs.spawn.y, spawn.1 as f64, "PositionSync y must come from WorldGen");
+    assert_eq!(obs.spawn.z, spawn.2 as f64 + 0.5, "PositionSync z");
+    assert_eq!(obs.center.chunk_x, 23);
+    assert_eq!(obs.center.chunk_z, 23);
+    // 中心优先：第一块 ChunkData 就是出生区块，整包内容必须与同 seed WorldGen 一致。
+    assert_eq!(obs.first_chunk.chunk_x, 23);
+    assert_eq!(obs.first_chunk.chunk_z, 23);
+    let expected = world.generate(mc_core::ChunkPos(23, 23));
+    assert_eq!(obs.first_chunk.heightmaps_nbt, expected.heightmaps_bytes());
+    assert_eq!(obs.first_chunk.section_bytes, expected.network_bytes());
+    assert_eq!(obs.first_chunk.light_bytes, expected.light_bytes());
+    // 另一个 seed 的出生 y 必须不同（默认 seed 73 / 987654321 = 83）。
+    let default_spawn = WorldGen::new(DEFAULT_SEED).spawn_pos();
+    assert_ne!(obs.spawn.y, default_spawn.1 as f64);
 }
 
 #[tokio::test]

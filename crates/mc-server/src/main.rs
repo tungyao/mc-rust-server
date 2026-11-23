@@ -29,6 +29,7 @@ fn main() {
     let (play_tx, play_rx) = unbounded::<mc_network::PlayEvent>();
     let net_config = mc_network::NetConfig::new(cfg.max_players, cfg.motd.clone(), Arc::clone(&online.0))
         .with_view_distance(cfg.view_distance)
+        .with_seed(cfg.seed)
         .with_compression_threshold(cfg.compression_threshold)
         .with_play_events(play_tx);
     let (tx, rx) = unbounded::<mc_network::NewConnection>();

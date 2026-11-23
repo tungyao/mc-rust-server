@@ -29,9 +29,10 @@ pub struct Position {
     pub on_ground: bool,
 }
 
-impl Default for Position {
-    fn default() -> Self {
-        let s = mc_world::SPAWN_POS;
+impl Position {
+    /// 按世界 seed 计算出生位置：x/z 固定 369/381，y = 地表上方 1 格。
+    pub fn at_spawn(seed: i64) -> Self {
+        let s = mc_world::WorldGen::new(seed).spawn_pos();
         Self {
             x: s.0 as f64 + 0.5,
             y: s.1 as f64,
@@ -40,6 +41,12 @@ impl Default for Position {
             pitch: 0.0,
             on_ground: false,
         }
+    }
+}
+
+impl Default for Position {
+    fn default() -> Self {
+        Self::at_spawn(mc_world::DEFAULT_SEED)
     }
 }
 

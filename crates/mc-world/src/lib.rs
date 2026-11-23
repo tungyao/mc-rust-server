@@ -2,6 +2,9 @@
 //! 对标 FerrumC world + SteelMC parity 思路
 pub mod load;
 pub mod save;
+pub mod worldgen;
+
+pub use worldgen::{GeneratedChunk, WorldGen, DEFAULT_SEED, MAX_SURFACE_Y, MIN_SURFACE_Y};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SectionKind {
@@ -23,16 +26,18 @@ impl Chunk {
 }
 
 // ---------------------------------------------------------------------------
-// 任务F：空世界 + Play 脚手架常量/函数
-// 只兼容 26.3/777：主世界单一种子，重生点固定，方便客户端进服不掉线。
+// 旧占位世界：Chunk/save/load 兼容 + 早期 Play 脚手架。
+// P14 起 Play 网络路径使用 `worldgen::WorldGen`（seed 驱动、逐列高度）；
+// 本文件的 `chunk_for`/`chunk_*_bytes` 仅保留给存档占位与旧测试。
 // ---------------------------------------------------------------------------
 
 /// 空世界种子占位（P3 接真实存档/配置）。确定性生成依赖它。
-pub const WORLD_SEED: i64 = 123456789;
+pub const WORLD_SEED: i64 = worldgen::DEFAULT_SEED;
 
-/// 重生点（方块坐标）：出生岛中心附近 y=80 安全高度。
-/// P12: 对齐 26.3 原版抓包出生点（chunk 23,23）；join 位置 (369.5,67,381.5)。
-pub const SPAWN_POS: mc_core::BlockPos = mc_core::BlockPos(369, 67, 381);
+/// 出生点 x/z（方块坐标）：保留原版抓包位置 (369,381) → chunk (23,23)。
+/// y 不再写死，由 [`worldgen::WorldGen::spawn_pos`] 按 seed 计算为地表上方 1 格。
+pub const SPAWN_BLOCK_X: i32 = 369;
+pub const SPAWN_BLOCK_Z: i32 = 381;
 
 /// 方块 ID 与 26.3 `reports/blocks.json` 的全局 blockstate ID 对齐：
 /// air=0、stone=1、grass_block（snowy=false）=9、dirt=10。
@@ -66,7 +71,8 @@ pub fn block_at_y(y: i32) -> u16 {
     }
 }
 
-/// 确定性空世界：同一 `pos` 永远返回相同 Chunk。
+/// 旧占位：确定性平面 Chunk（save/load 测试兼容）。Play 网络路径请用
+/// [`worldgen::WorldGen::generate`]。
 /// 按 y 分层填节：整节同值记 Uniform，跨层混合节（48..63 石头+泥土、
 /// 64..79 草+空气）记 Paletted 占位，P3 填真实 paletted 容器。
 /// `empty_flat` 保留，行为不变。

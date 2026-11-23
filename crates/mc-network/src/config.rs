@@ -18,6 +18,8 @@ pub struct NetConfig {
     pub motd: String,
     pub online_count: Arc<AtomicUsize>,
     pub view_distance: i32,
+    /// 世界 seed：决定 terrain/高度图/出生点 y，与 `ServerConfig.seed` 一致。
+    pub seed: i64,
     /// 压缩阈值：-1 禁用；>=0 启用（Login Success 前发 SetCompression）。
     pub compression_threshold: i32,
     /// Play 期事件通道（移动/KeepAlive）→ ECS；None 时只记录日志（单测/旧调用点）。
@@ -31,6 +33,7 @@ impl Default for NetConfig {
             motd: STATUS_MOTD.into(),
             online_count: Arc::new(AtomicUsize::new(0)),
             view_distance: DEFAULT_VIEW_DISTANCE,
+            seed: mc_world::DEFAULT_SEED,
             compression_threshold: DEFAULT_COMPRESSION_THRESHOLD,
             play_events: None,
         }
@@ -46,6 +49,7 @@ impl NetConfig {
             motd,
             online_count,
             view_distance: DEFAULT_VIEW_DISTANCE,
+            seed: mc_world::DEFAULT_SEED,
             compression_threshold: DEFAULT_COMPRESSION_THRESHOLD,
             play_events: None,
         }
@@ -62,6 +66,11 @@ impl NetConfig {
 
     pub fn with_view_distance(mut self, view_distance: i32) -> Self {
         self.view_distance = view_distance;
+        self
+    }
+
+    pub fn with_seed(mut self, seed: i64) -> Self {
+        self.seed = seed;
         self
     }
 
@@ -84,17 +93,22 @@ mod tests {
     fn legacy_new_still_compiles_with_default_view() {
         let cfg = NetConfig::new(42, "x".into(), Arc::new(AtomicUsize::new(0)));
         assert_eq!(cfg.view_distance, DEFAULT_VIEW_DISTANCE);
+        assert_eq!(cfg.seed, mc_world::DEFAULT_SEED);
         assert_eq!(cfg.compression_threshold, DEFAULT_COMPRESSION_THRESHOLD);
         assert!(cfg.play_events.is_none());
         assert_eq!(cfg.max_players, 42);
     }
 
     #[test]
-    fn view_distance_passthrough() {
-        let cfg = NetConfig::new(100, "m".into(), Arc::new(AtomicUsize::new(0))).with_view_distance(12);
+    fn seed_and_view_distance_passthrough() {
+        let cfg = NetConfig::new(100, "m".into(), Arc::new(AtomicUsize::new(0)))
+            .with_view_distance(12)
+            .with_seed(987654321);
         assert_eq!(cfg.view_distance, 12);
+        assert_eq!(cfg.seed, 987654321);
         let full = NetConfig::new_with_view_distance(100, "m".into(), Arc::new(AtomicUsize::new(0)), 6);
         assert_eq!(full.view_distance, 6);
+        assert_eq!(full.seed, mc_world::DEFAULT_SEED);
         assert_eq!(NetConfig::default().view_distance, DEFAULT_VIEW_DISTANCE);
     }
 

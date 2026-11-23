@@ -20,16 +20,21 @@ pub fn tick_system(mut counter: ResMut<TickCounter>) {
 /// 在线数只认这里；Join 真下发在 net 线程 enter_play 已做，ECS 侧 log 见 login_join_system。
 pub fn handle_new_connections(
     mut commands: Commands,
+    cfg: Res<ServerConfig>,
     rx: Res<NetReceiver>,
     online: Res<PlayersOnline>,
     mut play: ResMut<PlayScaffold>,
 ) {
     while let Ok(conn) = rx.0.try_recv() {
         let n = online.0.fetch_add(1, Ordering::SeqCst) + 1;
+        let pos = Position::at_spawn(cfg.seed);
         let ent = commands
-            .spawn((PlayerAddr(conn.0), Position::default(), PlayerKeepAlive::default()))
+            .spawn((PlayerAddr(conn.0), pos, PlayerKeepAlive::default()))
             .id();
-        info!("new connection {} (online={}) entity={ent:?}", conn.0, n);
+        info!(
+            "new connection {} (online={}) entity={ent:?} seed={} spawn_y={:.1}",
+            conn.0, n, cfg.seed, pos.y
+        );
         // TODO(socket→ECS)：NewConnection 仍只带 addr；socket 句柄留在 net 线程，
         // 真下发继续走 enter_play。此处只维护 ECS 侧玩家状态，不动已可运行的发送链路。
         play.pending_login.push(conn.0);
@@ -54,6 +59,9 @@ mod tests {
     fn new_connection_spawns_one_player_entity_and_counts_online_once() {
         let mut world = World::new();
         let (tx, rx) = crossbeam_channel::unbounded();
+        let cfg = ServerConfig { seed: 987654321, ..Default::default() };
+        let expected_y = mc_world::WorldGen::new(cfg.seed).spawn_pos().1 as f64;
+        world.insert_resource(cfg);
         world.insert_resource(NetReceiver(rx));
         world.insert_resource(PlayersOnline::default());
         world.insert_resource(PlayScaffold::default());
@@ -65,10 +73,11 @@ mod tests {
         sched.run(&mut world);
         let online = world.get_resource::<PlayersOnline>().unwrap();
         assert_eq!(online.0.load(Ordering::SeqCst), 1, "one NewConnection must count once");
-        let mut q = world.query::<(Entity, &PlayerAddr)>();
+        let mut q = world.query::<(Entity, &PlayerAddr, &Position)>();
         let players: Vec<_> = q.iter(&world).collect();
         assert_eq!(players.len(), 1, "one ECS player entity");
         assert_eq!(players[0].1.0, addr);
+        assert_eq!(players[0].2.y, expected_y, "ECS Position.y must use ServerConfig.seed");
         let play = world.get_resource::<PlayScaffold>().unwrap();
         assert_eq!(play.pending_login.len(), 1);
         assert_eq!(play.pending_login[0], addr);
