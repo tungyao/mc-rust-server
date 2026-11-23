@@ -64,7 +64,8 @@ async fn spawn_server_with(
     Arc<AtomicUsize>,
 ) {
     let online = Arc::new(AtomicUsize::new(0));
-    let config = NetConfig::new(max_players, motd.to_string(), Arc::clone(&online));
+    let config = NetConfig::new(max_players, motd.to_string(), Arc::clone(&online))
+        .with_view_distance(4);
     let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
     let addr = listener.local_addr().unwrap();
     let (tx, rx) = crossbeam_channel::unbounded();

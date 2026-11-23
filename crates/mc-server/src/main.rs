@@ -27,11 +27,21 @@ fn main() {
     let bind = cfg.bind.clone();
     let online = PlayersOnline::default();
     let (play_tx, play_rx) = unbounded::<mc_network::PlayEvent>();
+    // 多连接共享同一份已编码 ChunkData 缓存（seed 必须与 cfg.seed 一致）。
+    let chunk_cache = Arc::new(mc_network::ChunkCache::new(
+        cfg.seed,
+        mc_network::DEFAULT_CHUNK_CACHE_CAPACITY,
+    ));
     let net_config = mc_network::NetConfig::new(cfg.max_players, cfg.motd.clone(), Arc::clone(&online.0))
         .with_view_distance(cfg.view_distance)
         .with_seed(cfg.seed)
         .with_compression_threshold(cfg.compression_threshold)
-        .with_play_events(play_tx);
+        .with_play_events(play_tx)
+        .with_chunk_cache(chunk_cache);
+    info!(
+        "config view_distance={} effective_view_radius={} seed={} compression_threshold={}",
+        cfg.view_distance, cfg.effective_view_distance(), cfg.seed, cfg.compression_threshold
+    );
     let (tx, rx) = unbounded::<mc_network::NewConnection>();
     let mut app = App::new();
     app.insert_resource(cfg);
@@ -41,6 +51,7 @@ fn main() {
     app.insert_resource(PlayEventReceiver(play_rx));
     app.insert_resource(play::PlayScaffold::default());
     app.insert_resource(movement::MovementQueue::default());
+    app.insert_resource(movement::PendingPlayerRemoval::default());
     app.add_systems(Startup, systems::startup_system);
     app.add_systems(
         Update,
@@ -52,6 +63,8 @@ fn main() {
             movement::movement_system,
             play::keepalive_system,
             movement::keepalive_timeout_system,
+            // 唯一删除点：Disconnect 与 timeout 都在这里去重后 despawn + online 饱和减。
+            movement::player_removal_system,
         )
             .chain(),
     );

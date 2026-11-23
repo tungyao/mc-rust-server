@@ -1,7 +1,8 @@
 //! Play 期真实端口集成测试：
 //! 1) C2S 移动包经 crossbeam channel 到达 ECS 事件通道（PlayEvent::Movement/KeepAlive）；
-//! 2) 玩家跨区块时 net 线程发 SetCenterChunk + 卸载 9 块 + 补发 9 块，
-//!    ChunkBatchStart/Finished 成对且 batch_size 正确，不重复发送。
+//! 2) 玩家跨区块时 net 线程发 SetCenterChunk + 卸载边界列 + 补发边界列，
+//!    ChunkBatchStart/Finished 成对且 batch_size 正确，不重复发送；
+//! 3) view_distance 真正驱动初始块数 / LoginPlay 字段 / 跨区块 add-remove 数量。
 use mc_network::{NetConfig, PlayEvent, serve};
 use mc_protocol::packets::{self, Handshake, HandshakeNextState, HANDSHAKE_PACKET_ID};
 use mc_protocol::read_varint;
@@ -13,13 +14,15 @@ use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::{TcpListener, TcpStream};
 
 const VIEW_SIDE: i32 = 4;
-const INITIAL_JOIN_PACKETS: usize = 4 + 81 + 3; // Login/SetCenter/GameEvent/BatchStart + 81 + Finished/Pos/KeepAlive
 
 #[derive(Debug)]
 struct JoinObservation {
+    login: packets::LoginPlay,
     center: packets::SetCenterChunk,
     spawn: packets::PlayerPositionSync,
     first_chunk: packets::PlayChunkData,
+    chunk_count: usize,
+    batch_size: i32,
 }
 
 async fn read_varint_async(stream: &mut TcpStream) -> std::io::Result<i32> {
@@ -76,15 +79,16 @@ async fn send_handshake(stream: &mut TcpStream, port: u16, next: HandshakeNextSt
     stream.write_all(&framed).await.unwrap();
 }
 
-/// 走完 Login + Configuration + 初始 81 块 Join 序列，返回处于 Play 的连接。
-async fn login_and_join(addr: std::net::SocketAddr, name: &str) -> TcpStream {
-    login_and_join_observed(addr, name).await.0
+/// 走完 Login + Configuration + 初始 `(2r+1)^2` 块 Join 序列，返回处于 Play 的连接。
+async fn login_and_join(addr: std::net::SocketAddr, name: &str, radius: i32) -> TcpStream {
+    login_and_join_observed(addr, name, radius).await.0
 }
 
-/// 同 [`login_and_join`]，额外抓取 SetCenter/PositionSync/第一块 ChunkData 供 seed 断言。
+/// 同 [`login_and_join`]，额外抓取 LoginPlay/SetCenter/PositionSync/第一块 ChunkData。
 async fn login_and_join_observed(
     addr: std::net::SocketAddr,
     name: &str,
+    radius: i32,
 ) -> (TcpStream, JoinObservation) {
     let mut s = TcpStream::connect(addr).await.unwrap();
     send_handshake(&mut s, addr.port(), HandshakeNextState::Login).await;
@@ -118,28 +122,45 @@ async fn login_and_join_observed(
     packets::encode_config_finish_ack_packet(&mut fack);
     s.write_all(&fack).await.unwrap();
 
+    let mut login = None;
     let mut center = None;
     let mut spawn = None;
     let mut first_chunk = None;
-    for _ in 0..INITIAL_JOIN_PACKETS {
+    let mut chunk_count = 0usize;
+    let mut batch_size = None;
+    let expected_chunks = mc_network::view_chunk_count(radius);
+    let total = 4 + expected_chunks + 3;
+    for _ in 0..total {
         let (id, payload) = read_frame_timeout(&mut s, Duration::from_secs(10)).await.unwrap();
         match id {
+            packets::PLAY_LOGIN_PLAY_ID if login.is_none() => {
+                login = Some(packets::LoginPlay::decode_body(&payload).unwrap().0);
+            }
             packets::PLAY_SET_CENTER_CHUNK_ID if center.is_none() => {
                 center = Some(packets::SetCenterChunk::decode_body(&payload).unwrap().0);
             }
             packets::PLAY_PLAYER_POSITION_SYNC_ID if spawn.is_none() => {
                 spawn = Some(packets::PlayerPositionSync::decode_body(&payload).unwrap().0);
             }
-            packets::PLAY_CHUNK_DATA_ID if first_chunk.is_none() => {
-                first_chunk = Some(packets::PlayChunkData::decode_body(&payload).unwrap().0);
+            packets::PLAY_CHUNK_DATA_ID => {
+                chunk_count += 1;
+                if first_chunk.is_none() {
+                    first_chunk = Some(packets::PlayChunkData::decode_body(&payload).unwrap().0);
+                }
+            }
+            packets::PLAY_CHUNK_BATCH_FINISHED_ID if batch_size.is_none() => {
+                batch_size = Some(read_varint(&payload).unwrap().0);
             }
             _ => {}
         }
     }
     let obs = JoinObservation {
+        login: login.expect("join must send LoginPlay"),
         center: center.expect("join must send SetCenterChunk"),
         spawn: spawn.expect("join must send PlayerPositionSync"),
         first_chunk: first_chunk.expect("join must send ChunkData"),
+        chunk_count,
+        batch_size: batch_size.expect("join must send ChunkBatchFinished"),
     };
     (s, obs)
 }
@@ -170,7 +191,8 @@ async fn next_event(rx: &crossbeam_channel::Receiver<PlayEvent>) -> PlayEvent {
 async fn serve_honors_net_config_compression_threshold() {
     use mc_network::framing::decode_compressed_frame;
     let config = NetConfig::new(100, "compressed".into(), Arc::new(AtomicUsize::new(0)))
-        .with_compression_threshold(64);
+        .with_compression_threshold(64)
+        .with_view_distance(4);
     let addr = spawn_server(config).await;
     let mut s = TcpStream::connect(addr).await.unwrap();
     send_handshake(&mut s, addr.port(), HandshakeNextState::Login).await;
@@ -200,9 +222,11 @@ async fn serve_honors_net_config_compression_threshold() {
 #[tokio::test]
 async fn net_config_seed_drives_spawn_and_chunk_terrain() {
     let seed = 987654321i64;
-    let config = NetConfig::new(100, "seed".into(), Arc::new(AtomicUsize::new(0))).with_seed(seed);
+    let config = NetConfig::new(100, "seed".into(), Arc::new(AtomicUsize::new(0)))
+        .with_seed(seed)
+        .with_view_distance(4);
     let addr = spawn_server(config).await;
-    let (_s, obs) = login_and_join_observed(addr, "SeedProbe").await;
+    let (_s, obs) = login_and_join_observed(addr, "SeedProbe", 4).await;
     let world = WorldGen::new(seed);
     let spawn = world.spawn_pos();
     assert_eq!(obs.spawn.x, spawn.0 as f64 + 0.5, "PositionSync x");
@@ -226,40 +250,101 @@ async fn net_config_seed_drives_spawn_and_chunk_terrain() {
 async fn movement_and_keepalive_packets_reach_play_event_channel() {
     let (tx, rx) = crossbeam_channel::unbounded::<PlayEvent>();
     let config = NetConfig::new(100, "events".into(), Arc::new(AtomicUsize::new(0)))
-        .with_play_events(tx);
+        .with_play_events(tx)
+        .with_view_distance(4);
     let addr = spawn_server(config).await;
-    let mut s = login_and_join(addr, "EventProbe").await;
+    let mut s = login_and_join(addr, "EventProbe", 4).await;
 
     // 出生区块内的移动：只转发事件，不触发动态区块补发。
     send_move(&mut s, 369.5, 381.5).await;
     match next_event(&rx).await {
-        PlayEvent::Movement { movement, .. } => match movement {
-            packets::C2SMovement::Pos(p) => {
-                assert_eq!((p.x, p.y, p.z), (369.5, 65.0, 381.5));
-                assert!(p.on_ground);
+        PlayEvent::Movement { conn_id, movement, .. } => {
+            assert!(conn_id > 0, "conn_id must be assigned at accept");
+            match movement {
+                packets::C2SMovement::Pos(p) => {
+                    assert_eq!((p.x, p.y, p.z), (369.5, 65.0, 381.5));
+                    assert!(p.on_ground);
+                }
+                other => panic!("expected Pos movement, got {other:?}"),
             }
-            other => panic!("expected Pos movement, got {other:?}"),
-        },
+        }
         other => panic!("expected movement event, got {other:?}"),
     }
 
-    // KeepAlive 回显 → ECS 事件（online 递减仍只在 ECS timeout 系统）。
+    // KeepAlive 回显 → ECS 事件（online 递减仍只在 ECS 唯一删除点）。
     let mut body = Vec::new();
     packets::KeepAliveC2S(1).encode_body(&mut body);
     mc_network::framing::write_packet(&mut s, packets::PLAY_KEEPALIVE_C2S_ID, &body)
         .await
         .unwrap();
     match next_event(&rx).await {
-        PlayEvent::KeepAlive { addr: ev_addr } => assert_eq!(ev_addr, s.local_addr().unwrap()),
+        PlayEvent::KeepAlive { addr: ev_addr, conn_id } => {
+            assert_eq!(ev_addr, s.local_addr().unwrap());
+            assert!(conn_id > 0);
+        }
         other => panic!("expected keepalive event, got {other:?}"),
     }
 }
 
 #[tokio::test]
-async fn crossing_chunk_streams_exact_add_unload_batch_without_duplicates() {
-    let config = NetConfig::new(100, "chunks".into(), Arc::new(AtomicUsize::new(0)));
+async fn view_distance_two_streams_25_chunks_and_5_crossing() {
+    let config = NetConfig::new(100, "radius2".into(), Arc::new(AtomicUsize::new(0)))
+        .with_view_distance(2);
     let addr = spawn_server(config).await;
-    let mut s = login_and_join(addr, "ChunkWalker").await;
+    let (mut s, obs) = login_and_join_observed(addr, "RadiusTwo", 2).await;
+
+    // 初始 25 块 + LoginPlay 下发 view_distance=2 / simulation_distance=2。
+    assert_eq!(obs.chunk_count, 25, "radius=2 must send (2*2+1)^2=25 chunks");
+    assert_eq!(obs.batch_size, 25, "initial batch_size must equal chunk count");
+    assert_eq!(obs.login.view_distance, 2, "LoginPlay view_distance must match effective radius");
+    assert_eq!(obs.login.simulation_distance, 2, "simulation_distance must not stay at 10");
+    assert_eq!(obs.login.seed, DEFAULT_SEED);
+
+    // 出生点 x=369.5 → chunk 23；走到 x=384.5 → chunk 24（跨一格区块边界）。
+    send_move(&mut s, 384.5, 381.5).await;
+
+    // SetCenterChunk(24,23) → 卸载西侧 5 块 → 一批补发东侧 5 块。
+    let (id, payload) = read_frame_timeout(&mut s, Duration::from_secs(5)).await.unwrap();
+    assert_eq!(id, packets::PLAY_SET_CENTER_CHUNK_ID);
+    let (center, _) = packets::SetCenterChunk::decode_body(&payload).unwrap();
+    assert_eq!(center, packets::SetCenterChunk { chunk_x: 24, chunk_z: 23 });
+
+    let mut unloaded = Vec::new();
+    for _ in 0..(2 * 2 + 1) {
+        let (id, payload) = read_frame_timeout(&mut s, Duration::from_secs(5)).await.unwrap();
+        assert_eq!(id, packets::PLAY_UNLOAD_CHUNK_ID, "expected unload before new batch");
+        let (u, _) = packets::UnloadChunk::decode_body(&payload).unwrap();
+        unloaded.push((u.chunk_x, u.chunk_z));
+    }
+    unloaded.sort();
+    let expected_unload: Vec<(i32, i32)> = (21..=25).map(|z| (21, z)).collect();
+    assert_eq!(unloaded, expected_unload);
+
+    let (id, _) = read_frame_timeout(&mut s, Duration::from_secs(5)).await.unwrap();
+    assert_eq!(id, packets::PLAY_CHUNK_BATCH_START_ID);
+    let mut loaded = Vec::new();
+    for _ in 0..(2 * 2 + 1) {
+        let (id, payload) = read_frame_timeout(&mut s, Duration::from_secs(5)).await.unwrap();
+        assert_eq!(id, packets::PLAY_CHUNK_DATA_ID);
+        let (chunk, used) = packets::PlayChunkData::decode_body(&payload).unwrap();
+        assert_eq!(used, payload.len(), "chunk body must be fully consumed");
+        loaded.push((chunk.chunk_x, chunk.chunk_z));
+    }
+    loaded.sort();
+    let expected_load: Vec<(i32, i32)> = (21..=25).map(|z| (26, z)).collect();
+    assert_eq!(loaded, expected_load);
+
+    let (id, payload) = read_frame_timeout(&mut s, Duration::from_secs(5)).await.unwrap();
+    assert_eq!(id, packets::PLAY_CHUNK_BATCH_FINISHED_ID);
+    assert_eq!(read_varint(&payload).unwrap().0, 5, "crossing batch_size must be 5");
+}
+
+#[tokio::test]
+async fn crossing_chunk_streams_exact_add_unload_batch_without_duplicates() {
+    let config = NetConfig::new(100, "chunks".into(), Arc::new(AtomicUsize::new(0)))
+        .with_view_distance(VIEW_SIDE);
+    let addr = spawn_server(config).await;
+    let mut s = login_and_join(addr, "ChunkWalker", VIEW_SIDE).await;
 
     // 出生点 x=369.5 → chunk 23；走到 x=384.5 → chunk 24（跨 1 格区块边界）。
     send_move(&mut s, 384.5, 381.5).await;

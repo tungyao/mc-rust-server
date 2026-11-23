@@ -1,7 +1,7 @@
 //! handshake_route: 首包Handshake + 777校验 + 分流 Status/Login
 use super::config::NetConfig;
 use super::framing::{read_packet, to_io_invalid};
-use super::login_route::handle_login_configured;
+use super::login_route::{handle_login_with_options, PlayOptions};
 use super::status_route::handle_status;
 use super::NewConnection;
 use crossbeam_channel::Sender;
@@ -12,7 +12,14 @@ use tokio::net::TcpStream;
 use tracing::{debug, warn};
 
 /// 首包必须是 Handshake 0x00；只认 26.3/777；Status用&mut，Login拿走所有权。
-pub async fn handle_connection(mut stream: TcpStream, addr: SocketAddr, tx: Sender<NewConnection>, config: NetConfig) -> io::Result<()> {
+/// `conn_id` 来自 accept，作为 ECS 实体键一路透传到 PlayEvent。
+pub async fn handle_connection(
+    mut stream: TcpStream,
+    addr: SocketAddr,
+    conn_id: u64,
+    tx: Sender<NewConnection>,
+    config: NetConfig,
+) -> io::Result<()> {
     let (packet_id, payload) = read_packet(&mut stream).await?;
     if packet_id != HANDSHAKE_PACKET_ID {
         warn!("{addr} expected handshake 0x00, got {packet_id:#04x}, disconnect");
@@ -29,16 +36,17 @@ pub async fn handle_connection(mut stream: TcpStream, addr: SocketAddr, tx: Send
             handle_status(&mut stream, addr, &config).await?;
         }
         HandshakeNextState::Login => {
-            debug!("{addr} login handshake (server={}:{})", hs.server_address, hs.server_port);
-            handle_login_configured(
-                stream,
-                addr,
-                &tx,
-                config.compression_threshold,
-                config.seed,
-                config.play_events.clone(),
-            )
-            .await?;
+            debug!("{addr} conn_id={conn_id} login handshake (server={}:{})", hs.server_address, hs.server_port);
+            let opts = PlayOptions {
+                threshold: config.compression_threshold,
+                seed: config.seed,
+                // 唯一有效视距计算：与 LoginPlay/初始区块流/ECS 自检一致。
+                view_radius: config.effective_view_radius(),
+                conn_id,
+                events: config.play_events.clone(),
+                chunk_cache: config.chunk_cache.clone(),
+            };
+            handle_login_with_options(stream, addr, &tx, opts).await?;
         }
     }
     Ok(())

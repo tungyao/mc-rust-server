@@ -46,6 +46,11 @@ pub enum ConfigError {
 }
 
 impl ServerConfig {
+    /// 实际生效的视距半径：`view_distance` clamp 到 2..=10（与 net 线程/LoginPlay 一致）。
+    pub fn effective_view_distance(&self) -> i32 {
+        mc_network::clamp_view_radius(self.view_distance)
+    }
+
     /// 读档或建档：文件存在则解析（旧文件缺新键时按 Default 补齐）；
     /// 缺文件则写一份默认 server.toml 再返回默认；解析失败返回 Err，由 main 回退默认+warn。
     pub fn load_or_create(path: impl AsRef<Path>) -> Result<Self, ConfigError> {
@@ -115,6 +120,18 @@ mod tests {
         assert_eq!(cfg.compression_threshold, -1, "old toml must keep old plain-frame behavior");
         assert_eq!(cfg.max_players, 7);
         let _ = std::fs::remove_file(&p);
+    }
+
+    #[test]
+    fn effective_view_distance_clamps_2_to_10() {
+        let mk = |v| ServerConfig { view_distance: v, ..Default::default() }.effective_view_distance();
+        assert_eq!(mk(-1), 2);
+        assert_eq!(mk(1), 2);
+        assert_eq!(mk(2), 2);
+        assert_eq!(mk(4), 4);
+        assert_eq!(mk(10), 10);
+        assert_eq!(mk(11), 10);
+        assert_eq!(mk(i32::MAX), 10);
     }
 
     #[test]

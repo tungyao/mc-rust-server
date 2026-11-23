@@ -57,7 +57,7 @@ async fn spawn_server() -> (
     let addr = listener.local_addr().unwrap();
     let (tx, rx) = crossbeam_channel::unbounded();
     tokio::spawn(async move {
-        let _ = serve(listener, tx, NetConfig::default()).await;
+        let _ = serve(listener, tx, NetConfig::default().with_view_distance(4)).await;
     });
     (addr, rx)
 }
@@ -125,7 +125,8 @@ async fn login_offline_full_flow() {
     })
     .await
     .expect("login success must push NewConnection");
-    assert_eq!(conn.0.ip(), std::net::IpAddr::from([127, 0, 0, 1]));
+    assert_eq!(conn.addr.ip(), std::net::IpAddr::from([127, 0, 0, 1]));
+    assert!(conn.conn_id > 0, "accept must assign a connection id");
 
     // enter_play 真下发：Join 序列 = Login/SetCenter/GameEvent/BatchStart +
     // 81 个 ChunkData/BatchFinished/Position/KeepAlive。

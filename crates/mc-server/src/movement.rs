@@ -3,6 +3,7 @@
 //! Position字段与C2S移动包（`packets::play_sync::MovePlayer*`）对齐：
 //! x/y/z/yaw/pitch/on_ground。
 use bevy_ecs::prelude::*;
+use std::collections::HashMap;
 use std::net::SocketAddr;
 use std::sync::atomic::Ordering;
 use std::time::{Duration, Instant};
@@ -63,9 +64,36 @@ impl Default for PlayerKeepAlive {
     }
 }
 
-/// 网络连接地址 → ECS 玩家实体的映射键（net 线程只带 addr 投递事件）。
+/// 网络连接地址 → 日志用（net 线程投递事件时携带）。
 #[derive(Component, Debug, Clone, Copy, PartialEq, Eq)]
 pub struct PlayerAddr(pub SocketAddr);
+
+/// accept 时分配的单连接身份（跨事件实体键）：同一 addr 快速重连时，
+/// 旧连接的迟到 Disconnect 只匹配旧 conn_id，不会误删新实体。
+#[derive(Component, Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct PlayerConnId(pub u64);
+
+/// 待删除玩家（conn_id 去重）：Disconnect 与 15s timeout 都只登记，不直接减 online；
+/// 由唯一的 [`player_removal_system`] 找到实体后 despawn + 饱和减 1。
+/// 未找到实体的 conn_id 会保留少量 tick 重试，覆盖 NewConnection/Disconnect 跨 channel
+/// 观察顺序的极窄竞态；conn_id 永不复用，迟到的旧 Disconnect 不会影响新连接。
+#[derive(Resource, Default, Debug)]
+pub struct PendingPlayerRemoval {
+    queue: HashMap<u64, u8>,
+}
+
+/// 未找到实体时最多重试的 tick 数（50ms/tick → 约 1s）。
+pub const REMOVAL_RETRY_TICKS: u8 = 20;
+
+impl PendingPlayerRemoval {
+    pub fn push(&mut self, conn_id: u64) {
+        self.queue.entry(conn_id).or_insert(0);
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.queue.is_empty()
+    }
+}
 
 /// Tick待应用的移动更新（net线程经channel投递后压入这里，P5a先由测试/占位压入）。
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -111,24 +139,27 @@ impl From<mc_protocol::packets::C2SMovement> for MovementUpdate {
 pub struct MovementQueue(pub Vec<(Entity, MovementUpdate)>);
 
 /// 排空 net 线程投递的 Play 事件（IO-free）：
-/// - Movement：addr → Entity，转换 `MovementUpdate` 后压入 MovementQueue（下个 system 应用）；
-/// - KeepAlive：刷新 PlayerKeepAlive.last_seen（在线数仍只在 timeout 系统减）。
+/// - Movement：conn_id → Entity，转换 `MovementUpdate` 后压入 MovementQueue（下个 system 应用）；
+/// - KeepAlive：刷新 PlayerKeepAlive.last_seen（在线数仍只在唯一删除点减）；
+/// - Disconnect：把 conn_id 登记到 `PendingPlayerRemoval`，由 [`player_removal_system`]
+///   立即 despawn 并减 online（与 15s timeout 去重）。
 pub fn movement_ingest_system(
     events: Res<PlayEventReceiver>,
     mut queue: ResMut<MovementQueue>,
-    addr_query: Query<(Entity, &PlayerAddr)>,
+    mut pending: ResMut<PendingPlayerRemoval>,
+    conn_query: Query<(Entity, &PlayerConnId)>,
     mut keepalive_query: Query<&mut PlayerKeepAlive>,
 ) {
     if events.0.is_empty() {
         return;
     }
-    let mut by_addr = std::collections::HashMap::new();
-    for (ent, addr) in addr_query.iter() {
-        by_addr.insert(addr.0, ent);
+    let mut by_conn: HashMap<u64, Entity> = HashMap::new();
+    for (ent, conn) in conn_query.iter() {
+        by_conn.insert(conn.0, ent);
     }
     while let Ok(ev) = events.0.try_recv() {
         match ev {
-            mc_network::PlayEvent::Movement { addr, movement } => match by_addr.get(&addr) {
+            mc_network::PlayEvent::Movement { addr, conn_id, movement } => match by_conn.get(&conn_id) {
                 Some(&ent) => {
                     queue.0.push((ent, MovementUpdate::from(movement)));
                     // 移动包同样证明连接存活：26.3 客户端即使站立也约 1s 发一次，
@@ -138,16 +169,25 @@ pub fn movement_ingest_system(
                         ka.last_seen = Instant::now();
                     }
                 }
-                None => debug!("movement from unknown addr {addr} ignored"),
+                None => debug!("movement from unknown conn_id={conn_id} addr={addr} ignored"),
             },
-            mc_network::PlayEvent::KeepAlive { addr } => match by_addr.get(&addr) {
+            mc_network::PlayEvent::KeepAlive { addr, conn_id } => match by_conn.get(&conn_id) {
                 Some(&ent) => {
                     if let Ok(mut ka) = keepalive_query.get_mut(ent) {
                         ka.last_seen = Instant::now();
                     }
                 }
-                None => debug!("keepalive from unknown addr {addr} ignored"),
+                None => debug!("keepalive from unknown conn_id={conn_id} addr={addr} ignored"),
             },
+            mc_network::PlayEvent::Disconnect { addr, conn_id } => {
+                // 不论当前是否已 spawn（跨 channel 观察顺序），都登记；conn_id 唯一且不复用。
+                if by_conn.contains_key(&conn_id) {
+                    info!("disconnect addr={addr} conn_id={conn_id} -> queue ECS removal");
+                } else {
+                    info!("disconnect addr={addr} conn_id={conn_id} (entity not visible yet, queue retry)");
+                }
+                pending.push(conn_id);
+            }
         }
     }
 }
@@ -249,22 +289,62 @@ pub fn movement_system(mut queue: ResMut<MovementQueue>, mut query: Query<&mut P
     }
 }
 
-/// KeepAlive超时踢出：last_seen超过15s即despawn并减online计数（饱和减防underflow）。
+/// KeepAlive超时：last_seen超过15s即登记删除（不自减 online）。
+/// 与 Disconnect 共用 [`player_removal_system`] 的唯一删除点，同一 conn_id 只减一次。
 pub fn keepalive_timeout_system(
-    mut commands: Commands,
-    online: Res<PlayersOnline>,
-    query: Query<(Entity, &PlayerKeepAlive)>,
+    mut pending: ResMut<PendingPlayerRemoval>,
+    query: Query<(Entity, &PlayerKeepAlive, &PlayerConnId)>,
 ) {
     let now = Instant::now();
-    for (ent, ka) in query.iter() {
+    for (ent, ka, conn) in query.iter() {
         if now.duration_since(ka.last_seen) > KEEPALIVE_TIMEOUT {
-            info!("keepalive timeout >15s, despawn {ent:?}");
-            commands.entity(ent).despawn();
-            let n = online.0.load(Ordering::SeqCst);
-            if n > 0 {
-                online.0.fetch_sub(1, Ordering::SeqCst);
+            info!("keepalive timeout >15s, queue removal conn_id={} entity={ent:?}", conn.0);
+            pending.push(conn.0);
+        }
+    }
+}
+
+/// 唯一删除点：按 conn_id 找实体 → despawn；online 按本 tick 实际删除数饱和递减。
+/// 未找到的 conn_id 保留 `REMOVAL_RETRY_TICKS` 次重试，避免 NewConnection 尚未 spawn
+/// 时 Disconnect 被吞；conn_id 不复用，因此旧连接的迟到事件不会影响新实体。
+pub fn player_removal_system(
+    mut commands: Commands,
+    online: Res<PlayersOnline>,
+    mut pending: ResMut<PendingPlayerRemoval>,
+    query: Query<(Entity, &PlayerConnId)>,
+) {
+    if pending.is_empty() {
+        return;
+    }
+    let by_conn: HashMap<u64, Entity> = query.iter().map(|(ent, conn)| (conn.0, ent)).collect();
+    let mut retry = HashMap::new();
+    let mut removed = 0usize;
+    let old = std::mem::take(&mut pending.queue);
+    for (conn_id, attempts) in old {
+        match by_conn.get(&conn_id) {
+            Some(&ent) => {
+                info!("despawn player conn_id={conn_id} entity={ent:?} (disconnect/timeout)");
+                commands.entity(ent).despawn();
+                removed += 1;
+            }
+            None if attempts < REMOVAL_RETRY_TICKS => {
+                retry.insert(conn_id, attempts + 1);
+            }
+            None => debug!("removal for unknown conn_id={conn_id} dropped after retries"),
+        }
+    }
+    pending.queue = retry;
+    if removed > 0 {
+        // 饱和减：online 永不 underflow（仅本系统写 online 的递减侧）。
+        let mut current = online.0.load(Ordering::SeqCst);
+        loop {
+            let next = current.saturating_sub(removed);
+            match online.0.compare_exchange(current, next, Ordering::SeqCst, Ordering::SeqCst) {
+                Ok(_) => break,
+                Err(actual) => current = actual,
             }
         }
+        info!("player removal complete removed={removed} online={}", online.0.load(Ordering::SeqCst));
     }
 }
 
@@ -273,15 +353,41 @@ mod tests {
     use super::*;
     use std::sync::Arc;
 
-    fn spawn_player(world: &mut World, pos: Position, last_seen: Instant) -> Entity {
-        world.spawn((pos, PlayerKeepAlive { last_seen })).id()
+    fn spawn_player(world: &mut World, pos: Position, last_seen: Instant, conn_id: u64) -> Entity {
+        world
+            .spawn((pos, PlayerKeepAlive { last_seen }, PlayerConnId(conn_id)))
+            .id()
+    }
+
+    fn player_schedule() -> Schedule {
+        use bevy_ecs::schedule::IntoSystemConfigs;
+        let mut sched = Schedule::default();
+        sched.add_systems(
+            (
+                movement_ingest_system,
+                movement_system,
+                keepalive_timeout_system,
+                player_removal_system,
+            )
+                .chain(),
+        );
+        sched
+    }
+
+    fn online_value(world: &World) -> usize {
+        world
+            .get_resource::<PlayersOnline>()
+            .unwrap()
+            .0
+            .load(Ordering::SeqCst)
     }
 
     #[test]
     fn tick_applies_queued_movement() {
         let mut world = World::new();
         world.insert_resource(MovementQueue::default());
-        let ent = spawn_player(&mut world, Position::default(), Instant::now());
+        world.insert_resource(PendingPlayerRemoval::default());
+        let ent = spawn_player(&mut world, Position::default(), Instant::now(), 1);
         world
             .get_resource_mut::<MovementQueue>()
             .unwrap()
@@ -308,7 +414,8 @@ mod tests {
     fn out_of_bounds_and_speed_only_log_not_kick() {
         let mut world = World::new();
         world.insert_resource(MovementQueue::default());
-        let ent = spawn_player(&mut world, Position::default(), Instant::now());
+        world.insert_resource(PendingPlayerRemoval::default());
+        let ent = spawn_player(&mut world, Position::default(), Instant::now(), 1);
         world
             .get_resource_mut::<MovementQueue>()
             .unwrap()
@@ -343,29 +450,136 @@ mod tests {
     #[test]
     fn keepalive_timeout_despawns_and_decrements_online() {
         let mut world = World::new();
-        let online = PlayersOnline(Arc::new(std::sync::atomic::AtomicUsize::new(1)));
-        world.insert_resource(online);
+        world.insert_resource(PlayersOnline(Arc::new(std::sync::atomic::AtomicUsize::new(1))));
+        world.insert_resource(PendingPlayerRemoval::default());
         let old = spawn_player(
             &mut world,
             Position::default(),
             Instant::now() - Duration::from_secs(16),
+            1,
         );
-        let fresh = spawn_player(&mut world, Position::default(), Instant::now());
+        let fresh = spawn_player(&mut world, Position::default(), Instant::now(), 2);
         let mut sched = Schedule::default();
-        sched.add_systems(keepalive_timeout_system);
+        sched.add_systems((keepalive_timeout_system, player_removal_system).chain());
         sched.run(&mut world);
         assert!(world.get_entity(old).is_none(), "timed out entity must be despawned");
         assert!(world.get_entity(fresh).is_some(), "fresh entity stays");
-        assert_eq!(
-            world.get_resource::<PlayersOnline>().unwrap().0.load(Ordering::SeqCst),
-            0
-        );
+        assert_eq!(online_value(&world), 0);
         // 再跑一次不underflow
         sched.run(&mut world);
-        assert_eq!(
-            world.get_resource::<PlayersOnline>().unwrap().0.load(Ordering::SeqCst),
-            0
+        assert_eq!(online_value(&world), 0);
+    }
+
+    #[test]
+    fn disconnect_then_timeout_decrements_online_once() {
+        let addr: SocketAddr = "127.0.0.1:41001".parse().unwrap();
+        let conn_id = 7;
+        let mut world = World::new();
+        world.insert_resource(PlayersOnline(Arc::new(std::sync::atomic::AtomicUsize::new(1))));
+        world.insert_resource(MovementQueue::default());
+        world.insert_resource(PendingPlayerRemoval::default());
+        let (tx, rx) = crossbeam_channel::unbounded();
+        world.insert_resource(PlayEventReceiver(rx));
+        // 故意让 last_seen 也超时：同一 tick 里 Disconnect 与 timeout 都会登记，
+        // 唯一删除点必须去重，online 只减 1 次。
+        let ent = spawn_player(
+            &mut world,
+            Position::default(),
+            Instant::now() - Duration::from_secs(16),
+            conn_id,
         );
+        tx.send(mc_network::PlayEvent::Disconnect { addr, conn_id }).unwrap();
+        let mut sched = player_schedule();
+        sched.run(&mut world);
+        assert!(world.get_entity(ent).is_none(), "Disconnect must despawn immediately");
+        assert_eq!(online_value(&world), 0, "online must decrement exactly once");
+        assert!(world.get_resource::<PendingPlayerRemoval>().unwrap().is_empty());
+        // 迟到的重复 Disconnect：实体已不在，只能重试几次，绝不再次减 online。
+        tx.send(mc_network::PlayEvent::Disconnect { addr, conn_id }).unwrap();
+        sched.run(&mut world);
+        assert_eq!(online_value(&world), 0, "late duplicate Disconnect must not decrement again");
+        for _ in 0..=(REMOVAL_RETRY_TICKS + 2) {
+            sched.run(&mut world);
+        }
+        assert_eq!(online_value(&world), 0, "retries must never underflow online");
+    }
+
+    #[test]
+    fn timeout_then_late_disconnect_decrements_online_once() {
+        let addr: SocketAddr = "127.0.0.1:41002".parse().unwrap();
+        let conn_id = 8;
+        let mut world = World::new();
+        world.insert_resource(PlayersOnline(Arc::new(std::sync::atomic::AtomicUsize::new(1))));
+        world.insert_resource(MovementQueue::default());
+        world.insert_resource(PendingPlayerRemoval::default());
+        let (tx, rx) = crossbeam_channel::unbounded();
+        world.insert_resource(PlayEventReceiver(rx));
+        let ent = spawn_player(
+            &mut world,
+            Position::default(),
+            Instant::now() - Duration::from_secs(16),
+            conn_id,
+        );
+        let mut sched = player_schedule();
+        // 先由 timeout 删除（无 Disconnect 事件）。
+        sched.run(&mut world);
+        assert!(world.get_entity(ent).is_none());
+        assert_eq!(online_value(&world), 0);
+        // 随后旧连接的迟到 Disconnect 到达：实体已不存在，不允许再减。
+        tx.send(mc_network::PlayEvent::Disconnect { addr, conn_id }).unwrap();
+        for _ in 0..=(REMOVAL_RETRY_TICKS + 2) {
+            sched.run(&mut world);
+        }
+        assert_eq!(online_value(&world), 0, "late Disconnect after timeout must not underflow");
+    }
+
+    #[test]
+    fn duplicate_disconnects_for_same_conn_id_are_idempotent() {
+        let addr: SocketAddr = "127.0.0.1:41003".parse().unwrap();
+        let conn_id = 9;
+        let mut world = World::new();
+        world.insert_resource(PlayersOnline(Arc::new(std::sync::atomic::AtomicUsize::new(1))));
+        world.insert_resource(MovementQueue::default());
+        world.insert_resource(PendingPlayerRemoval::default());
+        let (tx, rx) = crossbeam_channel::unbounded();
+        world.insert_resource(PlayEventReceiver(rx));
+        let ent = spawn_player(&mut world, Position::default(), Instant::now(), conn_id);
+        tx.send(mc_network::PlayEvent::Disconnect { addr, conn_id }).unwrap();
+        tx.send(mc_network::PlayEvent::Disconnect { addr, conn_id }).unwrap();
+        let mut sched = player_schedule();
+        sched.run(&mut world);
+        assert!(world.get_entity(ent).is_none());
+        assert_eq!(online_value(&world), 0, "duplicate events in one tick decrement once");
+    }
+
+    #[test]
+    fn disconnect_for_old_conn_id_does_not_remove_reconnected_entity() {
+        // 同一 addr 快速重连：旧连接 conn_id=1 的迟到 Disconnect 不能删掉新实体 conn_id=2。
+        let addr: SocketAddr = "127.0.0.1:41004".parse().unwrap();
+        let mut world = World::new();
+        world.insert_resource(PlayersOnline(Arc::new(std::sync::atomic::AtomicUsize::new(1))));
+        world.insert_resource(MovementQueue::default());
+        world.insert_resource(PendingPlayerRemoval::default());
+        let (tx, rx) = crossbeam_channel::unbounded();
+        world.insert_resource(PlayEventReceiver(rx));
+        let new_ent = world
+            .spawn((
+                PlayerAddr(addr),
+                PlayerConnId(2),
+                Position::default(),
+                PlayerKeepAlive::default(),
+            ))
+            .id();
+        tx.send(mc_network::PlayEvent::Disconnect { addr, conn_id: 1 }).unwrap();
+        let mut sched = player_schedule();
+        sched.run(&mut world);
+        assert!(world.get_entity(new_ent).is_some(), "old conn_id must not kill the new entity");
+        assert_eq!(online_value(&world), 1, "old Disconnect must not change online for new entity");
+        // 新连接自己的 Disconnect 才删除它，并只减一次。
+        tx.send(mc_network::PlayEvent::Disconnect { addr, conn_id: 2 }).unwrap();
+        sched.run(&mut world);
+        assert!(world.get_entity(new_ent).is_none());
+        assert_eq!(online_value(&world), 0);
     }
 
     #[test]
@@ -390,16 +604,21 @@ mod tests {
 
     #[test]
     fn play_event_movement_reaches_queue_and_updates_position() {
-        use bevy_ecs::schedule::IntoSystemConfigs;
         let addr: SocketAddr = "127.0.0.1:40000".parse().unwrap();
+        let conn_id = 42;
         let mut world = World::new();
-        let online = PlayersOnline(Arc::new(std::sync::atomic::AtomicUsize::new(1)));
-        world.insert_resource(online);
+        world.insert_resource(PlayersOnline(Arc::new(std::sync::atomic::AtomicUsize::new(1))));
         world.insert_resource(MovementQueue::default());
+        world.insert_resource(PendingPlayerRemoval::default());
         let (tx, rx) = crossbeam_channel::unbounded();
         world.insert_resource(PlayEventReceiver(rx));
         let ent = world
-            .spawn((PlayerAddr(addr), Position::default(), PlayerKeepAlive::default()))
+            .spawn((
+                PlayerAddr(addr),
+                PlayerConnId(conn_id),
+                Position::default(),
+                PlayerKeepAlive::default(),
+            ))
             .id();
         // 先只发移动包：它也必须刷新 last_seen（26.3 站立时也约 1s 一包），
         // 否则 15s KeepAlive 周期与 15s 超时会在临界点误踢。
@@ -407,6 +626,7 @@ mod tests {
             Instant::now() - Duration::from_secs(16);
         tx.send(mc_network::PlayEvent::Movement {
             addr,
+            conn_id,
             movement: mc_protocol::packets::C2SMovement::Pos(
                 mc_protocol::packets::MovePlayerPos {
                     x: 384.5,
@@ -418,44 +638,42 @@ mod tests {
             ),
         })
         .unwrap();
-        let mut sched = Schedule::default();
-        sched.add_systems((movement_ingest_system, movement_system, keepalive_timeout_system).chain());
+        let mut sched = player_schedule();
         sched.run(&mut world);
         let pos = world.get::<Position>(ent).unwrap();
         assert_eq!((pos.x, pos.y, pos.z), (384.5, 65.0, 381.5));
         assert!(pos.on_ground);
         assert!(world.get_resource::<MovementQueue>().unwrap().0.is_empty());
         assert!(world.get_entity(ent).is_some(), "movement event must refresh last_seen");
-        assert_eq!(
-            world.get_resource::<PlayersOnline>().unwrap().0.load(Ordering::SeqCst),
-            1,
-            "movement/keepalive events must not change online count"
-        );
+        assert_eq!(online_value(&world), 1, "movement/keepalive events must not change online count");
         // 再验证 KeepAlive 回显同样刷新；两条路径都不重复减 online。
         world.get_mut::<PlayerKeepAlive>(ent).unwrap().last_seen =
             Instant::now() - Duration::from_secs(16);
-        tx.send(mc_network::PlayEvent::KeepAlive { addr }).unwrap();
+        tx.send(mc_network::PlayEvent::KeepAlive { addr, conn_id }).unwrap();
         sched.run(&mut world);
         assert!(world.get_entity(ent).is_some(), "keepalive event must refresh last_seen");
-        assert_eq!(
-            world.get_resource::<PlayersOnline>().unwrap().0.load(Ordering::SeqCst),
-            1
-        );
+        assert_eq!(online_value(&world), 1);
     }
 
     #[test]
-    fn play_event_from_unknown_addr_is_ignored() {
+    fn play_event_from_unknown_conn_id_is_ignored() {
         let mut world = World::new();
         world.insert_resource(MovementQueue::default());
+        world.insert_resource(PendingPlayerRemoval::default());
         let (tx, rx) = crossbeam_channel::unbounded();
         world.insert_resource(PlayEventReceiver(rx));
         let known: SocketAddr = "127.0.0.1:40001".parse().unwrap();
-        let unknown: SocketAddr = "127.0.0.1:40002".parse().unwrap();
         let ent = world
-            .spawn((PlayerAddr(known), Position::default(), PlayerKeepAlive::default()))
+            .spawn((
+                PlayerAddr(known),
+                PlayerConnId(1),
+                Position::default(),
+                PlayerKeepAlive::default(),
+            ))
             .id();
         tx.send(mc_network::PlayEvent::Movement {
-            addr: unknown,
+            addr: "127.0.0.1:40002".parse().unwrap(),
+            conn_id: 2,
             movement: mc_protocol::packets::C2SMovement::Flags(
                 mc_protocol::packets::MovePlayerFlags { on_ground: true, horizontal_collision: false },
             ),
