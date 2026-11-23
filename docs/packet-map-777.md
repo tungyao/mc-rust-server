@@ -69,6 +69,13 @@
 
 26.1 侧证（[`26.1/protocol.json`](https://raw.githubusercontent.com/PrismarineJS/minecraft-data/master/data/pc/26.1/protocol.json)）：`keep_alive CB 0x2C / map_chunk 0x2D / login 0x31 / position 0x48 / update_view_position(SetCenter) 0x5E / keep_alive SB 0x1C`。777 相对 26.1 整体 +1（SetCenter 因中间插入包变为 `0x60`），说明现用值连 26.1 也对不上，是更老版本残留。
 
+> 勘误（P13）：`0x26 forget_level_chunk` 的包体在 26.3 是 **单个 packed i64 ChunkPos**
+> （`x & 0xffffffff | ((z & 0xffffffff) << 32)` 的 big-endian Long），不是旧版
+> `Chunk X Int + Chunk Z Int`。依据：26.3.jar
+> `ClientboundForgetLevelChunkPacket` 调 `FriendlyByteBuf.writeChunkPos`，
+> 后者写 `ChunkPos.pack()` 的 Long（`javap -c` 反编译确认）。P13 真机曾因 x/z
+> 交换误卸玩家脚下方块导致掉穿世界，修正后走 250+ 格 `y=65` 稳定。
+
 ## 5. 结论（给 P4b 的改单，不在本文件改代码）
 
 - 对（11 个）：Handshake `0x00`；Status 4 个（`0x00/0x00/0x01/0x01`）；Login 6 个（Start `0x00` / EncReq `0x01` / EncResp `0x01` / Success `0x02` / Ack `0x03` / SetCompression `0x03`）。不动。
