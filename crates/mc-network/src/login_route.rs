@@ -377,6 +377,8 @@ fn play_chunk_body(
 
 /// 发一批 ChunkData：ChunkBatchStart → N×ChunkData → ChunkBatchFinished(batch_size=N)。
 /// 空批次不发（客户端 ChunkBatchSizeCalculator 只接受正 batch_size）。
+/// 命中共享缓存时用 `ChunkCache::bodies` 并行生成缺失区块（初始 441 块的主要开销），
+/// 无缓存旧入口仍逐个生成。
 async fn send_chunk_batch(
     stream: &mut TcpStream,
     world: &WorldGen,
@@ -387,9 +389,12 @@ async fn send_chunk_batch(
     if add.is_empty() {
         return Ok(());
     }
+    let bodies: Vec<Arc<Vec<u8>>> = match cache {
+        Some(cache) => cache.bodies(add),
+        None => add.iter().map(|&pos| play_chunk_body(world, pos, None)).collect(),
+    };
     write_packet_any(stream, packets::PLAY_CHUNK_BATCH_START_ID, &[], threshold).await?;
-    for pos in add {
-        let body = play_chunk_body(world, *pos, cache);
+    for body in &bodies {
         write_packet_any(stream, packets::PLAY_CHUNK_DATA_ID, body.as_slice(), threshold).await?;
     }
     let mut body = Vec::new();

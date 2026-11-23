@@ -1,0 +1,657 @@
+//! worldgen 单测：水/沙岸/出生点/树/biome/洞穴/矿/编码。
+use super::*;
+use mc_protocol::packets::{
+    motion_blocking_heightmap, PlayChunkData, BEACH_BIOME_ID_777, FOREST_BIOME_ID_777,
+    OCEAN_BIOME_ID_777, PLAINS_BIOME_ID_777,
+};
+use std::collections::HashMap;
+
+const WATER_SEED: i64 = -987654321;
+
+fn block_at(g: &GeneratedChunk, lx: i32, y: i32, lz: i32) -> u16 {
+    let section = ((y - MIN_Y) >> 4) as usize;
+    let local_y = ((y - MIN_Y) & 15) as usize;
+    g.sections[section][local_y * 256 + lz as usize * 16 + lx as usize]
+}
+
+fn find_column<F: Fn(i32) -> bool>(g: &GeneratedChunk, pred: F) -> Option<(i32, i32)> {
+    for lz in 0..16 {
+        for lx in 0..16 {
+            let h = g.heights[(lz * 16 + lx) as usize];
+            if pred(h) {
+                return Some((lx, lz));
+            }
+        }
+    }
+    None
+}
+
+fn find_chunk_with_water(gen: &WorldGen, radius: i32) -> GeneratedChunk {
+    let center = gen.spawn_chunk();
+    for dx in -radius..=radius {
+        for dz in -radius..=radius {
+            let g = gen.generate(ChunkPos(center.0 + dx, center.1 + dz));
+            if g.heights.iter().any(|&h| h < SEA_LEVEL) {
+                return g;
+            }
+        }
+    }
+    panic!("no chunk with water within radius {radius} of spawn");
+}
+
+/// 逐 section 解析 network_bytes（paletted container 自定界），用于核对计数/biome。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct SectionInfo {
+    block_count: u16,
+    fluid_count: u16,
+    biome: i32,
+}
+
+fn read_varint_at(buf: &[u8], off: &mut usize) -> i32 {
+    let (v, n) = mc_protocol::read_varint(&buf[*off..]).unwrap();
+    *off += n;
+    v
+}
+
+fn parse_sections(bytes: &[u8]) -> Vec<SectionInfo> {
+    let mut out = Vec::with_capacity(SECTION_COUNT);
+    let mut off = 0usize;
+    for _ in 0..SECTION_COUNT {
+        let block_count = u16::from_be_bytes([bytes[off], bytes[off + 1]]);
+        let fluid_count = u16::from_be_bytes([bytes[off + 2], bytes[off + 3]]);
+        off += 4;
+        let bpe = bytes[off];
+        off += 1;
+        if bpe == 0 {
+            read_varint_at(bytes, &mut off);
+        } else {
+            if bpe < 15 {
+                let palette_len = read_varint_at(bytes, &mut off);
+                for _ in 0..palette_len {
+                    read_varint_at(bytes, &mut off);
+                }
+            }
+            let per_long = 64 / bpe as usize;
+            let longs = SECTION_VOLUME.div_ceil(per_long);
+            off += longs * 8;
+        }
+        let biome_bpe = bytes[off];
+        assert_eq!(biome_bpe, 0, "biome is single-valued per section");
+        off += 1;
+        let biome = read_varint_at(bytes, &mut off);
+        out.push(SectionInfo { block_count, fluid_count, biome });
+    }
+    assert_eq!(off, bytes.len(), "section parser must consume the whole Data field");
+    out
+}
+
+#[test]
+fn same_seed_same_chunk_is_identical() {
+    let gen = WorldGen::new(DEFAULT_SEED);
+    let a = gen.generate(ChunkPos(23, 23));
+    let b = gen.generate(ChunkPos(23, 23));
+    assert_eq!(a.heights, b.heights);
+    assert_eq!(a.motion_heights, b.motion_heights);
+    assert_eq!(a.biome_id, b.biome_id);
+    assert_eq!(a.sections, b.sections);
+    // 跨实例同 seed 也一致。
+    let c = WorldGen::new(DEFAULT_SEED).generate(ChunkPos(23, 23));
+    assert_eq!(a.sections, c.sections);
+    assert_eq!(a.motion_heights, c.motion_heights);
+    assert_eq!(a.biome_id, c.biome_id);
+}
+
+#[test]
+fn different_seed_changes_terrain() {
+    let a = WorldGen::new(DEFAULT_SEED);
+    let b = WorldGen::new(42);
+    let mut diff = 0;
+    for x in (320..=420).step_by(4) {
+        for z in (330..=430).step_by(4) {
+            if a.height_at(x, z) != b.height_at(x, z) {
+                diff += 1;
+            }
+        }
+    }
+    assert!(diff > 20, "different seeds must produce visibly different terrain, diff={diff}");
+    let g1 = a.generate(ChunkPos(23, 23));
+    let g2 = b.generate(ChunkPos(23, 23));
+    assert_ne!(g1.heights, g2.heights);
+    assert_ne!(g1.sections, g2.sections);
+}
+
+#[test]
+fn heights_are_bounded_and_adjacent_difference_is_small() {
+    let gen = WorldGen::new(987654321);
+    let mut prev_row = vec![0i32; 97];
+    for z in -48..=48 {
+        let mut row = Vec::with_capacity(97);
+        for x in -48..=48 {
+            let h = gen.height_at(x, z);
+            assert!((MIN_SURFACE_Y..=MAX_SURFACE_Y).contains(&h), "height {h} at {x},{z}");
+            row.push(h);
+        }
+        for pair in row.windows(2) {
+            assert!(
+                (pair[0] - pair[1]).abs() <= 3,
+                "adjacent columns differ too much: {pair:?}"
+            );
+        }
+        if z > -48 {
+            for (x, (&h, &prev)) in row.iter().zip(prev_row.iter()).enumerate() {
+                assert!(
+                    (h - prev).abs() <= 3,
+                    "z-adjacent columns differ too much at x={}: {h} vs {prev}",
+                    x as i32 - 48
+                );
+            }
+        }
+        prev_row = row;
+    }
+}
+
+#[test]
+fn spawn_protection_is_smooth_for_known_seeds() {
+    // 出生点半径 16 的抬升不能造成 1 格墙：4 个 seed 的相邻高度差仍 ≤3。
+    for seed in [DEFAULT_SEED, 987654321, 42, -987654321] {
+        let gen = WorldGen::new(seed);
+        let mut prev_row: Vec<i32> = Vec::new();
+        for z in 365..=397 {
+            let mut row = Vec::with_capacity(33);
+            for x in 353..=385 {
+                let h = gen.height_at(x, z);
+                assert!((MIN_SURFACE_Y..=MAX_SURFACE_Y).contains(&h), "seed {seed} h={h} at {x},{z}");
+                row.push(h);
+            }
+            for pair in row.windows(2) {
+                assert!(
+                    (pair[0] - pair[1]).abs() <= 3,
+                    "seed {seed}: adjacent columns differ too much: {pair:?}"
+                );
+            }
+            if !prev_row.is_empty() {
+                for (x, (&h, &prev)) in row.iter().zip(prev_row.iter()).enumerate() {
+                    assert!(
+                        (h - prev).abs() <= 3,
+                        "seed {seed}: z-adjacent columns differ too much at x={}: {h} vs {prev}",
+                        x as i32 + 353
+                    );
+                }
+            }
+            prev_row = row;
+        }
+    }
+}
+
+#[test]
+fn chunk_boundaries_and_generated_heights_are_continuous() {
+    let gen = WorldGen::new(DEFAULT_SEED);
+    let west = gen.generate(ChunkPos(0, 0));
+    let east = gen.generate(ChunkPos(1, 0));
+    for lz in 0..16 {
+        for lx in 0..16 {
+            let wx = lx;
+            let wz = lz;
+            assert_eq!(west.heights[(lz * 16 + lx) as usize], gen.height_at(wx, wz));
+            assert_eq!(
+                east.heights[(lz * 16 + lx) as usize],
+                gen.height_at(16 + lx, wz),
+                "generated height must match height_at in next chunk"
+            );
+        }
+        // 跨 chunk 边界的相邻列（世界 x=15/16）。
+        let a = gen.height_at(15, lz);
+        let b = gen.height_at(16, lz);
+        assert!((a - b).abs() <= 3, "chunk boundary step {a}->{b} at z={lz}");
+    }
+}
+
+#[test]
+fn spawn_is_dry_grass_and_clear_for_known_seeds() {
+    for seed in [DEFAULT_SEED, 987654321, 42, -987654321] {
+        let gen = WorldGen::new(seed);
+        let spawn = gen.spawn_pos();
+        assert_eq!((spawn.0, spawn.2), (SPAWN_BLOCK_X, SPAWN_BLOCK_Z), "seed {seed}");
+        assert!(spawn.1 > SEA_LEVEL + 1, "seed {seed}: spawn y={} must be > {}", spawn.1, SEA_LEVEL + 1);
+        assert_eq!(spawn.1, gen.height_at(SPAWN_BLOCK_X, SPAWN_BLOCK_Z) + 1);
+        assert_eq!(gen.spawn_chunk(), ChunkPos(23, 23));
+        let g = gen.generate(gen.spawn_chunk());
+        let mut chunks: HashMap<ChunkPos, GeneratedChunk> = HashMap::new();
+        chunks.insert(g.pos, g);
+        for dz in -1..=1 {
+            for dx in -1..=1 {
+                let wx = SPAWN_BLOCK_X + dx;
+                let wz = SPAWN_BLOCK_Z + dz;
+                let h = gen.height_at(wx, wz);
+                assert!(h >= SEA_LEVEL + 2, "seed {seed}: spawn 3x3 surface {h} at {wx},{wz}");
+                let pos = ChunkPos(wx.div_euclid(16), wz.div_euclid(16));
+                let g = chunks.entry(pos).or_insert_with(|| gen.generate(pos));
+                let lx = wx - pos.0 * 16;
+                let lz = wz - pos.1 * 16;
+                assert_eq!(g.heights[(lz * 16 + lx) as usize], h);
+                assert_eq!(block_at(g, lx, h, lz), GRASS_BLOCK_ID, "seed {seed}: spawn feet must be grass");
+                // 3x3 内没有水。
+                for y in (h + 1)..=(SEA_LEVEL + 4) {
+                    assert_ne!(block_at(g, lx, y, lz), WATER_BLOCK_ID, "seed {seed}: water at spawn 3x3");
+                }
+            }
+        }
+        // 出生点 4 格内不长树：任何高于地表的列都没有 log/leaves。
+        for dz in -4..=4 {
+            for dx in -4..=4 {
+                let wx = SPAWN_BLOCK_X + dx;
+                let wz = SPAWN_BLOCK_Z + dz;
+                let pos = ChunkPos(wx.div_euclid(16), wz.div_euclid(16));
+                let g = chunks.entry(pos).or_insert_with(|| gen.generate(pos));
+                let lx = wx - pos.0 * 16;
+                let lz = wz - pos.1 * 16;
+                let h = g.heights[(lz * 16 + lx) as usize];
+                for y in (h + 1)..=(h + 10) {
+                    let b = block_at(g, lx, y, lz);
+                    assert!(
+                        b != OAK_LOG_BLOCK_ID && b != OAK_LEAVES_BLOCK_ID,
+                        "seed {seed}: tree within 4 of spawn at {wx},{y},{wz}"
+                    );
+                }
+            }
+        }
+        // 出生点脚下方块是草，头顶是空气，且没有洞穴贴脸。
+        let lx = SPAWN_BLOCK_X - 23 * 16;
+        let lz = SPAWN_BLOCK_Z - 23 * 16;
+        let g = chunks.get(&ChunkPos(23, 23)).unwrap();
+        assert_eq!(block_at(g, lx, spawn.1 - 1, lz), GRASS_BLOCK_ID);
+        assert_eq!(block_at(g, lx, spawn.1, lz), AIR_BLOCK_ID);
+    }
+}
+
+#[test]
+fn layers_are_grass_dirt_stone_and_air_in_spawn_column() {
+    let gen = WorldGen::new(DEFAULT_SEED);
+    let g = gen.generate(ChunkPos(23, 23));
+    let spawn = gen.spawn_pos();
+    let lx = SPAWN_BLOCK_X - 23 * 16;
+    let lz = SPAWN_BLOCK_Z - 23 * 16;
+    let h = g.heights[(lz * 16 + lx) as usize];
+    assert_eq!(h, spawn.1 - 1);
+    assert!(h > SEA_LEVEL + 2);
+    assert_eq!(block_at(&g, lx, h, lz), GRASS_BLOCK_ID);
+    for d in 1..=3 {
+        assert_eq!(block_at(&g, lx, h - d, lz), DIRT_BLOCK_ID, "dirt layer {d}");
+    }
+    assert_eq!(block_at(&g, lx, h - 4, lz), STONE_BLOCK_ID, "stone below dirt");
+    assert_eq!(block_at(&g, lx, h + 1, lz), AIR_BLOCK_ID, "air above grass");
+    assert_eq!(block_at(&g, lx, MIN_Y, lz), STONE_BLOCK_ID, "bedrock-ish floor is stone");
+}
+
+#[test]
+fn sandy_and_underwater_columns_use_sand_and_water() {
+    let gen = WorldGen::new(WATER_SEED);
+    let g = find_chunk_with_water(&gen, 8);
+    let (lx, lz) = find_column(&g, |h| h < SEA_LEVEL).expect("water column");
+    let h = g.heights[(lz * 16 + lx) as usize];
+    assert!(h <= SEA_LEVEL + 2);
+    // 顶层 4 格全是沙。
+    for d in 0..=3 {
+        assert_eq!(
+            block_at(&g, lx, h - d, lz),
+            SAND_BLOCK_ID,
+            "sand layer {d} at h={h}"
+        );
+    }
+    assert_eq!(block_at(&g, lx, h - 4, lz), STONE_BLOCK_ID, "stone below sand");
+    // 水面到 SEA_LEVEL，水下没有空气缺口。
+    for y in (h + 1)..=SEA_LEVEL {
+        assert_eq!(block_at(&g, lx, y, lz), WATER_BLOCK_ID, "water at y={y}");
+    }
+    assert_eq!(block_at(&g, lx, SEA_LEVEL + 1, lz), AIR_BLOCK_ID, "air above sea");
+    // 靠岸的沙柱（h 在 SEA_LEVEL+1..=SEA_LEVEL+2）顶层也是沙。
+    if let Some((sx, sz)) = find_column(&g, |h| (SEA_LEVEL + 1..=SEA_LEVEL + 2).contains(&h)) {
+        let h = g.heights[(sz * 16 + sx) as usize];
+        assert_eq!(block_at(&g, sx, h, sz), SAND_BLOCK_ID, "beach top is sand");
+        assert_eq!(block_at(&g, sx, h - 1, sz), SAND_BLOCK_ID);
+    }
+}
+
+#[test]
+fn heightmap_and_light_follow_actual_columns() {
+    let gen = WorldGen::new(WATER_SEED);
+    let g = find_chunk_with_water(&gen, 8);
+    // 逐列扫描最高非空气方块（土/沙/石/水/log/leaves 都算 MOTION_BLOCKING）。
+    for lz in 0..16 {
+        for lx in 0..16 {
+            let h = g.heights[(lz * 16 + lx) as usize];
+            let mut top = MIN_Y - 1;
+            for y in MIN_Y..=(MAX_SURFACE_Y + 16) {
+                if block_at(&g, lx, y, lz) != AIR_BLOCK_ID {
+                    top = y;
+                }
+            }
+            let idx = (lz * 16 + lx) as usize;
+            assert_eq!(g.motion_heights[idx], top + 1 - MIN_Y, "motion height at lx={lx} lz={lz}");
+            assert!(g.motion_heights[idx] >= h + 1 - MIN_Y);
+        }
+    }
+    assert_eq!(
+        g.heightmaps_bytes(),
+        motion_blocking_heightmap(&g.motion_heights)
+    );
+    // 水面列：MOTION_BLOCKING = SEA_LEVEL+1-MIN_Y。
+    let (wx, wz) = find_column(&g, |h| h < SEA_LEVEL).unwrap();
+    assert_eq!(g.motion_heights[(wz * 16 + wx) as usize], SEA_LEVEL + 1 - MIN_Y);
+    // 天空光仍从最低地表 section 向上。
+    let min_h = *g.heights.iter().min().unwrap();
+    let first_lit = ((min_h - MIN_Y) / 16) as u32;
+    let mask = ((1u64 << SECTION_COUNT) - 1) & !((1u64 << first_lit) - 1);
+    let mut expected = Vec::new();
+    mc_protocol::packets::encode_sky_light_data(mask, 15, &mut expected);
+    assert_eq!(g.light_bytes(), expected);
+    assert!(g.light_bytes().len() > 6, "water column chunk must carry sky light arrays");
+    assert!(!g.network_bytes().is_empty());
+}
+
+#[test]
+fn tree_columns_have_logs_on_grass_and_leaves_above_surface() {
+    let gen = WorldGen::new(DEFAULT_SEED);
+    let center = gen.spawn_chunk();
+    let mut trees = 0;
+    for dx in -4..=4 {
+        for dz in -4..=4 {
+            let g = gen.generate(ChunkPos(center.0 + dx, center.1 + dz));
+            for lz in 0..16 {
+                for lx in 0..16 {
+                    let column = (lz * 16 + lx) as usize;
+                    let h = g.heights[column];
+                    if block_at(&g, lx, h + 1, lz) != OAK_LOG_BLOCK_ID {
+                        continue;
+                    }
+                    trees += 1;
+                    // 树干连续，底部站在草方块上，不悬空、不穿水。
+                    let mut trunk_top = h + 1;
+                    while block_at(&g, lx, trunk_top + 1, lz) == OAK_LOG_BLOCK_ID {
+                        trunk_top += 1;
+                    }
+                    for y in (h + 1)..=trunk_top {
+                        assert_eq!(block_at(&g, lx, y, lz), OAK_LOG_BLOCK_ID, "continuous trunk at y={y}");
+                    }
+                    assert!((4..=6).contains(&(trunk_top - h)), "trunk height {}", trunk_top - h);
+                    assert_eq!(block_at(&g, lx, h, lz), GRASS_BLOCK_ID, "trunk must stand on grass");
+                    // 树冠在树干顶部上方，树顶高于地表。
+                    assert_eq!(block_at(&g, lx, trunk_top + 1, lz), OAK_LEAVES_BLOCK_ID, "canopy cross above trunk");
+                    let mut top = trunk_top;
+                    for y in (trunk_top + 1)..=(MAX_SURFACE_Y + 8) {
+                        if block_at(&g, lx, y, lz) != AIR_BLOCK_ID {
+                            top = y;
+                        }
+                    }
+                    assert!(top > h + 1, "tree top must be above the surface");
+                    assert_eq!(g.motion_heights[column], top + 1 - MIN_Y);
+                }
+            }
+        }
+    }
+    assert!(trees > 20, "expected many oak trees near spawn, found {trees}");
+}
+
+#[test]
+fn tree_canopy_is_continuous_across_chunk_boundary() {
+    let gen = WorldGen::new(DEFAULT_SEED);
+    let pos = gen.spawn_chunk();
+    let base_x = pos.0 * 16;
+    let base_z = pos.1 * 16;
+    // 找一棵树冠跨东边界的树（origin x 在 chunk 末 2..=5 列内）。
+    let mut found = None;
+    'outer: for wx in (base_x + 12)..=(base_x + 17) {
+        for wz in (base_z + 1)..=(base_z + 14) {
+            let h = gen.height_at(wx, wz);
+            let slope_ok = (gen.height_at(wx - 1, wz) - h).abs() <= 1
+                && (gen.height_at(wx + 1, wz) - h).abs() <= 1
+                && (gen.height_at(wx, wz - 1) - h).abs() <= 1
+                && (gen.height_at(wx, wz + 1) - h).abs() <= 1;
+            if let Some(t) = gen.tree_for(wx, wz, h, slope_ok, gen.biome_at(wx, wz)) {
+                if t.x + 2 > base_x + 15 {
+                    found = Some(t);
+                    break 'outer;
+                }
+            }
+        }
+    }
+    let tree = found.expect("expected a boundary-crossing oak near spawn");
+    let east = ChunkPos(pos.0 + 1, pos.1);
+    let west = gen.generate(pos);
+    let east_chunk = gen.generate(east);
+    // 枚举树的所有方块，按世界坐标找到所属 chunk，验证两侧都已写入。
+    let mut outside = 0;
+    let mut check = |wx: i32, y: i32, wz: i32, want: &[u16]| {
+        let owner = ChunkPos(wx.div_euclid(16), wz.div_euclid(16));
+        let g = if owner == pos {
+            &west
+        } else {
+            assert_eq!(owner, east, "tree must not span more than two chunks here");
+            &east_chunk
+        };
+        if owner != pos {
+            outside += 1;
+        }
+        let got = block_at(g, wx - owner.0 * 16, y, wz - owner.1 * 16);
+        assert!(want.contains(&got), "tree block {wx},{y},{wz} is {got}, want {want:?}");
+    };
+    let top = tree.top_y();
+    for y in (tree.ground_y + 1)..=top {
+        check(tree.x, y, tree.z, &[OAK_LOG_BLOCK_ID]);
+    }
+    for dy in -2i32..=1 {
+        let y = top + dy;
+        for dx in -2i32..=2 {
+            for dz in -2i32..=2 {
+                let shape = match dy {
+                    -2 | -1 => !(dx.abs() == 2 && dz.abs() == 2),
+                    0 => dx.abs() <= 1 && dz.abs() <= 1,
+                    _ => dx.abs() + dz.abs() <= 1,
+                };
+                if shape {
+                    check(
+                        tree.x + dx,
+                        y,
+                        tree.z + dz,
+                        &[OAK_LEAVES_BLOCK_ID, OAK_LOG_BLOCK_ID],
+                    );
+                }
+            }
+        }
+    }
+    assert!(outside > 0, "expected canopy blocks in the neighbouring chunk");
+}
+
+#[test]
+fn caves_and_ores_exist_underground_but_keep_surface_shell() {
+    let gen = WorldGen::new(DEFAULT_SEED);
+    let center = gen.spawn_chunk();
+    let mut cave = 0usize;
+    let mut coal = 0usize;
+    let mut iron = 0usize;
+    for dx in -1..=1 {
+        for dz in -1..=1 {
+            let g = gen.generate(ChunkPos(center.0 + dx, center.1 + dz));
+            for lz in 0..16 {
+                for lx in 0..16 {
+                    let h = g.heights[(lz * 16 + lx) as usize];
+                    // 地表 8 格壳（h-7..=h）不被洞穴破坏。
+                    for y in (h - 7)..=h {
+                        assert_ne!(block_at(&g, lx, y, lz), AIR_BLOCK_ID, "cave broke surface shell at {lx},{y},{lz}");
+                    }
+                    for y in (MIN_Y + 9)..=(h - 9) {
+                        match block_at(&g, lx, y, lz) {
+                            AIR_BLOCK_ID => cave += 1,
+                            COAL_ORE_BLOCK_ID => {
+                                coal += 1;
+                                assert!((COAL_MIN_Y..=COAL_MAX_Y).contains(&y));
+                            }
+                            IRON_ORE_BLOCK_ID => {
+                                iron += 1;
+                                assert!((IRON_MIN_Y..=IRON_MAX_Y).contains(&y));
+                            }
+                            _ => {}
+                        }
+                    }
+                }
+            }
+        }
+    }
+    assert!(cave > 100, "expected underground caves, found {cave} air blocks");
+    assert!(coal > 20, "expected coal ore, found {coal}");
+    assert!(iron > 10, "expected iron ore, found {iron}");
+    // 默认 seed 的 spawn chunk 地表完整（shell 断言已覆盖），且同 seed 确定。
+    let a = gen.generate(center);
+    let b = WorldGen::new(DEFAULT_SEED).generate(center);
+    assert_eq!(a.sections, b.sections);
+}
+
+#[test]
+fn biome_selection_matches_terrain_and_all_sections() {
+    let gen = WorldGen::new(WATER_SEED);
+    let center = gen.spawn_chunk();
+    let mut ocean = None;
+    let mut beach = None;
+    let mut forest = None;
+    let mut plains = None;
+    let mut water_chunk_bytes = None;
+    for dx in -10..=10 {
+        for dz in -10..=10 {
+            let pos = ChunkPos(center.0 + dx, center.1 + dz);
+            let biome = gen.chunk_biome(pos);
+            let water = gen.chunk_water_sand(pos).0;
+            if biome == OCEAN_BIOME_ID_777 && water >= BIOME_WATER_SAMPLES {
+                ocean.get_or_insert(pos);
+            }
+            if biome == BEACH_BIOME_ID_777 {
+                beach.get_or_insert(pos);
+            }
+            if biome == FOREST_BIOME_ID_777 {
+                forest.get_or_insert(pos);
+            }
+            if biome == PLAINS_BIOME_ID_777 {
+                plains.get_or_insert(pos);
+            }
+            if water_chunk_bytes.is_none() && water >= BIOME_WATER_SAMPLES {
+                water_chunk_bytes = Some(pos);
+            }
+        }
+    }
+    let ocean = ocean.expect("expected an ocean biome chunk");
+    let _beach = beach.expect("expected a beach biome chunk");
+    let forest = forest.expect("expected a forest biome chunk");
+    let _plains = plains.expect("expected a plains biome chunk");
+    assert_eq!(gen.chunk_biome(ocean), OCEAN_BIOME_ID_777);
+    // 出生 chunk 不应是 ocean/beach。
+    let spawn_biome = gen.chunk_biome(center);
+    assert!(spawn_biome == PLAINS_BIOME_ID_777 || spawn_biome == FOREST_BIOME_ID_777);
+
+    // 水 chunk：所有 section 的 biome 都等于 chunk.biome_id，fluid_count 有值。
+    let g = gen.generate(water_chunk_bytes.unwrap());
+    let infos = parse_sections(&g.network_bytes());
+    assert!(infos.iter().any(|s| s.fluid_count > 0), "water chunk must report fluids");
+    for (i, info) in infos.iter().enumerate() {
+        assert_eq!(info.biome, g.biome_id, "section {i} biome");
+        let section = &g.sections[i];
+        let non_air = section.iter().filter(|&&b| b != AIR_BLOCK_ID).count();
+        let fluid = section.iter().filter(|&&b| b == WATER_BLOCK_ID).count();
+        assert_eq!(info.block_count as usize, non_air, "section {i} block_count");
+        assert_eq!(info.fluid_count as usize, fluid, "section {i} fluid_count");
+    }
+    // forest chunk 的树密度高于 plains（同一 16×16 内树原点更多）。
+    let density = |pos: ChunkPos| {
+        let g = gen.generate(pos);
+        let mut trunks = 0;
+        for lz in 0..16 {
+            for lx in 0..16 {
+                let h = g.heights[(lz * 16 + lx) as usize];
+                if block_at(&g, lx, h + 1, lz) == OAK_LOG_BLOCK_ID {
+                    trunks += 1;
+                }
+            }
+        }
+        trunks
+    };
+    let mut forest_trees = 0;
+    for dx in -2..=2 {
+        for dz in -2..=2 {
+            let pos = ChunkPos(forest.0 + dx, forest.1 + dz);
+            if gen.chunk_biome(pos) == FOREST_BIOME_ID_777 {
+                forest_trees += density(pos);
+            }
+        }
+    }
+    assert!(forest_trees > 0, "forest chunks must contain trees");
+}
+
+#[test]
+fn uniform_water_section_reports_4096_blocks_and_fluids() {
+    // 合成一个整节全水：WorldGen 的均匀水分支必须写 block_count=fluid_count=4096
+    // 且 biome 用 chunk.biome_id（ocean=36）。
+    let mut sections: Vec<Box<[u16; 4096]>> = (0..SECTION_COUNT)
+        .map(|_| Box::new([AIR_BLOCK_ID; 4096]))
+        .collect();
+    sections[3] = Box::new([WATER_BLOCK_ID; 4096]);
+    let g = GeneratedChunk {
+        pos: ChunkPos(0, 0),
+        sections,
+        heights: [SEA_LEVEL; 256],
+        motion_heights: [SEA_LEVEL + 1 - MIN_Y; 256],
+        biome_id: OCEAN_BIOME_ID_777,
+    };
+    let infos = parse_sections(&g.network_bytes());
+    assert_eq!(infos[3].block_count, 4096);
+    assert_eq!(infos[3].fluid_count, 4096);
+    assert_eq!(infos[3].biome, OCEAN_BIOME_ID_777);
+    for (i, info) in infos.iter().enumerate() {
+        assert!(info.fluid_count == 0 || i == 3);
+    }
+}
+
+#[test]
+fn network_bytes_decode_as_play_chunk_data() {
+    let gen = WorldGen::new(WATER_SEED);
+    let g = find_chunk_with_water(&gen, 8);
+    let data = PlayChunkData {
+        chunk_x: g.pos.0,
+        chunk_z: g.pos.1,
+        heightmaps_nbt: g.heightmaps_bytes(),
+        section_bytes: g.network_bytes(),
+        light_bytes: g.light_bytes(),
+    };
+    let mut body = Vec::new();
+    data.encode_body(&mut body);
+    let (decoded, used) = PlayChunkData::decode_body(&body).unwrap();
+    assert_eq!(used, body.len());
+    assert_eq!(decoded, data);
+    // 高度图仍是 1 个 MOTION_BLOCKING + 37 longs。
+    assert_eq!(&data.heightmaps_nbt[..3], &[0x01, 0x04, 0x25]);
+}
+
+#[test]
+fn negative_and_far_coordinates_are_deterministic() {
+    let gen = WorldGen::new(-987654321);
+    for pos in [ChunkPos(-1, -1), ChunkPos(-40, 33), ChunkPos(1_800_000, -900_000)] {
+        let a = gen.generate(pos);
+        let b = gen.generate(pos);
+        assert_eq!(a.heights, b.heights);
+        assert_eq!(a.motion_heights, b.motion_heights);
+        assert_eq!(a.biome_id, b.biome_id);
+        assert_eq!(a.sections, b.sections);
+        assert!(a.heights.iter().all(|h| (MIN_SURFACE_Y..=MAX_SURFACE_Y).contains(h)));
+    }
+}
+
+#[test]
+fn default_seed_matches_server_default() {
+    assert_eq!(DEFAULT_SEED, 123456789);
+    assert_eq!(WorldGen::default(), WorldGen::new(123456789));
+    // 固定回归：默认种子出生点地表 72 → 站立 y=73；另一个种子 y 不同。
+    let spawn = WorldGen::new(DEFAULT_SEED).spawn_pos();
+    assert_eq!(spawn, BlockPos(369, 73, 381));
+    assert_ne!(
+        spawn.1,
+        WorldGen::new(987654321).spawn_pos().1,
+        "different seed must produce a different spawn y"
+    );
+}

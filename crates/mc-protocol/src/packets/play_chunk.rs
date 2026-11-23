@@ -33,7 +33,13 @@ pub const PLAY_GAME_EVENT_ID: i32 = 0x27;
 pub const GAME_EVENT_LEVEL_CHUNKS_LOAD_START: u8 = 13;
 /// 原版 26.3 `worldgen/biome` 网络注册表中 `minecraft:plains` 的 ID
 /// （空 KnownPacks 抓包：67 项按 key 排序，plains=41）。区块 palette 用这个 ID。
+/// 以下 biome ID 均从仓库内 `registry_00.bin`（`minecraft:worldgen/biome`，67 项，
+/// 顺序即客户端网络 ID）解析确认，P16 起按 chunk 选用：
+/// plains=41 / forest=22 / beach=3 / ocean=36（river=42、birch_forest=4 等备用）。
 pub const PLAINS_BIOME_ID_777: i32 = 41;
+pub const FOREST_BIOME_ID_777: i32 = 22;
+pub const BEACH_BIOME_ID_777: i32 = 3;
+pub const OCEAN_BIOME_ID_777: i32 = 36;
 
 /// Heightmap类型：MOTION_BLOCKING = 4（Chunk_format#Heightmap结构表：WORLD_SURFACE=1，MOTION_BLOCKING=4）。
 pub const HEIGHTMAP_MOTION_BLOCKING_ID: i32 = 4;
@@ -145,10 +151,17 @@ pub fn encode_single_valued_paletted_container(value: i32, out: &mut Vec<u8>) {
 /// （无fluid、有data_len VarInt 0）；新版8B是 2+2+2+2（有fluid、无data_len），
 /// 总长同为8B但内部按spec重排，特此注释。
 pub fn encode_empty_section_placeholder(out: &mut Vec<u8>) {
+    encode_empty_section_with_biome(PLAINS_BIOME_ID_777, out);
+}
+
+/// 均匀空（air）section：block_count=0、fluid_count=0、block 单值 air、biome 单值。
+/// P16 起 WorldGen 按 chunk 的真实 biome 调用；旧 [`encode_empty_section_placeholder`]
+/// 等价于 `biome_id = plains(41)`。
+pub fn encode_empty_section_with_biome(biome_id: i32, out: &mut Vec<u8>) {
     write_u16_be(0, out); // block_count = 0（非空气方块数）
     write_u16_be(0, out); // fluid_count = 0（777 Section含流体计数）
     encode_single_valued_paletted_container(0, out); // block：air（全局blockstate 0）
-    encode_single_valued_paletted_container(PLAINS_BIOME_ID_777, out); // biome：原版 plains=41
+    encode_single_valued_paletted_container(biome_id, out); // biome：调用方指定
 }
 
 /// 均匀节真布局8B（单值palette）：block_count + fluid_count + block单值 + biome单值。
@@ -190,10 +203,24 @@ fn ceil_log2(n: usize) -> u8 {
 /// Data Array 采用 1.16+ 的“跨 long 不拆分”打包：每个 long 放 floor(64/BPE) 项，
 /// 低位在前；长度由客户端按 4096/BPE 推算，不再发送 VarInt 长度。
 pub fn encode_block_section(block_states: &[i32], biome_id: i32, out: &mut Vec<u8>) {
+    encode_block_section_with_fluid(block_states, biome_id, 0, out);
+}
+
+/// 带真实 fluid_count 的混合/单值 section 编码（P16 水）。
+/// `fluid_count` 是该 section 内 water 方块数（0..=4096），由调用方统计；
+/// `block_count` 内部按“非空气（!=0）”统计，水也算非空气。
+/// palette 自适应：单值 → 单值容器；<=256 → 间接 palette（BPE=max(4,ceil(log2))）；
+/// >256 → direct（BPE=15，不写 palette 列表）。
+pub fn encode_block_section_with_fluid(
+    block_states: &[i32],
+    biome_id: i32,
+    fluid_count: u16,
+    out: &mut Vec<u8>,
+) {
     assert_eq!(block_states.len(), SECTION_VOLUME, "section must contain 4096 block states");
     let block_count = block_states.iter().filter(|&&b| b != 0).count() as u16;
-    write_u16_be(block_count, out); // 非空气方块数
-    write_u16_be(0, out); // fluid_count：当前世界无流体
+    write_u16_be(block_count, out); // 非空气方块数（含水）
+    write_u16_be(fluid_count, out); // 流体方块数（水）
 
     // 建立局部 palette（保持首次出现顺序），同时把 4096 项映射为 palette 索引。
     let mut palette: Vec<i32> = Vec::new();
@@ -495,8 +522,50 @@ mod tests {
         let body = include_bytes!("data/vanilla_config_777/registry_00.bin");
         let (reg, _) = super::super::decode_config_registry_data(body).unwrap();
         assert_eq!(reg.registry_id, "minecraft:worldgen/biome");
-        let idx = reg.entries.iter().position(|e| e.entry_id == "minecraft:plains").unwrap();
-        assert_eq!(idx as i32, PLAINS_BIOME_ID_777);
+        let idx = |name: &str| {
+            reg.entries.iter().position(|e| e.entry_id == name).unwrap() as i32
+        };
+        assert_eq!(idx("minecraft:plains"), PLAINS_BIOME_ID_777);
+        assert_eq!(idx("minecraft:forest"), FOREST_BIOME_ID_777);
+        assert_eq!(idx("minecraft:beach"), BEACH_BIOME_ID_777);
+        assert_eq!(idx("minecraft:ocean"), OCEAN_BIOME_ID_777);
+        assert_eq!(reg.entries.len(), 67);
+    }
+    #[test]
+    fn empty_section_and_uniform_water_carry_biome_and_fluid() {
+        // 空 air 节：block/fluid 都是 0，block 单值 air，biome 用真实 biome。
+        let mut b = Vec::new();
+        encode_empty_section_with_biome(FOREST_BIOME_ID_777, &mut b);
+        assert_eq!(b, vec![0, 0, 0, 0, 0, 0, 0, FOREST_BIOME_ID_777 as u8]);
+        // 旧入口字节不变（biome=plains）。
+        let mut old = Vec::new();
+        encode_empty_section_placeholder(&mut old);
+        assert_eq!(b.len(), old.len());
+        assert_eq!(&old[7], &41);
+        // 均匀全水节：block_count=fluid_count=4096，water=89，ocean=36。
+        let mut w = Vec::new();
+        encode_uniform_section_single(89, OCEAN_BIOME_ID_777, 4096, 4096, &mut w);
+        assert_eq!(w, vec![0x10, 0x00, 0x10, 0x00, 0x00, 89, 0x00, OCEAN_BIOME_ID_777 as u8]);
+    }
+    #[test]
+    fn block_section_with_fluid_writes_fluid_count_and_palette() {
+        // 前 1000 个 water(89)、其余 stone(1)：fluid_count=1000，palette=[89,1]。
+        let mut states = [0i32; SECTION_VOLUME];
+        states[..1000].fill(89);
+        states[1000..].fill(1);
+        let mut b = Vec::new();
+        encode_block_section_with_fluid(&states, OCEAN_BIOME_ID_777, 1000, &mut b);
+        assert_eq!(&b[..4], &[0x10, 0x00, 0x03, 0xE8], "block_count=4096 fluid_count=1000");
+        assert_eq!(b[4], 4, "BPE=4");
+        assert_eq!(b[5], 2, "palette len=2");
+        assert_eq!(&b[6..8], &[89, 1], "palette=[water,stone]");
+        // 末尾 still biome 单值。
+        assert_eq!(&b[b.len() - 2..], &[0x00, OCEAN_BIOME_ID_777 as u8]);
+        // 旧签名 encode_block_section 等价 fluid_count=0（字节完全一致）。
+        let mut old = Vec::new();
+        encode_block_section(&states, OCEAN_BIOME_ID_777, &mut old);
+        assert_eq!(&old[..4], &[0x10, 0x00, 0x00, 0x00]);
+        assert_eq!(&old[4..], &b[4..]);
     }
     #[test]
     fn play_chunk_data_empty_roundtrip() {        let v = PlayChunkData::empty(0, 0);

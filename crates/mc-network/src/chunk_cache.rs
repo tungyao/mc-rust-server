@@ -1,9 +1,10 @@
 //! chunk_cache: 已编码 ChunkData(0x2E) 包体缓存，避免跨视距移动/重连时重复生成。
 //!
-//! 只缓存最终包体 `Vec<u8>`（约 30–40KB/块），不缓存 `GeneratedChunk`
+//! 只缓存最终包体 `Vec<u8>`（P16 约 50KB/块），不缓存 `GeneratedChunk`
 //! （24×4096×u16 ≈ 196KB/块）。缓存内容由构造时的 seed 对应的 `WorldGen` 生成，
 //! 因此一个 `ChunkCache` 只能服务同一 seed；`enter_play` 会在 seed 不匹配时忽略它。
 //! 淘汰策略为 FIFO（容量默认 1024，可覆盖 radius=10 的 441 块并留出移动余量）。
+//! P16 起 `bodies()` 用 rayon 并行生成/编码一批缺失区块（Join 441 块的主路径）。
 use mc_core::ChunkPos;
 use mc_protocol::packets;
 use mc_world::WorldGen;
@@ -127,6 +128,14 @@ impl ChunkCache {
         body
     }
 
+    /// 批量取包体（Join/跨区块一批）：顺序与 `positions` 一致，未命中项用 rayon
+    /// 并行生成+编码，缩短 441 块初始批的墙钟时间；命中项仍直接复用 `Arc`。
+    /// 只做纯 CPU 生成，不持有锁跨线程，行为与逐个 [`ChunkCache::body`] 相同。
+    pub fn bodies(&self, positions: &[ChunkPos]) -> Vec<Arc<Vec<u8>>> {
+        use rayon::prelude::*;
+        positions.par_iter().map(|&pos| self.body(pos)).collect()
+    }
+
     fn lock(&self) -> std::sync::MutexGuard<'_, CacheInner> {
         self.inner.lock().unwrap_or_else(|poisoned| poisoned.into_inner())
     }
@@ -185,6 +194,29 @@ mod tests {
         let (chunk_b, _) = packets::PlayChunkData::decode_body(&b).unwrap();
         assert_eq!((chunk_a.chunk_x, chunk_a.chunk_z), (0, 0));
         assert_eq!((chunk_b.chunk_x, chunk_b.chunk_z), (1, 0));
+    }
+
+    #[test]
+    fn bodies_preserve_order_and_match_individual_body() {
+        let cache = ChunkCache::new(DEFAULT_SEED, 8);
+        let positions = [position(23, 23), position(24, 23), position(22, 24)];
+        let bodies = cache.bodies(&positions);
+        assert_eq!(bodies.len(), positions.len());
+        for (body, &pos) in bodies.iter().zip(positions.iter()) {
+            assert_eq!(
+                body.as_slice(),
+                encode_chunk_data_body(&WorldGen::new(DEFAULT_SEED), pos).as_slice(),
+                "parallel bodies must match sequential encoding for {pos:?}"
+            );
+            assert!(cache.contains(pos), "parallel batch must populate the cache");
+        }
+        assert_eq!(cache.len(), positions.len());
+        // 第二次批量：全部命中，返回同一 Arc。
+        let again = cache.bodies(&positions);
+        for (a, b) in again.iter().zip(bodies.iter()) {
+            assert!(Arc::ptr_eq(a, b));
+        }
+        assert_eq!(cache.stats().hits, positions.len() as u64);
     }
 
     #[test]

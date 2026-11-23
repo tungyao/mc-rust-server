@@ -4,7 +4,9 @@ pub mod load;
 pub mod save;
 pub mod worldgen;
 
-pub use worldgen::{GeneratedChunk, WorldGen, DEFAULT_SEED, MAX_SURFACE_Y, MIN_SURFACE_Y};
+pub use worldgen::{
+    GeneratedChunk, WorldGen, DEFAULT_SEED, MAX_SURFACE_Y, MIN_SURFACE_Y, SEA_LEVEL,
+};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SectionKind {
@@ -42,10 +44,21 @@ pub const SPAWN_BLOCK_Z: i32 = 381;
 /// 方块 ID 与 26.3 `reports/blocks.json` 的全局 blockstate ID 对齐：
 /// air=0、stone=1、grass_block（snowy=false）=9、dirt=10。
 /// 这些 ID 也用于 Configuration 中回放的 `minecraft:block` 注册表。
+/// P16 新增的水/沙/树/矿 ID 来自 26.3 客户端 jar 实测
+/// （`SharedConstants.tryDetectVersion(); Bootstrap.bootStrap(); Block.getId(block.defaultBlockState())`），
+/// 与 air/stone/grass/dirt 的已知值一致，可直接信任。
 pub const AIR_BLOCK_ID: u16 = 0;
 pub const STONE_BLOCK_ID: u16 = 1;
 pub const GRASS_BLOCK_ID: u16 = 9;
 pub const DIRT_BLOCK_ID: u16 = 10;
+/// `Blocks.WATER.defaultBlockState()`（source，level=0）。
+pub const WATER_BLOCK_ID: u16 = 89;
+pub const SAND_BLOCK_ID: u16 = 121;
+/// `Blocks.OAK_LOG.defaultBlockState()`（axis=y）。
+pub const OAK_LOG_BLOCK_ID: u16 = 140;
+pub const OAK_LEAVES_BLOCK_ID: u16 = 294;
+pub const COAL_ORE_BLOCK_ID: u16 = 136;
+pub const IRON_ORE_BLOCK_ID: u16 = 134;
 
 /// 按 y 分层的地形带：y <= GROUND_LEVEL 石头，61..=63 泥土，64 草方块，其余空气。
 pub const GROUND_LEVEL: i32 = 60;
