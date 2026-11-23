@@ -63,18 +63,21 @@ impl LoginProperty {
     }
 }
 
-/// Login Success（CB 0x02）：UUID + name + VarInt属性数 + 属性表。
+/// Login Success（CB 0x02 login_finished）：GameProfile(UUID + name + 属性表) + Session ID UUID。
+/// 26.2(776)+ 新增尾部 Session ID UUID 字段（见 Protocol History），777 必发，缺则客户端
+/// `DecoderException: Failed to decode login_finished`。离线模式发 `Uuid::nil()` 占位。
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct LoginSuccess { pub uuid: Uuid, pub username: String, pub properties: Vec<LoginProperty> }
+pub struct LoginSuccess { pub uuid: Uuid, pub username: String, pub properties: Vec<LoginProperty>, pub session_id: Uuid }
 impl LoginSuccess {
-    /// 离线快捷构造：属性表为空。
-    pub fn offline(uuid: Uuid, username: String) -> Self { Self { uuid, username, properties: Vec::new() } }
+    /// 离线快捷构造：属性表为空，session 占位 nil。
+    pub fn offline(uuid: Uuid, username: String) -> Self { Self { uuid, username, properties: Vec::new(), session_id: Uuid::nil() } }
     pub fn encode_body(&self, out: &mut Vec<u8>) {
         write_uuid(self.uuid, out); encode_string(&self.username, out);
         write_varint(self.properties.len() as i32, out);
         for p in &self.properties { p.encode_body(out); }
+        write_uuid(self.session_id, out);
     }
-    /// 解码兼容旧包：尾部缺属性数时视为零属性（离线占位包直接通过）。
+    /// 解码兼容旧包：尾部缺属性数/session 时视为零属性 + nil session（离线占位包直接通过）。
     pub fn decode_body(buf: &[u8]) -> Result<(Self, usize), ProtocolError> {
         let (uuid, n1) = read_uuid(buf)?; let (username, n2) = decode_string(&buf[n1..])?;
         let mut off = n1 + n2; let mut properties = Vec::new();
@@ -82,7 +85,11 @@ impl LoginSuccess {
             let (n, m) = read_varint(&buf[off..])?; off += m;
             for _ in 0..n { let (p, k) = LoginProperty::decode_body(&buf[off..])?; off += k; properties.push(p); }
         }
-        Ok((Self { uuid, username, properties }, off))
+        let mut session_id = Uuid::nil();
+        if buf.len() >= off + 16 {
+            let (s, _) = read_uuid(&buf[off..])?; session_id = s; off += 16;
+        }
+        Ok((Self { uuid, username, properties, session_id }, off))
     }
 }
 
@@ -161,7 +168,7 @@ mod tests {
     }
     #[test]
     fn login_success_props_roundtrip_and_legacy_compat() {
-        let v = LoginSuccess { uuid: Uuid::new_v4(), username: "Alex".into(), properties: vec![
+        let v = LoginSuccess { uuid: Uuid::new_v4(), username: "Alex".into(), session_id: Uuid::nil(), properties: vec![
             LoginProperty { name: "textures".into(), value: "v".into(), signature: Some("s".into()) },
             LoginProperty { name: "x".into(), value: "y".into(), signature: None }] };
         let mut pkt = Vec::new(); encode_login_success_packet(&v, &mut pkt);

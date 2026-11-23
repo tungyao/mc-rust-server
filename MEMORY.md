@@ -18,3 +18,4 @@
 - [2026-11-23 06:30 UTC] agent=p6a task=registry-data status=done detail=KnownPacks单vanilla+Registry最小2包+config_finish按序5步，52测试全过 files=packets/config.rs(269),network/login_route.rs(369),tests/login_flow.rs+online_count.rs
 - [2026-11-23 06:00 UTC] agent=p6b task=real-chunk status=start detail=play_chunk真布局+world真实palette files=play_chunk.rs/world-lib
 - [2026-11-23 06:30 UTC] agent=p6b task=real-chunk status=done detail=777真布局：结构化heightmap+fluid+无data_len+空光照，39测试全过 files=play_chunk.rs(369)/world-lib(259)
+- [2026-11-23 07:00 UTC] agent=main task=login-finished-fix status=done detail=26.2加SessionID致777缺16字节，加session_id=nil，30+7全过 files=packets/login.rs
