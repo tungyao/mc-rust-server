@@ -23,3 +23,5 @@
 - [2026-11-23 07:30 UTC] agent=p7b task=real-registry status=start detail=真dimension/biome NBT+minimal带数据 files=packets/config.rs
 - [2026-11-23 07:45 UTC] agent=p7b task=real-registry status=done detail=真overworld/plains NBT+minimal带数据+6单测全过 files=packets/config.rs(374)
 - [2026-11-23 08:00 UTC] agent=main task=registry-wirefix status=done detail=wiki证伪：Data是PrefixedOptional裸NBT，去VarInt长+去根名00 00，35+24全过 files=packets/config.rs
+- [2026-11-23 08:30 UTC] agent=p8 task=full-registry-docs status=start detail=777全量同步注册表文档+清单，不动代码 files=docs/registries-777.md
+- [2026-11-23 08:50 UTC] agent=p8 task=full-registry-docs status=done detail=30表+最小NBT+实现清单约1440行，不动代码未跑cargo files=docs/registries-777.md
