@@ -4,7 +4,7 @@
 //! 注意：此前猜测0x1B/0x1C是错的——777里SB 0x1C是KeepAlive回显（与C2S KeepAlive 0x1C冲突故不可复用），
 //! SB 0x1A是Interact、0x1B是Jigsaw Generate，移动包另排在0x1E-0x21。见docs/packet-map-777.md §4与
 //! minecraft.wiki Play serverbound表（777）：30/0x1E Set Player Position等4行。
-use crate::packets::codec::{encode_packet, read_f32_be, read_f64_be, read_i64_be, write_f32_be, write_f64_be, write_i64_be};
+use crate::packets::codec::{encode_packet, read_f32_be, read_f64_be, read_i32_be, read_i64_be, write_f32_be, write_f64_be, write_i32_be, write_i64_be};
 use crate::{read_varint, write_varint, ProtocolError};
 
 /// Player Position Sync 包 ID（Play CB `0x49` player_position）。已按P4A对照表核对777（旧值0x3E实为ping）。
@@ -13,47 +13,60 @@ pub const PLAY_PLAYER_POSITION_SYNC_ID: i32 = 0x49;
 pub const PLAY_KEEPALIVE_S2C_ID: i32 = 0x2D;
 pub const PLAY_KEEPALIVE_C2S_ID: i32 = 0x1C;
 
+#[derive(Debug, Clone, PartialEq)]
 pub struct PlayerPositionSync {
+    /// 26.3 `ClientboundPlayerPositionPacket(id, change, relatives)`：id 在前。
+    pub teleport_id: i32,
     pub x: f64,
     pub y: f64,
     pub z: f64,
+    /// PositionMoveRotation.deltaMovement（3×Double，普通传送为 0）。
+    pub delta_x: f64,
+    pub delta_y: f64,
+    pub delta_z: f64,
     pub yaw: f32,
     pub pitch: f32,
-    pub flags: i8,
-    pub teleport_id: i32,
+    /// `Relative.SET_STREAM_CODEC`：Int 位掩码（0=全部绝对坐标）。
+    pub relatives: i32,
 }
 
 impl PlayerPositionSync {
     pub fn encode_body(&self, out: &mut Vec<u8>) {
+        write_varint(self.teleport_id, out);
         write_f64_be(self.x, out);
         write_f64_be(self.y, out);
         write_f64_be(self.z, out);
+        write_f64_be(self.delta_x, out);
+        write_f64_be(self.delta_y, out);
+        write_f64_be(self.delta_z, out);
         write_f32_be(self.yaw, out);
         write_f32_be(self.pitch, out);
-        out.push(self.flags as u8);
-        write_varint(self.teleport_id, out);
+        write_i32_be(self.relatives, out);
     }
 
     pub fn decode_body(buf: &[u8]) -> Result<(Self, usize), ProtocolError> {
         let mut off = 0;
+        let (teleport_id, n) = read_varint(&buf[off..])?;
+        off += n;
         let (x, n) = read_f64_be(&buf[off..])?;
         off += n;
         let (y, n) = read_f64_be(&buf[off..])?;
         off += n;
         let (z, n) = read_f64_be(&buf[off..])?;
         off += n;
+        let (delta_x, n) = read_f64_be(&buf[off..])?;
+        off += n;
+        let (delta_y, n) = read_f64_be(&buf[off..])?;
+        off += n;
+        let (delta_z, n) = read_f64_be(&buf[off..])?;
+        off += n;
         let (yaw, n) = read_f32_be(&buf[off..])?;
         off += n;
         let (pitch, n) = read_f32_be(&buf[off..])?;
         off += n;
-        if buf.len() < off + 1 {
-            return Err(ProtocolError::UnexpectedEof);
-        }
-        let flags = buf[off] as i8;
-        off += 1;
-        let (teleport_id, n) = read_varint(&buf[off..])?;
+        let (relatives, n) = read_i32_be(&buf[off..])?;
         off += n;
-        Ok((Self { x, y, z, yaw, pitch, flags, teleport_id }, off))
+        Ok((Self { teleport_id, x, y, z, delta_x, delta_y, delta_z, yaw, pitch, relatives }, off))
     }
 }
 
@@ -327,12 +340,39 @@ mod tests {
     use crate::packets::codec::decode_packet_id;
     #[test]
     fn play_position_sync_roundtrip() {
-        let v = PlayerPositionSync { x: 8.5, y: 80.0, z: 8.5, yaw: 0.0, pitch: 0.0, flags: 0, teleport_id: 1 };
+        let v = PlayerPositionSync {
+            teleport_id: 1,
+            x: 8.5, y: 80.0, z: 8.5,
+            delta_x: 0.0, delta_y: 0.0, delta_z: 0.0,
+            yaw: 0.0, pitch: 0.0, relatives: 0,
+        };
         let mut pkt = Vec::new(); encode_player_position_sync_packet(&v, &mut pkt);
         let (_, n) = read_varint(&pkt).unwrap();
         let (id, m) = decode_packet_id(&pkt[n..]).unwrap();
         assert_eq!(id, PLAY_PLAYER_POSITION_SYNC_ID);
-        assert_eq!(PlayerPositionSync::decode_body(&pkt[n+m..]).unwrap().0.x, v.x);
+        let (got, used) = PlayerPositionSync::decode_body(&pkt[n+m..]).unwrap();
+        assert_eq!(got, v);
+        assert_eq!(used, pkt.len() - n - m);
+    }
+
+    /// 26.3 原版服务端实测 player_position 0x49 包体（61B）：
+    /// VarInt teleportId + PositionMoveRotation(3×pos, 3×delta, yaw, pitch) + Int relative mask。
+    #[test]
+    fn play_position_sync_matches_vanilla_777_capture() {
+        let body = include_bytes!("data/player_position_sync_777.bin");
+        let (got, used) = PlayerPositionSync::decode_body(body).unwrap();
+        assert_eq!(used, body.len());
+        assert_eq!(got.teleport_id, 1);
+        assert_eq!(got.delta_x, 0.0);
+        assert_eq!(got.delta_y, 0.0);
+        assert_eq!(got.delta_z, 0.0);
+        assert_eq!(got.yaw, 0.0);
+        assert_eq!(got.pitch, 0.0);
+        assert_eq!(got.relatives, 0);
+        assert!(got.x > 0.0 && got.y > 0.0 && got.z > 0.0);
+        let mut re = Vec::new();
+        got.encode_body(&mut re);
+        assert_eq!(re, body, "player_position 编码必须与原版抓包逐字节一致");
     }
     #[test]
     fn play_keepalive_roundtrip() {

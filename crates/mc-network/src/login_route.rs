@@ -109,27 +109,24 @@ pub async fn config_finish(stream: &mut TcpStream, threshold: i32) -> io::Result
     if !got_known {
         return Err(to_io_invalid("config known packs response missing"));
     }
-    // 3. Registry Data 4包（dimension_type + biome + timeline + world_clock，各条目 has_data=true真NBT）。
-    for reg in packets::default_configuration_registries() {
-        let mut b = Vec::new();
-        reg.encode_body(&mut b);
-        debug!("config registry send {} entries={}", reg.registry_id, reg.entries.len());
+    // 3. Registry Data：原版 26.3 全量 32 个同步注册表包体（空 KnownPacks 抓包，条目ID与 Update Tags 自洽）。
+    for (name, body) in packets::vanilla_config_777::VANILLA_CONFIG_REGISTRY_BODIES_777 {
+        debug!("config registry send {} bytes={}", name, body.len());
         if compressed {
-            write_packet_framed(stream, packets::CONFIG_REGISTRY_DATA_S2C_ID, &b, threshold).await?;
+            write_packet_framed(stream, packets::CONFIG_REGISTRY_DATA_S2C_ID, body, threshold).await?;
         } else {
-            write_packet(stream, packets::CONFIG_REGISTRY_DATA_S2C_ID, &b).await?;
+            write_packet(stream, packets::CONFIG_REGISTRY_DATA_S2C_ID, body).await?;
         }
     }
-    // 4. Update Tags（timeline 4 tag，供 dimension `#minecraft:in_overworld` 引用消解）。
+    // 4. Update Tags：同一次抓包的全量 15 个注册表包体（19662 项），
+    //    含 block 的 300 个 tag（`#minecraft:infiniburn_overworld` 等）。
     {
-        let tags = packets::ConfigUpdateTags::minimal_timeline_tags();
-        let mut b = Vec::new();
-        tags.encode_body(&mut b);
-        debug!("config update tags send registries={}", tags.registries.len());
+        let body = packets::vanilla_config_777::VANILLA_CONFIG_UPDATE_TAGS_BODY_777;
+        debug!("config update tags send bytes={}", body.len());
         if compressed {
-            write_packet_framed(stream, packets::CONFIG_UPDATE_TAGS_S2C_ID, &b, threshold).await?;
+            write_packet_framed(stream, packets::CONFIG_UPDATE_TAGS_S2C_ID, body, threshold).await?;
         } else {
-            write_packet(stream, packets::CONFIG_UPDATE_TAGS_S2C_ID, &b).await?;
+            write_packet(stream, packets::CONFIG_UPDATE_TAGS_S2C_ID, body).await?;
         }
     }
     // 5. Finish S2C → 等 Finish Ack C2S，中间穿插包同样忽略。
@@ -178,16 +175,53 @@ async fn send_join_sequence(stream: &mut TcpStream, profile: &mc_core::PlayerPro
     if compressed { write_packet_framed(stream, packets::PLAY_LOGIN_PLAY_ID, &body, threshold).await?; }
     else { write_packet(stream, packets::PLAY_LOGIN_PLAY_ID, &body).await?; }
     debug!("play {} login play sent", profile.username);
+    // 出生点与中心区块统一由 mc-world::SPAWN_POS 推导（369,67,381 → chunk 23,23），
+    // 避免网络层与 world 层各写一份坐标。
+    let spawn = mc_world::SPAWN_POS;
+    let center = mc_core::ChunkPos(spawn.0.div_euclid(16), spawn.2.div_euclid(16));
     body.clear();
-    packets::SetCenterChunk { chunk_x: 0, chunk_z: 0 }.encode_body(&mut body);
+    packets::SetCenterChunk { chunk_x: center.0, chunk_z: center.1 }.encode_body(&mut body);
     if compressed { write_packet_framed(stream, packets::PLAY_SET_CENTER_CHUNK_ID, &body, threshold).await?; }
     else { write_packet(stream, packets::PLAY_SET_CENTER_CHUNK_ID, &body).await?; }
+    // 26.3 客户端要 Game Event LEVEL_CHUNKS_LOAD_START(type=13) 才离开 WaitingForServer。
     body.clear();
-    packets::PlayChunkData::empty(0, 0).encode_body(&mut body);
-    if compressed { write_packet_framed(stream, packets::PLAY_CHUNK_DATA_ID, &body, threshold).await?; }
-    else { write_packet(stream, packets::PLAY_CHUNK_DATA_ID, &body).await?; }
+    packets::encode_game_event_level_chunks_load_start(&mut body);
+    if compressed { write_packet_framed(stream, packets::PLAY_GAME_EVENT_ID, &body, threshold).await?; }
+    else { write_packet(stream, packets::PLAY_GAME_EVENT_ID, &body).await?; }
+    // 26.3 必须把区块包夹在 chunk_batch_start(0x0C) / chunk_batch_finished(0x0B) 之间，
+    // 否则客户端一直停在“加载地形中…”。区块数据来自 mc-world（真实间接 palette +
+    // 高度图）。关键：SectionUpdateTracker.hasAllNeighbors 要求中心 section 的 4 正+4 斜
+    // 邻居区块都存在，只发 1 块时 player section 永远不会编译，30s 后客户端超时放行。
+    // 因此一次性发 radius=4 的 81 块（同一批），与 mc-server 视距队列一致。
+    let chunks = mc_world::view_chunks(center, 4);
+    if compressed { write_packet_framed(stream, packets::PLAY_CHUNK_BATCH_START_ID, &[], threshold).await?; }
+    else { write_packet(stream, packets::PLAY_CHUNK_BATCH_START_ID, &[]).await?; }
+    let mut chunk_body = Vec::new();
+    for pos in &chunks {
+        let chunk = mc_world::chunk_for(*pos);
+        let chunk_data = packets::PlayChunkData {
+            chunk_x: pos.0,
+            chunk_z: pos.1,
+            heightmaps_nbt: mc_world::chunk_heightmaps_bytes(),
+            section_bytes: mc_world::chunk_network_bytes(&chunk),
+            light_bytes: mc_world::chunk_light_bytes(),
+        };
+        chunk_body.clear();
+        chunk_data.encode_body(&mut chunk_body);
+        if compressed { write_packet_framed(stream, packets::PLAY_CHUNK_DATA_ID, &chunk_body, threshold).await?; }
+        else { write_packet(stream, packets::PLAY_CHUNK_DATA_ID, &chunk_body).await?; }
+    }
     body.clear();
-    packets::PlayerPositionSync { x: 8.5, y: 80.0, z: 8.5, yaw: 0.0, pitch: 0.0, flags: 0, teleport_id: 1 }.encode_body(&mut body);
+    mc_protocol::write_varint(chunks.len() as i32, &mut body);
+    if compressed { write_packet_framed(stream, packets::PLAY_CHUNK_BATCH_FINISHED_ID, &body, threshold).await?; }
+    else { write_packet(stream, packets::PLAY_CHUNK_BATCH_FINISHED_ID, &body).await?; }
+    body.clear();
+    packets::PlayerPositionSync {
+        teleport_id: 1,
+        x: spawn.0 as f64 + 0.5, y: spawn.1 as f64, z: spawn.2 as f64 + 0.5,
+        delta_x: 0.0, delta_y: 0.0, delta_z: 0.0,
+        yaw: 0.0, pitch: 0.0, relatives: 0,
+    }.encode_body(&mut body);
     if compressed { write_packet_framed(stream, packets::PLAY_PLAYER_POSITION_SYNC_ID, &body, threshold).await?; }
     else { write_packet(stream, packets::PLAY_PLAYER_POSITION_SYNC_ID, &body).await?; }
     let keepalive_id = 1i64;
@@ -202,8 +236,24 @@ async fn play_loop(stream: &mut TcpStream, profile: &mc_core::PlayerProfile, mut
     let compressed = packets::compression_enabled(threshold);
     // 最后一次收到KeepAlive回显的时间；移动包不刷新它（只证明位置变化，不证明存活）。
     let mut last_seen = Instant::now();
+    // 客户端在 Play 里每 tick 都发 0x0D，read_packet 不会超时；必须按时间主动发 KeepAlive，
+    // 否则客户端 30s 收不到 0x2D 会 “连接超时” 断开（2026-11-23 真机实测）。
+    let mut last_keepalive = Instant::now();
     loop {
         let next = if compressed { read_packet_framed(stream, threshold).await } else { read_packet(stream).await };
+        if last_keepalive.elapsed() >= Duration::from_secs(15) {
+            seq += 1;
+            let mut body = Vec::new();
+            packets::KeepAliveS2C(seq).encode_body(&mut body);
+            let r = if compressed { write_packet_framed(stream, packets::PLAY_KEEPALIVE_S2C_ID, &body, threshold).await }
+                    else { write_packet(stream, packets::PLAY_KEEPALIVE_S2C_ID, &body).await };
+            if let Err(e) = r {
+                debug!("play uuid={} keepalive send failed ({e}), closing", profile.uuid);
+                break;
+            }
+            last_keepalive = Instant::now();
+            debug!("play keepalive send uuid={} seq={seq}", profile.uuid);
+        }
         match next {
             Ok((id, payload)) if id == packets::PLAY_KEEPALIVE_C2S_ID => {
                 match packets::decode_keepalive_c2s(&payload) {
@@ -247,6 +297,7 @@ async fn play_loop(stream: &mut TcpStream, profile: &mc_core::PlayerProfile, mut
                     debug!("play uuid={} keepalive resend failed ({e}), closing", profile.uuid);
                     break;
                 }
+                last_keepalive = Instant::now();
             }
             Err(e) => {
                 debug!("play uuid={} closed ({e})", profile.uuid);
@@ -282,19 +333,16 @@ mod tests {
         packets::encode_config_known_packs_c2s_packet(&packets::ConfigKnownPacks::vanilla(), &mut kp);
         use tokio::io::AsyncWriteExt;
         c.write_all(&kp).await.unwrap();
-        // 3. Registry Data 4包（CB 0x07：dimension_type + biome + timeline + world_clock）。
-        for want in ["minecraft:dimension_type", "minecraft:worldgen/biome", "minecraft:timeline", "minecraft:world_clock"] {
+        // 3. Registry Data 32包（CB 0x07：原版全量同步注册表，包体与抓包逐字节一致）。
+        for (_name, want) in packets::vanilla_config_777::VANILLA_CONFIG_REGISTRY_BODIES_777 {
             let (id, payload) = super::super::framing::read_packet(&mut c).await.unwrap();
             assert_eq!(id, packets::CONFIG_REGISTRY_DATA_S2C_ID);
-            let (reg, _) = packets::decode_config_registry_data(&payload).unwrap();
-            assert_eq!(reg.registry_id, want);
-            assert!(!reg.entries.is_empty());
+            assert_eq!(&payload, want);
         }
-        // 4. Update Tags 1包（CB 0x0E：timeline 4 tag）。
+        // 4. Update Tags 1包（CB 0x0E：原版全量 15 个注册表）。
         let (id, payload) = super::super::framing::read_packet(&mut c).await.unwrap();
         assert_eq!(id, packets::CONFIG_UPDATE_TAGS_S2C_ID);
-        let (tags, _) = packets::decode_config_update_tags(&payload).unwrap();
-        assert_eq!(tags, packets::ConfigUpdateTags::minimal_timeline_tags());
+        assert_eq!(payload, packets::vanilla_config_777::VANILLA_CONFIG_UPDATE_TAGS_BODY_777);
         // 5. Finish S2C → 回 Finish Ack。
         let (id, payload) = super::super::framing::read_packet(&mut c).await.unwrap();
         assert_eq!(id, packets::CONFIG_FINISH_S2C_ID);
@@ -351,8 +399,8 @@ mod tests {
             enter_play(s, profile, packets::COMPRESSION_DISABLED_THRESHOLD).await.unwrap();
         });
         let mut c = tokio::net::TcpStream::connect(addr).await.unwrap();
-        // 读5包：login/setcenter/chunk/pos/keepalive
-        for _ in 0..5 {
+        // 读完整 Join 序列：4 包头 + 81 块 ChunkData + BatchFinished/Pos/KeepAlive。
+        for _ in 0..88 {
             let _ = super::super::framing::read_packet(&mut c).await.unwrap();
         }
         // 回一个 keepalive echo，服务端只log不断开；随后客户端断开，服务端正常退出
@@ -374,7 +422,8 @@ mod tests {
             enter_play(s, profile, packets::COMPRESSION_DISABLED_THRESHOLD).await.unwrap();
         });
         let mut c = tokio::net::TcpStream::connect(addr).await.unwrap();
-        for _ in 0..5 {
+        // 读完整 Join 序列（4 + 81 + 3 包），否则服务端写满 socket 缓冲会阻塞。
+        for _ in 0..88 {
             let _ = super::super::framing::read_packet(&mut c).await.unwrap();
         }
         // 依次发 0x1E/0x1F/0x20/0x21，服务端只log TODO进ECS，不断开

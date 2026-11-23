@@ -97,14 +97,14 @@ async fn login_offline_full_flow() {
     let mut kpack = Vec::new();
     packets::encode_config_known_packs_c2s_packet(&packets::ConfigKnownPacks::vanilla(), &mut kpack);
     s.write_all(&kpack).await.unwrap();
-    for want in ["minecraft:dimension_type", "minecraft:worldgen/biome", "minecraft:timeline", "minecraft:world_clock"] {
+    for (_name, want) in packets::vanilla_config_777::VANILLA_CONFIG_REGISTRY_BODIES_777 {
         let (id, payload) = read_frame(&mut s).await.unwrap();
         assert_eq!(id, packets::CONFIG_REGISTRY_DATA_S2C_ID, "expected registry 0x07");
-        assert_eq!(packets::decode_config_registry_data(&payload).unwrap().0.registry_id, want);
+        assert_eq!(&payload, want);
     }
     let (id, payload) = read_frame(&mut s).await.unwrap();
     assert_eq!(id, packets::CONFIG_UPDATE_TAGS_S2C_ID, "expected update tags 0x0E");
-    assert_eq!(packets::decode_config_update_tags(&payload).unwrap().0, packets::ConfigUpdateTags::minimal_timeline_tags());
+    assert_eq!(payload, packets::vanilla_config_777::VANILLA_CONFIG_UPDATE_TAGS_BODY_777);
     let (id, payload) = read_frame(&mut s).await.unwrap();
     assert_eq!(id, CONFIG_FINISH_S2C_ID, "expected config finish 0x03");
     packets::decode_config_finish_s2c(&payload).unwrap();
@@ -127,17 +127,25 @@ async fn login_offline_full_flow() {
     .expect("login success must push NewConnection");
     assert_eq!(conn.0.ip(), std::net::IpAddr::from([127, 0, 0, 1]));
 
-    // enter_play 真下发：按序读完 Join 序列 5 包（ID已按P4A对照表核对777）。
+    // enter_play 真下发：Join 序列 = Login/SetCenter/GameEvent/BatchStart +
+    // 81 个 ChunkData/BatchFinished/Position/KeepAlive。
     let expect = [
         packets::PLAY_LOGIN_PLAY_ID,
         packets::PLAY_SET_CENTER_CHUNK_ID,
-        packets::PLAY_CHUNK_DATA_ID,
-        packets::PLAY_PLAYER_POSITION_SYNC_ID,
-        packets::PLAY_KEEPALIVE_S2C_ID,
+        packets::PLAY_GAME_EVENT_ID,
+        packets::PLAY_CHUNK_BATCH_START_ID,
     ];
     for want in expect {
         let (id, _) = read_frame(&mut s).await.unwrap();
         assert_eq!(id, want, "join sequence order");
+    }
+    for _ in 0..81 {
+        let (id, _) = read_frame(&mut s).await.unwrap();
+        assert_eq!(id, packets::PLAY_CHUNK_DATA_ID, "initial view chunk");
+    }
+    for want in [packets::PLAY_CHUNK_BATCH_FINISHED_ID, packets::PLAY_PLAYER_POSITION_SYNC_ID, packets::PLAY_KEEPALIVE_S2C_ID] {
+        let (id, _) = read_frame(&mut s).await.unwrap();
+        assert_eq!(id, want, "join sequence tail");
     }
     // C2S KeepAlive 回显后连接保持（Play 循环只 log 不踢）：短超时内不应 EOF。
     let mut body = Vec::new();
@@ -292,20 +300,20 @@ async fn login_compression_flow_sends_set_compression_first() {
     mc_protocol::write_varint(kp.len() as i32, &mut klb);
     s.write_all(&klb).await.unwrap();
     s.write_all(&kp).await.unwrap();
-    for want in ["minecraft:dimension_type", "minecraft:worldgen/biome", "minecraft:timeline", "minecraft:world_clock"] {
+    for (_name, want) in packets::vanilla_config_777::VANILLA_CONFIG_REGISTRY_BODIES_777 {
         let len = read_varint_async(&mut s).await.unwrap();
         let mut frame = vec![0u8; len as usize];
         s.read_exact(&mut frame).await.unwrap();
         let (id, payload) = decode_compressed_frame(&frame).unwrap();
         assert_eq!(id, packets::CONFIG_REGISTRY_DATA_S2C_ID);
-        assert_eq!(packets::decode_config_registry_data(&payload).unwrap().0.registry_id, want);
+        assert_eq!(&payload, want);
     }
     let len = read_varint_async(&mut s).await.unwrap();
     let mut frame = vec![0u8; len as usize];
     s.read_exact(&mut frame).await.unwrap();
     let (id, payload) = decode_compressed_frame(&frame).unwrap();
     assert_eq!(id, packets::CONFIG_UPDATE_TAGS_S2C_ID);
-    assert_eq!(packets::decode_config_update_tags(&payload).unwrap().0, packets::ConfigUpdateTags::minimal_timeline_tags());
+    assert_eq!(payload, packets::vanilla_config_777::VANILLA_CONFIG_UPDATE_TAGS_BODY_777);
     let len = read_varint_async(&mut s).await.unwrap();
     let mut frame = vec![0u8; len as usize];
     s.read_exact(&mut frame).await.unwrap();
@@ -327,13 +335,12 @@ async fn login_compression_flow_sends_set_compression_first() {
     })
     .await
     .expect("compressed login must push NewConnection");
-    // enter_play 真下发：压缩帧 5 包 Join 序列，随后连接保持（Play 循环）。
+    // enter_play 真下发：压缩帧 Join 序列（81 块同批），随后连接保持（Play 循环）。
     let expect = [
         packets::PLAY_LOGIN_PLAY_ID,
         packets::PLAY_SET_CENTER_CHUNK_ID,
-        packets::PLAY_CHUNK_DATA_ID,
-        packets::PLAY_PLAYER_POSITION_SYNC_ID,
-        packets::PLAY_KEEPALIVE_S2C_ID,
+        packets::PLAY_GAME_EVENT_ID,
+        packets::PLAY_CHUNK_BATCH_START_ID,
     ];
     for want in expect {
         let len = read_varint_async(&mut s).await.unwrap();
@@ -341,6 +348,20 @@ async fn login_compression_flow_sends_set_compression_first() {
         s.read_exact(&mut frame).await.unwrap();
         let (id, _) = decode_compressed_frame(&frame).unwrap();
         assert_eq!(id, want, "compressed join sequence order");
+    }
+    for _ in 0..81 {
+        let len = read_varint_async(&mut s).await.unwrap();
+        let mut frame = vec![0u8; len as usize];
+        s.read_exact(&mut frame).await.unwrap();
+        let (id, _) = decode_compressed_frame(&frame).unwrap();
+        assert_eq!(id, packets::PLAY_CHUNK_DATA_ID, "compressed initial view chunk");
+    }
+    for want in [packets::PLAY_CHUNK_BATCH_FINISHED_ID, packets::PLAY_PLAYER_POSITION_SYNC_ID, packets::PLAY_KEEPALIVE_S2C_ID] {
+        let len = read_varint_async(&mut s).await.unwrap();
+        let mut frame = vec![0u8; len as usize];
+        s.read_exact(&mut frame).await.unwrap();
+        let (id, _) = decode_compressed_frame(&frame).unwrap();
+        assert_eq!(id, want, "compressed join sequence tail");
     }
     // Play 循环保持：300ms 内不应 EOF。
     let mut buf = [0u8; 1];

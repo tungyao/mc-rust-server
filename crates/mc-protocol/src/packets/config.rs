@@ -366,11 +366,11 @@ impl ConfigTaggedRegistry {
 pub struct ConfigUpdateTags { pub registries: Vec<ConfigTaggedRegistry> }
 
 impl ConfigUpdateTags {
-    /// P10 最小 tag 集：timeline 注册表 4 个 tag。
+    /// timeline 注册表 4 个 tag（P10）。
     /// 条目 ID 依 minimal_timeline 固定顺序（day=0, early_game=1, moon=2, villager_schedule=3）：
     /// in_overworld 真数据 [#universal, day, moon, early_game] 展平为 [3,0,2,1]；universal/in_end/in_nether 真数据均归约到 [3]。
-    pub fn minimal_timeline_tags() -> Self {
-        Self { registries: vec![ConfigTaggedRegistry {
+    pub fn timeline_registry() -> ConfigTaggedRegistry {
+        ConfigTaggedRegistry {
             registry_id: "minecraft:timeline".into(),
             tags: vec![
                 ConfigUpdateTag { name: "minecraft:in_overworld".into(), entries: vec![3, 0, 2, 1] },
@@ -378,7 +378,30 @@ impl ConfigUpdateTags {
                 ConfigUpdateTag { name: "minecraft:in_end".into(), entries: vec![3] },
                 ConfigUpdateTag { name: "minecraft:in_nether".into(), entries: vec![3] },
             ],
-        }] }
+        }
+    }
+    /// block 注册表 tag 全量（P11）：dimension_type 的 `infiniburn` 是 TagKey，
+    /// 客户端只用网络下发的 tag（本地数据包 tag 不会补），缺了就在 Finish 阶段报
+    /// `Missing tag: 'minecraft:infiniburn_overworld' in 'minecraft:block'`。
+    /// 数据来自 26.3 原版 `data/minecraft/tags/block/**`（递归展开 `#tag` 引用、去重），
+    /// block 注册表 ID 来自 data generator 的 `reports/registries.json` protocol_id；
+    /// 与 26.3 原版服务端空 KnownPacks 实测下发的 block tag（300 个、14825 项）逐项一致。
+    /// 只发 block 与 timeline 两个注册表：其余注册表本服未下发条目，避免 tag 指向不存在的 ID。
+    pub fn block_registry() -> ConfigTaggedRegistry {
+        ConfigTaggedRegistry {
+            registry_id: "minecraft:block".into(),
+            tags: super::block_tags_777::BLOCK_TAGS_777
+                .iter()
+                .map(|(name, ids)| ConfigUpdateTag {
+                    name: (*name).into(),
+                    entries: ids.iter().map(|&id| id as i32).collect(),
+                })
+                .collect(),
+        }
+    }
+    /// Configuration Update Tags 最小集：block（infiniburn）+ timeline（in_*）两个注册表。
+    pub fn minimal_tags() -> Self {
+        Self { registries: vec![Self::block_registry(), Self::timeline_registry()] }
     }
     pub fn encode_body(&self, out: &mut Vec<u8>) {
         write_varint(self.registries.len() as i32, out);
@@ -751,18 +774,28 @@ mod tests {
     }
     #[test]
     fn config_update_tags_codec_and_minimal_set() {
-        // 最小集：timeline 注册表 4 tag，ID 依 [day=0, early_game=1, moon=2, villager_schedule=3] 固定顺序。
-        let v = ConfigUpdateTags::minimal_timeline_tags();
-        assert_eq!(v.registries.len(), 1);
-        assert_eq!(v.registries[0].registry_id, "minecraft:timeline");
+        // 最小集：block（原版全量 300 tag）+ timeline（4 tag）。
+        let v = ConfigUpdateTags::minimal_tags();
+        assert_eq!(v.registries.len(), 2);
+        assert_eq!(v.registries[0].registry_id, "minecraft:block");
+        assert_eq!(v.registries[0].tags.len(), crate::packets::block_tags_777::BLOCK_TAGS_777.len());
+        assert_eq!(v.registries[0].tags.len(), 300);
+        let infiniburn = |name: &str| -> Vec<i32> {
+            v.registries[0].tags.iter().find(|t| t.name == name).expect("infiniburn tag").entries.clone()
+        };
+        assert_eq!(infiniburn("minecraft:infiniburn_overworld"), vec![334, 729]);
+        assert_eq!(infiniburn("minecraft:infiniburn_nether"), vec![334, 729]);
+        assert_eq!(infiniburn("minecraft:infiniburn_end"), vec![334, 729, 36]);
+        // timeline 注册表 4 tag，ID 依 [day=0, early_game=1, moon=2, villager_schedule=3] 固定顺序。
+        assert_eq!(v.registries[1].registry_id, "minecraft:timeline");
         let expect: Vec<(&str, Vec<i32>)> = vec![
             ("minecraft:in_overworld", vec![3, 0, 2, 1]),
             ("minecraft:universal", vec![3]),
             ("minecraft:in_end", vec![3]),
             ("minecraft:in_nether", vec![3]),
         ];
-        assert_eq!(v.registries[0].tags.len(), expect.len());
-        for (tag, (name, ids)) in v.registries[0].tags.iter().zip(expect.iter()) {
+        assert_eq!(v.registries[1].tags.len(), expect.len());
+        for (tag, (name, ids)) in v.registries[1].tags.iter().zip(expect.iter()) {
             assert_eq!(&tag.name, name);
             assert_eq!(&tag.entries, ids);
         }
@@ -777,6 +810,21 @@ mod tests {
         let empty = ConfigUpdateTags { registries: Vec::new() };
         let mut eb = Vec::new(); empty.encode_body(&mut eb);
         assert_eq!(ConfigUpdateTags::decode_body(&eb).unwrap().0, empty);
+    }
+    /// 26.3 原版服务端（空 KnownPacks）实测 update_tags 0x0E 包体（58754B）：
+    /// 只比对本服实际下发的 block/timeline 两个注册表，tag 顺序按名字归一化。
+    #[test]
+    fn config_update_tags_match_vanilla_777_capture() {
+        let (cap, used) = decode_config_update_tags(include_bytes!("data/update_tags_777.bin")).unwrap();
+        assert_eq!(used, 58_754);
+        fn sorted(mut tags: Vec<ConfigUpdateTag>) -> Vec<ConfigUpdateTag> {
+            tags.sort_by(|a, b| a.name.cmp(&b.name));
+            tags
+        }
+        let cap_block = cap.registries.iter().find(|r| r.registry_id == "minecraft:block").unwrap();
+        assert_eq!(sorted(cap_block.tags.clone()), sorted(ConfigUpdateTags::block_registry().tags));
+        let cap_timeline = cap.registries.iter().find(|r| r.registry_id == "minecraft:timeline").unwrap();
+        assert_eq!(sorted(cap_timeline.tags.clone()), sorted(ConfigUpdateTags::timeline_registry().tags));
     }
     #[test]
     fn config_known_packs_placeholder_roundtrip() {

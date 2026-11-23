@@ -30,3 +30,6 @@
 - [2026-11-23 09:30 UTC] agent=p10 task=timeline-worldclock-tags status=start detail=dimension重写+timeline/world_clock注册表+UpdateTags files=config.rs,login_route.rs
 - [2026-11-23 10:10 UTC] agent=p10 task=timeline-worldclock-tags status=done detail=4包+tags+0x0E勘误，mc-protocol 38+mc-network全过 files=config.rs(810)data/*.json(637)login_route.rs(406)
 - [2026-11-23 08:10 UTC] agent=main task=dim-offset-fix status=done detail=offset改Float删3多余字段，向原版JSON对齐 files=config.rs
+- [2026-11-23 12:30 UTC] agent=main task=P11-vanilla-registry-replay status=done detail=真机Configuration根因是block tag缺infiniburn_overworld；改为回放原版26.3全量32注册表+15注册表19662项UpdateTags；修LoginPlay/PositionSync 777布局；加KeepAlive/GameEvent/ChunkBatch files=config.rs,vanilla_config_777.rs,block_tags_777.rs,play_login.rs,play_sync.rs,play_chunk.rs,login_route.rs
+- [2026-11-23 12:45 UTC] agent=main task=P12-own-world-chunks status=done detail=区块真实blockstate ID(air0/stone1/grass9/dirt10)+间接palette+真实MOTION_BLOCKING高度图+天空光BitSet(byte-array)=真机进Play、地形可见、无30s超时；一次同批81块满足hasAllNeighbors；删除原版区块抓包脚手架 files=world/lib.rs,play_chunk.rs,login_route.rs,play.rs
+- [2026-11-23 12:46 UTC] agent=main task=P12-client-crash-note status=done detail=26.3客户端偶发jvm.dll 0xc0000005需-XX:StackShadowPages=32（原版启动器同样加），非服务端问题；真机坐标y65 on_ground、KeepAlive稳定

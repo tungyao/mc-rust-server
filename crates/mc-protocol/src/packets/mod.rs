@@ -3,10 +3,12 @@
 //! - handshake/status/login/config: 各阶段包
 //! - play_*: Play包（ID已按P4A对照表核对777）
 //! 兼容：`packets::X` 路径不变（全部 pub use 重导出）。
+mod block_tags_777;
 pub mod codec;
 pub mod config;
 pub mod handshake;
 pub mod login;
+pub mod vanilla_config_777;
 // nbt.rs 在 src/ 顶层（Registry/区块多处共用，不专属于 packets 阶段）；
 // 这里用 #[path] 接进来，保持 `packets::nbt` / `packets::NbtTag` 路径不变。
 #[path = "../nbt.rs"]

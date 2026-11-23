@@ -156,14 +156,14 @@ async fn login_full_flow_counts_online_once() {
     let mut kpack = Vec::new();
     packets::encode_config_known_packs_c2s_packet(&packets::ConfigKnownPacks::vanilla(), &mut kpack);
     s.write_all(&kpack).await.unwrap();
-    for want in ["minecraft:dimension_type", "minecraft:worldgen/biome", "minecraft:timeline", "minecraft:world_clock"] {
+    for (_name, want) in packets::vanilla_config_777::VANILLA_CONFIG_REGISTRY_BODIES_777 {
         let (id, payload) = read_frame(&mut s).await.unwrap();
         assert_eq!(id, packets::CONFIG_REGISTRY_DATA_S2C_ID, "expected registry 0x07");
-        assert_eq!(packets::decode_config_registry_data(&payload).unwrap().0.registry_id, want);
+        assert_eq!(&payload, want);
     }
     let (id, payload) = read_frame(&mut s).await.unwrap();
     assert_eq!(id, packets::CONFIG_UPDATE_TAGS_S2C_ID, "expected update tags 0x0E");
-    packets::decode_config_update_tags(&payload).unwrap();
+    assert_eq!(payload, packets::vanilla_config_777::VANILLA_CONFIG_UPDATE_TAGS_BODY_777);
     let (id, payload) = read_frame(&mut s).await.unwrap();
     assert_eq!(id, packets::CONFIG_FINISH_S2C_ID, "expected config finish 0x03");
     packets::decode_config_finish_s2c(&payload).unwrap();

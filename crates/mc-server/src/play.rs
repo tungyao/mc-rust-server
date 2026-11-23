@@ -37,7 +37,7 @@ pub struct PlayScaffold {
     pub view_center: Option<mc_core::ChunkPos>,
 }
 
-/// 出生点所在区块（视距中心）：`SPAWN_POS(8,80,8)` → chunk `(0,0)`。
+/// 出生点所在区块（视距中心）：`SPAWN_POS(369,67,381)` → chunk `(23,23)`。
 pub fn spawn_center_chunk() -> mc_core::ChunkPos {
     let spawn = mc_world::SPAWN_POS;
     mc_core::ChunkPos(spawn.0.div_euclid(16), spawn.2.div_euclid(16))
@@ -95,8 +95,9 @@ pub fn login_join_system(mut play: ResMut<PlayScaffold>) {
         let data = mc_protocol::packets::PlayChunkData {
             chunk_x: pos.0,
             chunk_z: pos.1,
-            heightmaps_nbt: mc_protocol::packets::minimal_empty_nbt_bytes(),
+            heightmaps_nbt: mc_world::chunk_heightmaps_bytes(),
             section_bytes,
+            light_bytes: mc_world::chunk_light_bytes(),
         };
         let mut buf = Vec::new();
         mc_protocol::packets::encode_play_chunk_data_packet(&data, &mut buf);
@@ -168,7 +169,8 @@ mod tests {
     fn initial_view_is_81_around_spawn_one_per_tick() {
         // 单玩家：spawn 中心 radius=4 共 81 块，每 tick 只发 1 块
         let center = spawn_center_chunk();
-        assert_eq!(center, mc_core::ChunkPos(0, 0));
+        // 跟随 SPAWN_POS：369>>4=23, 381>>4=23（负坐标用 div_euclid，见 spawn_center_chunk）。
+        assert_eq!(center, mc_core::ChunkPos(23, 23));
         let play = PlayScaffold {
             pending_login: vec!["127.0.0.1:20001".parse().unwrap()],
             ..Default::default()
@@ -222,8 +224,9 @@ mod tests {
         let data = mc_protocol::packets::PlayChunkData {
             chunk_x: 0,
             chunk_z: 0,
-            heightmaps_nbt: mc_protocol::packets::minimal_empty_nbt_bytes(),
+            heightmaps_nbt: mc_world::chunk_heightmaps_bytes(),
             section_bytes,
+            light_bytes: mc_world::chunk_light_bytes(),
         };
         let mut buf = Vec::new();
         mc_protocol::packets::encode_play_chunk_data_packet(&data, &mut buf);
@@ -239,13 +242,16 @@ mod tests {
 
         let spawn = mc_world::SPAWN_POS;
         let sync = mc_protocol::packets::PlayerPositionSync {
+            teleport_id: 1,
             x: spawn.0 as f64 + 0.5,
             y: spawn.1 as f64,
             z: spawn.2 as f64 + 0.5,
+            delta_x: 0.0,
+            delta_y: 0.0,
+            delta_z: 0.0,
             yaw: 0.0,
             pitch: 0.0,
-            flags: 0,
-            teleport_id: 1,
+            relatives: 0,
         };
         let mut buf = Vec::new();
         mc_protocol::packets::encode_player_position_sync_packet(&sync, &mut buf);

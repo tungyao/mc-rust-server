@@ -31,14 +31,16 @@ impl Chunk {
 pub const WORLD_SEED: i64 = 123456789;
 
 /// 重生点（方块坐标）：出生岛中心附近 y=80 安全高度。
-pub const SPAWN_POS: mc_core::BlockPos = mc_core::BlockPos(8, 80, 8);
+/// P12: 对齐 26.3 原版抓包出生点（chunk 23,23）；join 位置 (369.5,67,381.5)。
+pub const SPAWN_POS: mc_core::BlockPos = mc_core::BlockPos(369, 67, 381);
 
-/// 空气 / 石头 / 草方块 / 泥土占位方块 ID（与 mc-registry 占位表对齐：
-/// air=0 stone=1 grass_block=2 dirt=3，真实 blockstate ID 待对齐，此处仅脚手架）。
+/// 方块 ID 与 26.3 `reports/blocks.json` 的全局 blockstate ID 对齐：
+/// air=0、stone=1、grass_block（snowy=false）=9、dirt=10。
+/// 这些 ID 也用于 Configuration 中回放的 `minecraft:block` 注册表。
 pub const AIR_BLOCK_ID: u16 = 0;
 pub const STONE_BLOCK_ID: u16 = 1;
-pub const GRASS_BLOCK_ID: u16 = 2;
-pub const DIRT_BLOCK_ID: u16 = 3;
+pub const GRASS_BLOCK_ID: u16 = 9;
+pub const DIRT_BLOCK_ID: u16 = 10;
 
 /// 按 y 分层的地形带：y <= GROUND_LEVEL 石头，61..=63 泥土，64 草方块，其余空气。
 pub const GROUND_LEVEL: i32 = 60;
@@ -105,36 +107,34 @@ pub fn view_chunks(center: mc_core::ChunkPos, radius: i32) -> Vec<mc_core::Chunk
     });
     out
 }
-/// Chunk 网络字节：24节真布局串接（每节8B，复用 mc-protocol 单值容器：block_count u16be
-/// + fluid_count u16be + block单值(BPE0+全局blockstate) + biome单值(BPE0+plains 0)）。
-/// 来源：Chunk_format#Chunk_Section结构 + Paletted单值（1.21.5+无data_len），与protocol对齐。
+/// Chunk 网络字节：24节真布局串接（每节8B起，复用 mc-protocol 单值/间接容器）。
+/// 来源：Chunk_format#Chunk_Section结构 + Paletted容器（1.21.5+无data_len），与protocol对齐。
 /// 按高度区分：空气节全零占位；均匀石头节调色板记石头ID、block_count=4096；
-/// 混合节记真实非空方块数（palette暂单值air占位，P后续补indirect多值，当前block_count真实）。
+/// 混合节（石头+泥土、草+空气）走间接palette（BPE=4，4096项真实数据），
+/// 保证出生点所在 section 有几何体，客户端才会完成 “player section compiled”。
 pub fn chunk_network_bytes(chunk: &Chunk) -> Vec<u8> {
     let mut out = Vec::with_capacity(chunk.sections.len() * 8);
+    let mut states = [0i32; mc_protocol::packets::SECTION_VOLUME];
     for (idx, kind) in chunk.sections.iter().enumerate() {
         match *kind {
             SectionKind::Uniform(AIR_BLOCK_ID) => {
                 mc_protocol::packets::encode_empty_section_placeholder(&mut out);
             }
             SectionKind::Uniform(id) => {
-                // 均匀非空节：单值palette记该blockstate占位ID（<128时VarInt单字节），fluid=0。
+                // 均匀非空节：单值palette记该blockstate ID，fluid=0，非空气数4096。
                 mc_protocol::packets::encode_uniform_section_single(
-                    id as i32, 0, 4096, 0, &mut out,
+                    id as i32, mc_protocol::packets::PLAINS_BIOME_ID_777, 4096, 0, &mut out,
                 );
             }
             SectionKind::Paletted | SectionKind::Direct => {
-                // 混合节占位：逐层按 block_at_y 计非空数（每层 16x16），palette暂单值air，
-                // block_count真实，待P补indirect多值palette + data数组。
+                // 混合节：按 y 层生成真实 4096 项（局部索引 y*256+z*16+x），走间接 palette。
                 let base = MIN_Y + idx as i32 * 16;
-                let mut non_air: u16 = 0;
                 for dy in 0..16 {
-                    if block_at_y(base + dy) != AIR_BLOCK_ID {
-                        non_air += 256;
-                    }
+                    let id = block_at_y(base + dy) as i32;
+                    states[dy as usize * 256..(dy as usize + 1) * 256].fill(id);
                 }
-                mc_protocol::packets::encode_uniform_section_single(
-                    AIR_BLOCK_ID as i32, 0, non_air, 0, &mut out,
+                mc_protocol::packets::encode_block_section(
+                    &states, mc_protocol::packets::PLAINS_BIOME_ID_777, &mut out,
                 );
             }
         }
@@ -142,11 +142,20 @@ pub fn chunk_network_bytes(chunk: &Chunk) -> Vec<u8> {
     out
 }
 
-/// 空MOTION_BLOCKING高度图（777结构化Heightmaps，非NBT）：count(1)+type(4)+37零long。
-/// 与 protocol::empty_heightmaps_bytes 同字节，world侧真机高度图统一走这里。
-/// 来源：Chunk_format#Heightmap结构（MOTION_BLOCKING=4，37 longs全最小高度）。
+/// 真实 MOTION_BLOCKING 高度图：当前平原地形最高非空气方块 = 草方块 y=64，
+/// 高度值 = 65 - min_y(-64) = 129。
 pub fn chunk_heightmaps_bytes() -> Vec<u8> {
-    mc_protocol::packets::empty_heightmaps_bytes()
+    mc_protocol::packets::motion_blocking_heightmap_uniform((GRASS_LEVEL + 1) - MIN_Y)
+}
+
+/// 平原天空光照：草方块所在 section（y=64..79，index 8）及以上 15 级全亮；
+/// 地下 section 无光照数组（客户端按 0 处理）。block light 为空。
+pub fn chunk_light_bytes() -> Vec<u8> {
+    let first_lit = ((GRASS_LEVEL - MIN_Y) / 16) as u32;
+    let mask = ((1u64 << SECTION_COUNT) - 1) & !((1u64 << first_lit) - 1);
+    let mut out = Vec::new();
+    mc_protocol::packets::encode_sky_light_data(mask, 15, &mut out);
+    out
 }
 
 #[cfg(test)]
@@ -201,31 +210,69 @@ mod tests {
     fn chunk_network_bytes_not_empty() {
         let c = chunk_for(mc_core::ChunkPos(0, 0));
         let bytes = chunk_network_bytes(&c);
-        assert_eq!(bytes.len(), SECTION_COUNT * 8);
-        // 空气节（idx>=9）全零占位，石头节（idx<7）非零且互等，混合节非零
-        let air = &bytes[9 * 8..];
-        assert!(air.iter().all(|&b| b == 0), "air sections stay zero placeholder");
+        // 7 个均匀石头节(8B) + 2 个间接 palette 混合节(2058B) + 15 个空气节(8B)
+        assert_eq!(bytes.len(), 7 * 8 + 2 * 2058 + 15 * 8);
+        // 均匀石头节：block_count 4096, fluid 0, 单值 stone=1, biome plains=41
         let stone0 = &bytes[0..8];
-        assert!(stone0.iter().any(|&b| b != 0), "stone sections differ from air");
+        assert_eq!(stone0, &[0x10, 0x00, 0x00, 0x00, 0x00, 0x01, 0x00, 0x29]);
         for i in 1..7 {
             assert_eq!(&bytes[i * 8..i * 8 + 8], stone0, "stone section {i}");
         }
-        assert!(bytes[7 * 8..8 * 8].iter().any(|&b| b != 0));
-        assert!(bytes[8 * 8..9 * 8].iter().any(|&b| b != 0));
-        // 真布局断言（与protocol单值容器对齐）：石头节8B = 10 00(4096) 00 00(fluid0) 00 01(stone) 00 00(plains)
-        assert_eq!(stone0, &[0x10, 0x00, 0x00, 0x00, 0x00, 0x01, 0x00, 0x00]);
-        // 混合节7全满（4096，palette暂air）：10 00 00 00 00 00 00 00；节8仅草层256：01 00 00 00 00 00 00 00
-        assert_eq!(&bytes[7 * 8..8 * 8], &[0x10, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00]);
-        assert_eq!(&bytes[8 * 8..9 * 8], &[0x01, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00]);
+        // 混合节7（48..63 石头+泥土）：block_count 4096, fluid 0, BPE=4, palette=[1,10],
+        // 之后是 4096 项 ×4bit = 256 longs（无长度前缀）。
+        let s7 = &bytes[7 * 8..7 * 8 + 2058];
+        assert_eq!(&s7[..4], &[0x10, 0x00, 0x00, 0x00]);
+        assert_eq!(s7[4], 4, "BPE=4");
+        assert_eq!(s7[5], 2, "palette len=2");
+        assert_eq!(&s7[6..8], &[1, 10], "palette=[stone,dirt]");
+        // 混合节8（64 草方块 + 65..79 空气）：block_count 256，palette=[9,0]。
+        let s8 = &bytes[7 * 8 + 2058..7 * 8 + 2058 + 2058];
+        assert_eq!(&s8[..4], &[0x01, 0x00, 0x00, 0x00]);
+        assert_eq!(s8[4], 4);
+        assert_eq!(s8[5], 2);
+        assert_eq!(&s8[6..8], &[9, 0], "palette=[grass_block,air]");
+        // 空气节（idx>=9）写 plains=41 的 biome palette，其余字节为0
+        let air = &bytes[7 * 8 + 2 * 2058..];
+        assert!(air.chunks(8).all(|s| s == [0, 0, 0, 0, 0, 0, 0, 41]), "air sections keep plains biome id");
     }
 
     #[test]
-    fn chunk_heightmaps_is_empty_motion_blocking() {
-        // world高度图 = protocol结构化空MOTION_BLOCKING（1 + 4 + 37 + 37×8零）
+    fn chunk_heightmaps_is_real_motion_blocking() {
+        // 平原地表：草方块 y=64 → height = 65 - (-64) = 129
         let h = chunk_heightmaps_bytes();
-        assert_eq!(h, mc_protocol::packets::empty_heightmaps_bytes());
         assert_eq!(&h[..3], &[0x01, 0x04, 0x25]);
         assert_eq!(h.len(), 3 + 37 * 8);
+        let mut word_bytes = [0u8; 8];
+        word_bytes.copy_from_slice(&h[3..11]);
+        let first = u64::from_be_bytes(word_bytes);
+        for k in 0..7 {
+            assert_eq!((first >> (k * 9)) & 0x1ff, 129, "first long item {k}");
+        }
+        // 最后一个 long 装 256-36*7=4 项，其余为空。
+        word_bytes.copy_from_slice(&h[3 + 36 * 8..]);
+        let last = u64::from_be_bytes(word_bytes);
+        for k in 0..4 {
+            assert_eq!((last >> (k * 9)) & 0x1ff, 129, "last long item {k}");
+        }
+        assert_eq!(last >> (4 * 9), 0, "last long padding must be zero");
+    }
+
+    #[test]
+    fn chunk_light_is_sky_lit_above_ground() {
+        let l = chunk_light_bytes();
+        assert_eq!(l.len(), 1 + 3 + 3 + 1 + 16 * (2 + 2048) + 1);
+        // sky mask bits 8..23（y=64 及以上 16 个 section），BitSet 字节 [0,0xFF,0xFF]
+        assert_eq!(&l[..4], &[3, 0, 0xFF, 0xFF]);
+        assert_eq!(l[7], 16);
+        assert_eq!(&l[8..10], &[0x80, 0x10]);
+        let mut off = 8;
+        for _ in 0..16 {
+            assert_eq!(&l[off..off + 2], &[0x80, 0x10], "array length 2048");
+            off += 2;
+            assert!(l[off..off + 2048].iter().all(|&b| b == 0xFF), "sky level 15");
+            off += 2048;
+        }
+        assert_eq!(off, l.len() - 1, "only block array count remains");
     }
 
     #[test]
