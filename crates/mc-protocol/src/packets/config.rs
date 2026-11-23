@@ -37,7 +37,76 @@ pub fn decode_config_finish_ack(_payload: &[u8]) -> Result<(), ProtocolError> { 
 // Registry Data：registry_id + 条目表。ID已按P4A对照表核对（CB 0x07）。
 // 线格式来源 minecraft.wiki 777 `registry_data`：registry_id(Identifier/String) + VarInt条数
 // + 每项 entry_id(Identifier/String) + has_data(Bool) + 有数据时NBT。
-// 生产最小只发 has_data=false 项（客户端用内置默认即可站住），data=Some 分支为占位（真NBT后半接，线格式待NBT库补齐）。
+// data语义：Some内即完整未压缩NBT字节（TAG_Compound 0x0A开头，空根名），线格式为 Bool(1) + VarInt(len) + NBT。
+// TODO(P7A): nbt.rs encoder合进来后，切 real_*_nbt() 到结构化builder，当前手拼字节保持零依赖。
+fn nbt_name(out: &mut Vec<u8>, name: &str) {
+    let b = name.as_bytes();
+    out.extend_from_slice(&(b.len() as u16).to_be_bytes());
+    out.extend_from_slice(b);
+}
+fn nbt_byte(out: &mut Vec<u8>, name: &str, v: u8) {
+    out.push(1); nbt_name(out, name); out.push(v);
+}
+fn nbt_int(out: &mut Vec<u8>, name: &str, v: i32) {
+    out.push(3); nbt_name(out, name); out.extend_from_slice(&v.to_be_bytes());
+}
+fn nbt_float(out: &mut Vec<u8>, name: &str, v: f32) {
+    out.push(5); nbt_name(out, name); out.extend_from_slice(&v.to_be_bytes());
+}
+fn nbt_double(out: &mut Vec<u8>, name: &str, v: f64) {
+    out.push(6); nbt_name(out, name); out.extend_from_slice(&v.to_be_bytes());
+}
+fn nbt_string(out: &mut Vec<u8>, name: &str, v: &str) {
+    out.push(8); nbt_name(out, name);
+    let b = v.as_bytes();
+    out.extend_from_slice(&(b.len() as u16).to_be_bytes());
+    out.extend_from_slice(b);
+}
+
+/// overworld dimension_type 真NBT（未压缩，根TAG_Compound空名）。
+/// 字段对标 minecraft.wiki Dimension JSON：vanilla overworld值。
+/// monster_spawn_light_level / monster_spawn_block_light_limit 按本任务约定取Int（vanilla新版为uniform对象，此处简化为Int 0）。
+pub fn real_overworld_dimension_nbt() -> Vec<u8> {
+    let mut out = Vec::with_capacity(256);
+    out.push(0x0A); out.extend_from_slice(&[0x00, 0x00]); // root compound，空名
+    nbt_byte(&mut out, "has_skylight", 1);
+    nbt_byte(&mut out, "has_ceiling", 0);
+    nbt_byte(&mut out, "ultrawarm", 0);
+    nbt_byte(&mut out, "natural", 1);
+    nbt_double(&mut out, "coordinate_scale", 1.0);
+    nbt_byte(&mut out, "bed_works", 1);
+    nbt_byte(&mut out, "respawn_anchor_works", 0);
+    nbt_int(&mut out, "min_y", -64);
+    nbt_int(&mut out, "height", 384);
+    nbt_int(&mut out, "logical_height", 384);
+    nbt_string(&mut out, "infiniburn", "minecraft:infiniburn_overworld");
+    nbt_string(&mut out, "effects", "minecraft:overworld");
+    nbt_float(&mut out, "ambient_light", 0.0);
+    nbt_byte(&mut out, "piglin_safe", 0);
+    nbt_byte(&mut out, "has_raids", 1);
+    nbt_int(&mut out, "monster_spawn_light_level", 0);
+    nbt_int(&mut out, "monster_spawn_block_light_limit", 0);
+    out.push(0x00); // TAG_End
+    out
+}
+
+/// plains biome 真NBT（未压缩，根TAG_Compound空名）。
+/// 字段对标 minecraft.wiki Biome JSON：temperature/downfall/effects{4色}为必需，另带has_precipitation=1贴近vanilla。
+pub fn real_plains_biome_nbt() -> Vec<u8> {
+    let mut out = Vec::with_capacity(128);
+    out.push(0x0A); out.extend_from_slice(&[0x00, 0x00]); // root compound，空名
+    nbt_byte(&mut out, "has_precipitation", 1);
+    nbt_float(&mut out, "temperature", 0.8);
+    nbt_float(&mut out, "downfall", 0.4);
+    out.push(10); nbt_name(&mut out, "effects"); // nested compound
+    nbt_int(&mut out, "sky_color", 7_907_327);
+    nbt_int(&mut out, "fog_color", 12_638_463);
+    nbt_int(&mut out, "water_fog_color", 329_011);
+    nbt_int(&mut out, "water_color", 4_159_204);
+    out.push(0x00); // end effects
+    out.push(0x00); // TAG_End root
+    out
+}
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ConfigRegistryEntry { pub entry_id: String, pub data: Option<Vec<u8>> }
 
@@ -73,21 +142,21 @@ impl ConfigRegistryData {
     pub fn empty(registry_id: impl Into<String>) -> Self {
         Self { registry_id: registry_id.into(), entries: Vec::new() }
     }
-    /// 最小 dimension_type：1项 overworld 且 has_data=false。
+    /// 最小 dimension_type：1项 overworld 且 has_data=true（真NBT）。
     /// 来源：minecraft.wiki 777 `registry_data`；vanilla注册表名 `minecraft:dimension_type`，
     /// Play Login按索引查维度（本服LoginPlay dimension_type=0即此表第0项），缺表真机黑屏/被踢。
     pub fn minimal_dimension_type() -> Self {
         Self {
             registry_id: "minecraft:dimension_type".into(),
-            entries: vec![ConfigRegistryEntry { entry_id: "minecraft:overworld".into(), data: None }],
+            entries: vec![ConfigRegistryEntry { entry_id: "minecraft:overworld".into(), data: Some(real_overworld_dimension_nbt()) }],
         }
     }
-    /// 最小 biome：1项 plains 且 has_data=false。
+    /// 最小 biome：1项 plains 且 has_data=true（真NBT）。
     /// 来源同上；vanilla生物群系注册表名 `minecraft:worldgen/biome`，客户端强制校验时缺表会踢。
     pub fn minimal_biome() -> Self {
         Self {
             registry_id: "minecraft:worldgen/biome".into(),
-            entries: vec![ConfigRegistryEntry { entry_id: "minecraft:plains".into(), data: None }],
+            entries: vec![ConfigRegistryEntry { entry_id: "minecraft:plains".into(), data: Some(real_plains_biome_nbt()) }],
         }
     }
     pub fn encode_body(&self, out: &mut Vec<u8>) {
@@ -106,7 +175,7 @@ impl ConfigRegistryData {
     }
 }
 
-/// Configuration阶段最小下发表：dimension_type + biome 各1项（has_data=false）。
+/// Configuration阶段最小下发表：dimension_type + biome 各1项（has_data=true真NBT）。
 /// 空表直接Finish多数vanilla可过，但真机按索引查维度/生物群系，故发此2包再Finish即站住；更多注册表（chat_type/damage_type等）后半按需补。
 pub fn default_configuration_registries() -> Vec<ConfigRegistryData> {
     vec![ConfigRegistryData::minimal_dimension_type(), ConfigRegistryData::minimal_biome()]
@@ -235,13 +304,49 @@ mod tests {
         assert_eq!(regs[1].registry_id, "minecraft:worldgen/biome");
         for r in &regs {
             assert_eq!(r.entries.len(), 1);
-            assert!(r.entries[0].data.is_none(), "最小下发has_data=false，客户端用内置默认");
+            assert!(r.entries[0].data.is_some(), "最小下发has_data=true带真NBT");
             let mut pkt = Vec::new(); encode_config_registry_data_packet(r, &mut pkt);
             let (id, n) = packet_id_of(&pkt); assert_eq!(id, CONFIG_REGISTRY_DATA_S2C_ID);
             assert_eq!(decode_config_registry_data(&pkt[n..]).unwrap().0, *r);
         }
         assert_eq!(regs[0].entries[0].entry_id, "minecraft:overworld");
         assert_eq!(regs[1].entries[0].entry_id, "minecraft:plains");
+    }
+    #[test]
+    fn config_real_nbt_shape_and_roundtrip() {
+        let dim = real_overworld_dimension_nbt();
+        let bio = real_plains_biome_nbt();
+        for nbt in [&dim, &bio] {
+            assert!(!nbt.is_empty(), "NBT非空");
+            assert_eq!(nbt[0], 0x0A, "NBT以TAG_Compound 0x0A开头");
+            assert_eq!(nbt[nbt.len() - 1], 0x00, "NBT以TAG_End结尾");
+        }
+        // 维度含 effects 标签名与 minecraft:overworld 取值
+        assert!(dim.windows(b"effects".len()).any(|w| w == b"effects"), "维度NBT含effects");
+        assert!(dim.windows(b"minecraft:overworld".len()).any(|w| w == b"minecraft:overworld"));
+        // plains关键值：temperature/downfall标签 + effects四色标签名
+        for key in ["temperature", "downfall", "sky_color", "fog_color", "water_fog_color", "water_color"] {
+            assert!(bio.windows(key.len()).any(|w| w == key.as_bytes()), "plains缺{key}");
+        }
+        // 往返 decode_body 通过（含包头线包与纯body两层）
+        for (reg_id, entry_id, nbt) in [
+            ("minecraft:dimension_type", "minecraft:overworld", dim.clone()),
+            ("minecraft:worldgen/biome", "minecraft:plains", bio.clone()),
+        ] {
+            let v = ConfigRegistryData {
+                registry_id: reg_id.into(),
+                entries: vec![ConfigRegistryEntry { entry_id: entry_id.into(), data: Some(nbt.clone()) }],
+            };
+            let mut body = Vec::new(); v.encode_body(&mut body);
+            assert_eq!(ConfigRegistryData::decode_body(&body).unwrap().0, v);
+            let mut pkt = Vec::new(); encode_config_registry_data_packet(&v, &mut pkt);
+            let (id, n) = packet_id_of(&pkt); assert_eq!(id, CONFIG_REGISTRY_DATA_S2C_ID);
+            assert_eq!(decode_config_registry_data(&pkt[n..]).unwrap().0, v);
+            // entry级往返
+            let mut eb = Vec::new();
+            v.entries[0].encode_body(&mut eb);
+            assert_eq!(ConfigRegistryEntry::decode_body(&eb).unwrap().0.data.unwrap(), nbt);
+        }
     }
     #[test]
     fn config_known_packs_placeholder_roundtrip() {
