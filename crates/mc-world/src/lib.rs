@@ -1,5 +1,7 @@
 //! mc-world: Chunk 存储 + 生成 + 存档，不依赖网络
 //! 对标 FerrumC world + SteelMC parity 思路
+pub mod load;
+pub mod save;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SectionKind {
@@ -81,6 +83,28 @@ pub fn chunk_for(pos: mc_core::ChunkPos) -> Chunk {
     Chunk { pos, sections }
 }
 
+/// 视距内区块列表（P5b）：以 `center` 为中心、切比雪夫半径 `radius` 的正方形。
+/// `radius=4` 时 `(2*4+1)^2=81` 块。按环递增排序（中心先发），环内按 dx/dz 递增，
+/// 保证每 tick 限流 1 块时出生点区块最先到客户端。`radius<0` 返回空。
+pub fn view_chunks(center: mc_core::ChunkPos, radius: i32) -> Vec<mc_core::ChunkPos> {
+    if radius < 0 {
+        return Vec::new();
+    }
+    let side = (radius as usize) * 2 + 1;
+    let mut out = Vec::with_capacity(side * side);
+    for dx in -radius..=radius {
+        for dz in -radius..=radius {
+            out.push(mc_core::ChunkPos(center.0 + dx, center.1 + dz));
+        }
+    }
+    // 中心优先：环（chebyshev 距离）递增，环内 dx/dz 递增（确定性顺序）。
+    out.sort_by_key(|p| {
+        let dx = p.0 - center.0;
+        let dz = p.1 - center.1;
+        (dx.abs().max(dz.abs()), dx, dz)
+    });
+    out
+}
 /// Chunk 网络字节：按真实 section 数逐节填 8B 占位，P3 填真实高度图/光照
 /// （复用 mc-protocol 空 section 占位布局，每节 8B）。
 /// 按高度区分：空气节全零占位；均匀石头节同布局但调色板记石头 ID、
@@ -179,5 +203,34 @@ mod tests {
         }
         assert!(bytes[7 * 8..8 * 8].iter().any(|&b| b != 0));
         assert!(bytes[8 * 8..9 * 8].iter().any(|&b| b != 0));
+    }
+
+    #[test]
+    fn view_chunks_radius4_is_81_center_first() {
+        let center = mc_core::ChunkPos(0, 0);
+        let v = view_chunks(center, 4);
+        assert_eq!(v.len(), 81, "radius=4 -> (2*4+1)^2=81");
+        // 中心先发：限流 1/tick 时出生点区块最先到
+        assert_eq!(v[0], center);
+        // 全覆盖：dx/dz in -4..=4 且无重复
+        let mut sorted = v.clone();
+        sorted.sort_by_key(|p| (p.0, p.1));
+        sorted.dedup();
+        assert_eq!(sorted.len(), 81);
+        for p in &v {
+            assert!((p.0 - center.0).abs() <= 4 && (p.1 - center.1).abs() <= 4);
+        }
+        // 非中心平移：相对偏移不变
+        let c2 = mc_core::ChunkPos(-3, 7);
+        let v2 = view_chunks(c2, 4);
+        assert_eq!(v2.len(), 81);
+        assert_eq!(v2[0], c2);
+    }
+
+    #[test]
+    fn view_chunks_edge_radii() {
+        assert_eq!(view_chunks(mc_core::ChunkPos(1, 2), 0), vec![mc_core::ChunkPos(1, 2)]);
+        assert!(view_chunks(mc_core::ChunkPos(0, 0), -1).is_empty());
+        assert_eq!(view_chunks(mc_core::ChunkPos(0, 0), 1).len(), 9);
     }
 }

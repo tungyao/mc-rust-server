@@ -16,10 +16,17 @@ use tracing::{info, warn};
 
 fn main() {
     tracing_subscriber::fmt::init();
-    let cfg = config::ServerConfig::default();
+    let cfg = match config::ServerConfig::load_or_create("server.toml") {
+        Ok(cfg) => cfg,
+        Err(e) => {
+            warn!("server.toml load failed ({e}), falling back to defaults");
+            config::ServerConfig::default()
+        }
+    };
     let bind = cfg.bind.clone();
     let online = PlayersOnline::default();
-    let net_config = mc_network::NetConfig::new(cfg.max_players, cfg.motd.clone(), Arc::clone(&online.0));
+    let net_config = mc_network::NetConfig::new(cfg.max_players, cfg.motd.clone(), Arc::clone(&online.0))
+        .with_view_distance(cfg.view_distance);
     let (tx, rx) = unbounded::<mc_network::NewConnection>();
     let mut app = App::new();
     app.insert_resource(cfg);

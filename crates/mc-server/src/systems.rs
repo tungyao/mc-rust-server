@@ -15,6 +15,8 @@ pub fn tick_system(mut counter: ResMut<TickCounter>) {
 
 /// 排空网络线程的 NewConnection，只 try_recv不做IO；按到达顺序压入 Join 队列。
 /// 在线数只认这里；Join 真下发在 net 线程 enter_play 已做，ECS 侧 log 见 login_join_system。
+/// P5b：本系统在 chain 里先于 login_join_system，后者把 spawn 中心 radius=4（81 块）
+/// 入队并每 tick 限流发 1 块 ChunkData（防 tick lag）。
 pub fn handle_new_connections(rx: Res<NetReceiver>, online: Res<PlayersOnline>, mut play: ResMut<PlayScaffold>) {
     while let Ok(conn) = rx.0.try_recv() {
         let n = online.0.fetch_add(1, Ordering::SeqCst) + 1;
