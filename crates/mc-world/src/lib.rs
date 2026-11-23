@@ -11,7 +11,7 @@ pub enum SectionKind {
 #[derive(Debug, Clone)]
 pub struct Chunk {
     pub pos: mc_core::ChunkPos,
-    pub sections: Vec<SectionKind>, // P0 占位 24 节，P2 填 paletted_container
+    pub sections: Vec<SectionKind>, // 24 节：整节同值 Uniform，跨层混合 Paletted 占位
 }
 
 impl Chunk {
@@ -31,39 +31,87 @@ pub const WORLD_SEED: i64 = 123456789;
 /// 重生点（方块坐标）：出生岛中心附近 y=80 安全高度。
 pub const SPAWN_POS: mc_core::BlockPos = mc_core::BlockPos(8, 80, 8);
 
-/// 空气 / 石头占位方块 ID（registry 真实 ID 在 P3 对齐，此处仅脚手架）。
+/// 空气 / 石头 / 草方块 / 泥土占位方块 ID（与 mc-registry 占位表对齐：
+/// air=0 stone=1 grass_block=2 dirt=3，真实 blockstate ID 待对齐，此处仅脚手架）。
 pub const AIR_BLOCK_ID: u16 = 0;
 pub const STONE_BLOCK_ID: u16 = 1;
+pub const GRASS_BLOCK_ID: u16 = 2;
+pub const DIRT_BLOCK_ID: u16 = 3;
 
-/// 地面高度占位：y <= GROUND_LEVEL 按石头填（整节粒度），以上空气。
+/// 按 y 分层的地形带：y <= GROUND_LEVEL 石头，61..=63 泥土，64 草方块，其余空气。
 pub const GROUND_LEVEL: i32 = 60;
+/// 泥土带顶（61..=DIRT_TOP 为泥土）。
+pub const DIRT_TOP: i32 = 63;
+/// 草方块所在高度（单层盖顶）。
+pub const GRASS_LEVEL: i32 = 64;
 /// 24 节对应 y=-64..320（min_y=-64，每节 16 格）。
 pub const MIN_Y: i32 = -64;
 pub const SECTION_COUNT: usize = 24;
 
+/// 按 y 查地形方块（与 x/z 无关，全图同形；P3 按种子接真实高度图）。
+/// y<=60 石头，61..=63 泥土，64 草方块，其余空气。
+pub fn block_at_y(y: i32) -> u16 {
+    if y <= GROUND_LEVEL {
+        STONE_BLOCK_ID
+    } else if y <= DIRT_TOP {
+        DIRT_BLOCK_ID
+    } else if y == GRASS_LEVEL {
+        GRASS_BLOCK_ID
+    } else {
+        AIR_BLOCK_ID
+    }
+}
+
 /// 确定性空世界：同一 `pos` 永远返回相同 Chunk。
-/// 当前为整节粒度占位：section_idx < 8（y<64）填石头，其余空气；
-/// P3 按方块精确填充/接真实高度图。`empty_flat` 保留，行为不变。
+/// 按 y 分层填节：整节同值记 Uniform，跨层混合节（48..63 石头+泥土、
+/// 64..79 草+空气）记 Paletted 占位，P3 填真实 paletted 容器。
+/// `empty_flat` 保留，行为不变。
 pub fn chunk_for(pos: mc_core::ChunkPos) -> Chunk {
     let mut sections = Vec::with_capacity(SECTION_COUNT);
     for idx in 0..SECTION_COUNT {
-        // section idx 0..7 覆盖 y=-64..63，视为 y<=60 以下石头占位
-        if idx < 8 {
-            sections.push(SectionKind::Uniform(STONE_BLOCK_ID));
+        let base = MIN_Y + idx as i32 * 16;
+        let first = block_at_y(base);
+        let last = block_at_y(base + 15);
+        if first == last {
+            sections.push(SectionKind::Uniform(first));
         } else {
-            sections.push(SectionKind::Uniform(AIR_BLOCK_ID));
+            sections.push(SectionKind::Paletted);
         }
     }
     Chunk { pos, sections }
 }
 
-/// Chunk 网络字节占位：先返回空 paletted section 字节，
-/// P3 填真实高度图/光照（复用 mc-protocol 空 section 占位布局，每节 8B）。
+/// Chunk 网络字节：按真实 section 数逐节填 8B 占位，P3 填真实高度图/光照
+/// （复用 mc-protocol 空 section 占位布局，每节 8B）。
+/// 按高度区分：空气节全零占位；均匀石头节同布局但调色板记石头 ID、
+/// block_count=4096；混合节记真实非空方块数、调色板 P3 再补。
 pub fn chunk_network_bytes(chunk: &Chunk) -> Vec<u8> {
     let mut out = Vec::with_capacity(chunk.sections.len() * 8);
-    for _ in &chunk.sections {
-        // 先返回空 paletted section 字节，P3 填真实高度图/光照。
-        mc_protocol::packets::encode_empty_section_placeholder(&mut out);
+    for (idx, kind) in chunk.sections.iter().enumerate() {
+        match *kind {
+            SectionKind::Uniform(AIR_BLOCK_ID) => {
+                mc_protocol::packets::encode_empty_section_placeholder(&mut out);
+            }
+            SectionKind::Uniform(id) => {
+                // 均匀非空节占位（ID 占位值 <256，直接记调色板低字节，待对齐）。
+                out.extend_from_slice(&4096i16.to_be_bytes());
+                out.extend_from_slice(&[0x00, id as u8, 0x00]);
+                out.extend_from_slice(&[0x00, 0x00, 0x00]);
+            }
+            SectionKind::Paletted | SectionKind::Direct => {
+                // 混合节占位：逐层按 block_at_y 计非空数（每层 16x16）。
+                let base = MIN_Y + idx as i32 * 16;
+                let mut non_air: i16 = 0;
+                for dy in 0..16 {
+                    if block_at_y(base + dy) != AIR_BLOCK_ID {
+                        non_air += 256;
+                    }
+                }
+                out.extend_from_slice(&non_air.to_be_bytes());
+                out.extend_from_slice(&[0x00, 0x00, 0x00]);
+                out.extend_from_slice(&[0x00, 0x00, 0x00]);
+            }
+        }
     }
     out
 }
@@ -73,20 +121,41 @@ mod tests {
     use super::*;
 
     #[test]
+    fn chunk_layer_correct() {
+        // 按 y 分层：y<=60 石头，61-63 泥土，64 草，其余空气
+        for y in [MIN_Y, -65, -1, 0, 59, 60] {
+            assert_eq!(block_at_y(y), STONE_BLOCK_ID, "y={y} should be stone");
+        }
+        for y in [61, 62, 63] {
+            assert_eq!(block_at_y(y), DIRT_BLOCK_ID, "y={y} should be dirt");
+        }
+        assert_eq!(block_at_y(64), GRASS_BLOCK_ID);
+        for y in [65, 79, 80, 319, 320] {
+            assert_eq!(block_at_y(y), AIR_BLOCK_ID, "y={y} should be air");
+        }
+        // section 落位：0..6 整节石头，7/8 混合，9..23 整节空气
+        let c = chunk_for(mc_core::ChunkPos(0, 0));
+        assert_eq!(c.sections.len(), SECTION_COUNT);
+        for (i, s) in c.sections.iter().enumerate().take(7) {
+            assert_eq!(*s, SectionKind::Uniform(STONE_BLOCK_ID), "section {i} stone");
+        }
+        assert_eq!(c.sections[7], SectionKind::Paletted, "48..63 stone+dirt");
+        assert_eq!(c.sections[8], SectionKind::Paletted, "64..79 grass+air");
+        for (i, s) in c.sections.iter().enumerate().skip(9) {
+            assert_eq!(*s, SectionKind::Uniform(AIR_BLOCK_ID), "section {i} air");
+        }
+        // 确定性：同 pos 同形
+        let again = chunk_for(mc_core::ChunkPos(0, 0));
+        assert_eq!(c.sections, again.sections);
+    }
+
+    #[test]
     fn chunk_for_is_deterministic() {
         let pos = mc_core::ChunkPos(0, 0);
         let a = chunk_for(pos);
         let b = chunk_for(pos);
         assert_eq!(a.sections, b.sections);
         assert_eq!(a.sections.len(), SECTION_COUNT);
-        // y=60 以下占位：前 8 节石头，后 16 节空气
-        for (i, s) in a.sections.iter().enumerate() {
-            if i < 8 {
-                assert_eq!(*s, SectionKind::Uniform(STONE_BLOCK_ID), "section {i} should be stone");
-            } else {
-                assert_eq!(*s, SectionKind::Uniform(AIR_BLOCK_ID), "section {i} should be air");
-            }
-        }
         // 不同坐标同样确定（当前全图同形，P3 按种子起伏）
         let c = chunk_for(mc_core::ChunkPos(5, -7));
         assert_eq!(c.sections, a.sections);
@@ -100,6 +169,15 @@ mod tests {
         let c = chunk_for(mc_core::ChunkPos(0, 0));
         let bytes = chunk_network_bytes(&c);
         assert_eq!(bytes.len(), SECTION_COUNT * 8);
-        assert!(bytes.iter().all(|&b| b == 0));
+        // 空气节（idx>=9）全零占位，石头节（idx<7）非零且互等，混合节非零
+        let air = &bytes[9 * 8..];
+        assert!(air.iter().all(|&b| b == 0), "air sections stay zero placeholder");
+        let stone0 = &bytes[0..8];
+        assert!(stone0.iter().any(|&b| b != 0), "stone sections differ from air");
+        for i in 1..7 {
+            assert_eq!(&bytes[i * 8..i * 8 + 8], stone0, "stone section {i}");
+        }
+        assert!(bytes[7 * 8..8 * 8].iter().any(|&b| b != 0));
+        assert!(bytes[8 * 8..9 * 8].iter().any(|&b| b != 0));
     }
 }

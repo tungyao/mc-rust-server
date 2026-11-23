@@ -149,12 +149,9 @@ async fn login_full_flow_counts_online_once() {
     let mut ack = Vec::new();
     packets::encode_login_acknowledged_packet(&mut ack);
     s.write_all(&ack).await.unwrap();
-    // enter_play 占位实现随后关闭连接：读到 EOF 即正常结束。
-    let mut buf = [0u8; 1];
-    match s.read_exact(&mut buf).await {
-        Ok(_) => panic!("server should close after enter_play placeholder"),
-        Err(e) => assert_eq!(e.kind(), std::io::ErrorKind::UnexpectedEof),
-    }
+    // enter_play 真下发 Join 序列：首包必须是 LoginPlay，随后连接保持进 Play 循环。
+    let (id, _) = read_frame(&mut s).await.unwrap();
+    assert_eq!(id, packets::PLAY_LOGIN_PLAY_ID, "expected join game 0x2B");
 
     // 等待 push（轮询代替固定 sleep，防 CI flake），最多 2s。
     let mut pushed = 0;

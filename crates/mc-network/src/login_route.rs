@@ -1,5 +1,5 @@
-//! login_route: Login离线流程 Start→Success→Ack→enter_play，只有Ack成功才计数
-use super::framing::{read_packet, to_io_invalid, write_packet};
+//! login_route: Login离线流程 Start→[SetCompression]→Success→Ack→enter_play(真下发)
+use super::framing::{read_packet, read_packet_framed, to_io_invalid, write_packet, write_packet_framed};
 use crossbeam_channel::Sender;
 use mc_protocol::packets;
 use std::net::SocketAddr;
@@ -9,8 +9,13 @@ use std::io;
 
 use super::NewConnection;
 
-/// Login 离线流程（无加密/无正版验证）。socket 所有权移交，与 Status 区分开。
-pub async fn handle_login(mut stream: TcpStream, addr: SocketAddr, tx: &Sender<NewConnection>) -> io::Result<()> {
+/// 默认压缩禁用（阈值 -1，原行为）。
+pub async fn handle_login(stream: TcpStream, addr: SocketAddr, tx: &Sender<NewConnection>) -> io::Result<()> {
+    handle_login_with_threshold(stream, addr, tx, packets::COMPRESSION_DISABLED_THRESHOLD).await
+}
+
+/// 阈值可配：threshold>=0 时 Success 前先发 SetCompression，其后走压缩帧。
+pub async fn handle_login_with_threshold(mut stream: TcpStream, addr: SocketAddr, tx: &Sender<NewConnection>, threshold: i32) -> io::Result<()> {
     let (id, payload) = read_packet(&mut stream).await?;
     if id != packets::LOGIN_START_PACKET_ID {
         warn!("{addr} login: expected start 0x00, got {id:#04x}, disconnect");
@@ -21,13 +26,25 @@ pub async fn handle_login(mut stream: TcpStream, addr: SocketAddr, tx: &Sender<N
         warn!("{addr} login: bad username {:?}, disconnect", start.name);
         return Ok(());
     }
-    debug_assert_eq!(packets::COMPRESSION_DISABLED_THRESHOLD, -1);
+    let compressed = packets::compression_enabled(threshold);
+    if compressed {
+        debug!("{addr} login: enable compression threshold={threshold}");
+        let mut sc = Vec::new();
+        packets::encode_set_compression_packet(threshold, &mut sc);
+        use tokio::io::AsyncWriteExt;
+        stream.write_all(&sc).await?;
+    }
     let uuid = packets::offline_uuid(&start.name);
     let profile = mc_core::PlayerProfile { uuid, username: start.name.clone() };
     let mut body = Vec::new();
-    packets::LoginSuccess { uuid, username: profile.username.clone() }.encode_body(&mut body);
-    write_packet(&mut stream, packets::LOGIN_SUCCESS_PACKET_ID, &body).await?;
-    match read_packet(&mut stream).await {
+    packets::LoginSuccess::offline(uuid, profile.username.clone()).encode_body(&mut body);
+    if compressed {
+        write_packet_framed(&mut stream, packets::LOGIN_SUCCESS_PACKET_ID, &body, threshold).await?;
+    } else {
+        write_packet(&mut stream, packets::LOGIN_SUCCESS_PACKET_ID, &body).await?;
+    }
+    let ack = if compressed { read_packet_framed(&mut stream, threshold).await } else { read_packet(&mut stream).await };
+    match ack {
         Ok((packets::LOGIN_ACKNOWLEDGED_PACKET_ID, p)) => {
             packets::decode_login_acknowledged(&p).map_err(to_io_invalid)?;
         }
@@ -42,21 +59,111 @@ pub async fn handle_login(mut stream: TcpStream, addr: SocketAddr, tx: &Sender<N
     }
     info!("login ok uuid={} name={}", uuid, profile.username);
     notify_login_success(tx, addr, &profile);
-    enter_play(stream, profile).await?;
+    enter_play(stream, profile, threshold).await?;
     Ok(())
 }
 
 /// Login 成功后的唯一真实连接上报点（在线数只认这里）。
 pub fn notify_login_success(tx: &Sender<NewConnection>, addr: SocketAddr, profile: &mc_core::PlayerProfile) {
-    use tracing::debug;
     if let Err(e) = tx.try_send(NewConnection(addr)) {
         debug!("login success notify dropped for {addr} ({e}): {profile:?}");
     }
 }
 
-/// 进入 Play 的钩子：拿走 socket 所有权。P2 占位实现只记 log 后关闭。
-pub async fn enter_play(stream: TcpStream, profile: mc_core::PlayerProfile) -> io::Result<()> {
-    info!("enter_play uuid={} name={} (P2 TODO: real play pipeline)", profile.uuid, profile.username);
-    drop(stream);
+/// 进入 Play：拿住 socket，按序真下发后进循环。threshold透传，压缩开启后Play包走压缩帧。
+pub async fn enter_play(mut stream: TcpStream, profile: mc_core::PlayerProfile, threshold: i32) -> io::Result<()> {
+    info!("enter_play uuid={} name={} threshold={threshold}", profile.uuid, profile.username);
+    let keepalive_id = send_join_sequence(&mut stream, &profile, threshold).await?;
+    info!("play join sent uuid={} name={} keepalive={keepalive_id}", profile.uuid, profile.username);
+    play_loop(&mut stream, &profile, keepalive_id, threshold).await
+}
+
+async fn send_join_sequence(stream: &mut TcpStream, profile: &mc_core::PlayerProfile, threshold: i32) -> io::Result<i64> {
+    let compressed = packets::compression_enabled(threshold);
+    let mut body = Vec::new();
+    packets::LoginPlay::default().encode_body(&mut body);
+    if compressed { write_packet_framed(stream, packets::PLAY_LOGIN_PLAY_ID, &body, threshold).await?; }
+    else { write_packet(stream, packets::PLAY_LOGIN_PLAY_ID, &body).await?; }
+    debug!("play {} login play sent", profile.username);
+    body.clear();
+    packets::SetCenterChunk { chunk_x: 0, chunk_z: 0 }.encode_body(&mut body);
+    if compressed { write_packet_framed(stream, packets::PLAY_SET_CENTER_CHUNK_ID, &body, threshold).await?; }
+    else { write_packet(stream, packets::PLAY_SET_CENTER_CHUNK_ID, &body).await?; }
+    body.clear();
+    packets::PlayChunkData::empty(0, 0).encode_body(&mut body);
+    if compressed { write_packet_framed(stream, packets::PLAY_CHUNK_DATA_ID, &body, threshold).await?; }
+    else { write_packet(stream, packets::PLAY_CHUNK_DATA_ID, &body).await?; }
+    body.clear();
+    packets::PlayerPositionSync { x: 8.5, y: 80.0, z: 8.5, yaw: 0.0, pitch: 0.0, flags: 0, teleport_id: 1 }.encode_body(&mut body);
+    if compressed { write_packet_framed(stream, packets::PLAY_PLAYER_POSITION_SYNC_ID, &body, threshold).await?; }
+    else { write_packet(stream, packets::PLAY_PLAYER_POSITION_SYNC_ID, &body).await?; }
+    let keepalive_id = 1i64;
+    body.clear();
+    packets::KeepAliveS2C(keepalive_id).encode_body(&mut body);
+    if compressed { write_packet_framed(stream, packets::PLAY_KEEPALIVE_S2C_ID, &body, threshold).await?; }
+    else { write_packet(stream, packets::PLAY_KEEPALIVE_S2C_ID, &body).await?; }
+    Ok(keepalive_id)
+}
+
+async fn play_loop(stream: &mut TcpStream, profile: &mc_core::PlayerProfile, mut seq: i64, threshold: i32) -> io::Result<()> {
+    let compressed = packets::compression_enabled(threshold);
+    loop {
+        let next = if compressed { read_packet_framed(stream, threshold).await } else { read_packet(stream).await };
+        match next {
+            Ok((id, payload)) if id == packets::PLAY_KEEPALIVE_C2S_ID => {
+                match packets::decode_keepalive_c2s(&payload) {
+                    Ok(echo) => info!("play keepalive echo uuid={} name={} id={echo}", profile.uuid, profile.username),
+                    Err(e) => debug!("play uuid={} bad keepalive: {e}", profile.uuid),
+                }
+            }
+            Ok((id, payload)) => {
+                debug!("play uuid={} c2s id={id:#04x} len={} (ignored)", profile.uuid, payload.len());
+            }
+            Err(e) if e.kind() == io::ErrorKind::TimedOut => {
+                seq += 1;
+                let mut body = Vec::new();
+                packets::KeepAliveS2C(seq).encode_body(&mut body);
+                let r = if compressed { write_packet_framed(stream, packets::PLAY_KEEPALIVE_S2C_ID, &body, threshold).await }
+                        else { write_packet(stream, packets::PLAY_KEEPALIVE_S2C_ID, &body).await };
+                if let Err(e) = r {
+                    debug!("play uuid={} keepalive resend failed ({e}), closing", profile.uuid);
+                    break;
+                }
+            }
+            Err(e) => {
+                debug!("play uuid={} closed ({e})", profile.uuid);
+                break;
+            }
+        }
+    }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use tokio::net::TcpListener;
+
+    #[tokio::test]
+    async fn enter_play_sends_join_then_reads_keepalive_echo() {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let profile = mc_core::PlayerProfile { uuid: packets::offline_uuid("Steve"), username: "Steve".into() };
+        let server = tokio::spawn(async move {
+            let (s, _) = listener.accept().await.unwrap();
+            enter_play(s, profile, packets::COMPRESSION_DISABLED_THRESHOLD).await.unwrap();
+        });
+        let mut c = tokio::net::TcpStream::connect(addr).await.unwrap();
+        // 读5包：login/setcenter/chunk/pos/keepalive
+        for _ in 0..5 {
+            let _ = super::super::framing::read_packet(&mut c).await.unwrap();
+        }
+        // 回一个 keepalive echo，服务端只log不断开；随后客户端断开，服务端正常退出
+        let mut b = Vec::new();
+        packets::KeepAliveC2S(1).encode_body(&mut b);
+        super::super::framing::write_packet(&mut c, packets::PLAY_KEEPALIVE_C2S_ID, &b).await.unwrap();
+        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+        drop(c);
+        server.await.unwrap();
+    }
 }

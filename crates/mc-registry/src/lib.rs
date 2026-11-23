@@ -1,7 +1,7 @@
 //! mc-registry: 方块/物品/生物群系注册表
 //! 只兼容 26.3 (protocol 777, data 5023)。
-//! 方块表由 build.rs 在编译期从硬编码占位表生成（离线可构建），
-//! P2 再切 build.rs 从 minecraft-data 生成全量表。
+//! 方块表由 build.rs 在编译期从 data_0.rs/data_1.rs 手写占位表生成（离线可构建，216 项），
+//! ID 为占位连续号，待按 26.3 minecraft-data(777) blockstate 表对齐。
 use std::collections::HashMap;
 
 // ---- 26.3 版本常量透传（以 mc-core 为唯一来源） ----
@@ -80,8 +80,8 @@ mod tests {
     }
 
     #[test]
-    fn generated_table_has_30_entries() {
-        assert_eq!(BLOCKS.len(), 30);
+    fn generated_table_has_200_plus_entries() {
+        assert!(BLOCKS.len() >= 200, "want 200+ blocks, got {}", BLOCKS.len());
         // 任务点名的几个常见方块必须存在
         for name in [
             "minecraft:air",
@@ -89,9 +89,16 @@ mod tests {
             "minecraft:grass_block",
             "minecraft:dirt",
             "minecraft:oak_log",
+            "minecraft:deepslate",
+            "minecraft:white_wool",
+            "minecraft:redstone_lamp",
         ] {
             assert!(by_name(name).is_some(), "missing {name}");
             assert!(block_id(name).is_some(), "missing {name}");
+        }
+        // ID 占位连续：0..N 无断号
+        for (i, (id, _)) in BLOCKS.iter().enumerate() {
+            assert_eq!(*id, i as u32, "placeholder id gap at index {i}");
         }
     }
 }

@@ -13,12 +13,15 @@ pub fn tick_system(mut counter: ResMut<TickCounter>) {
     }
 }
 
-/// 排空网络线程的 NewConnection，只 try_recv不做IO。
+/// 排空网络线程的 NewConnection，只 try_recv不做IO；按到达顺序压入 Join 队列。
+/// 在线数只认这里；Join 真下发在 net 线程 enter_play 已做，ECS 侧 log 见 login_join_system。
 pub fn handle_new_connections(rx: Res<NetReceiver>, online: Res<PlayersOnline>, mut play: ResMut<PlayScaffold>) {
     while let Ok(conn) = rx.0.try_recv() {
         let n = online.0.fetch_add(1, Ordering::SeqCst) + 1;
         info!("new connection {} (online={})", conn.0, n);
-        play.pending_login += 1;
+        // TODO(P3后半)：NewConnection 只带 addr；信封扩展携带 profile/socket 句柄后，
+        // 这里连同句柄一起入队，login_join_system 改为真写 socket。
+        play.pending_login.push(conn.0);
     }
 }
 
