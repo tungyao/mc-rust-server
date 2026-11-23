@@ -3,8 +3,9 @@
 //! 同时覆盖：Login 成功才 push NewConnection（Status 不 push）。
 use mc_network::{NetConfig, serve};
 use mc_protocol::packets::{
-    self, Handshake, HandshakeNextState, HANDSHAKE_PACKET_ID, LOGIN_ACKNOWLEDGED_PACKET_ID,
-    LOGIN_START_PACKET_ID, LOGIN_SUCCESS_PACKET_ID, SET_COMPRESSION_PACKET_ID,
+    self, Handshake, HandshakeNextState, CONFIG_FINISH_ACK_C2S_ID, CONFIG_FINISH_S2C_ID,
+    HANDSHAKE_PACKET_ID, LOGIN_ACKNOWLEDGED_PACKET_ID, LOGIN_START_PACKET_ID,
+    LOGIN_SUCCESS_PACKET_ID, SET_COMPRESSION_PACKET_ID,
 };
 use mc_protocol::read_varint;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
@@ -61,8 +62,8 @@ async fn spawn_server() -> (
     (addr, rx)
 }
 
-/// 全流程：Handshake(Login) → Login Start → Login Success → Login Ack → Play 加入序列。
-/// 服务端回的 Success 用户名必须与发送一致；Ack 后服务端 enter_play 真下发 5 包且不断开。
+/// 全流程：Handshake(Login) → Login Start → Login Success → Login Ack → Config(Finish→Ack) → Play 加入序列。
+/// 服务端回的 Success 用户名必须与发送一致；Ack 后先走 Configuration Finish 握手，再 enter_play 真下发 5 包且不断开。
 #[tokio::test]
 async fn login_offline_full_flow() {
     let (addr, rx) = spawn_server().await;
@@ -89,6 +90,14 @@ async fn login_offline_full_flow() {
     packets::encode_login_acknowledged_packet(&mut ack);
     s.write_all(&ack).await.unwrap();
 
+    // Configuration Finish（CB 0x03 空包，需回 Ack SB 0x03；ID已按P4A对照表核对777）。
+    let (id, payload) = read_frame(&mut s).await.unwrap();
+    assert_eq!(id, CONFIG_FINISH_S2C_ID, "expected config finish 0x03");
+    packets::decode_config_finish_s2c(&payload).unwrap();
+    let mut fack = Vec::new();
+    packets::encode_config_finish_ack_packet(&mut fack);
+    s.write_all(&fack).await.unwrap();
+
     // Login 成功才算真实连接：channel 应收到一次 NewConnection。
     // 注：`#[tokio::test]` 默认单线程 runtime，不能用阻塞的 `recv_timeout`，
     // 用 try_recv 轮询代替。
@@ -104,7 +113,7 @@ async fn login_offline_full_flow() {
     .expect("login success must push NewConnection");
     assert_eq!(conn.0.ip(), std::net::IpAddr::from([127, 0, 0, 1]));
 
-    // enter_play 真下发：按序读完 Join 序列 5 包（包 ID 待26.3抓包核对）。
+    // enter_play 真下发：按序读完 Join 序列 5 包（ID已按P4A对照表核对777）。
     let expect = [
         packets::PLAY_LOGIN_PLAY_ID,
         packets::PLAY_SET_CENTER_CHUNK_ID,
@@ -196,6 +205,23 @@ fn login_packet_ids_sanity() {
     assert_eq!(LOGIN_ACKNOWLEDGED_PACKET_ID, 0x03);
 }
 
+/// 包 ID 自检：Play 6 个 + Configuration 5 个必须与 P4A 对照表（777）一致。
+/// Play 错值在 777 里另有含义（0x2B= Hurt Animation 等），错一个真进服直接断。
+#[test]
+fn play_and_config_packet_ids_match_p4a_map() {
+    assert_eq!(packets::PLAY_LOGIN_PLAY_ID, 0x32);
+    assert_eq!(packets::PLAY_SET_CENTER_CHUNK_ID, 0x60);
+    assert_eq!(packets::PLAY_CHUNK_DATA_ID, 0x2E);
+    assert_eq!(packets::PLAY_PLAYER_POSITION_SYNC_ID, 0x49);
+    assert_eq!(packets::PLAY_KEEPALIVE_S2C_ID, 0x2D);
+    assert_eq!(packets::PLAY_KEEPALIVE_C2S_ID, 0x1C);
+    assert_eq!(packets::CONFIG_FINISH_S2C_ID, 0x03);
+    assert_eq!(packets::CONFIG_FINISH_ACK_C2S_ID, 0x03);
+    assert_eq!(packets::CONFIG_REGISTRY_DATA_S2C_ID, 0x07);
+    assert_eq!(packets::CONFIG_KNOWN_PACKS_S2C_ID, 0x0F);
+    assert_eq!(packets::CONFIG_KNOWN_PACKS_C2S_ID, 0x07);
+}
+
 /// 压缩Login流程：threshold>=0 时 Success 前先发 SetCompression，其后走压缩帧。
 #[tokio::test]
 async fn login_compression_flow_sends_set_compression_first() {
@@ -229,12 +255,24 @@ async fn login_compression_flow_sends_set_compression_first() {
     let (success, _) = packets::decode_login_success(&payload).unwrap();
     assert_eq!(success.username, "Steve");
     assert!(success.properties.is_empty());
-    // Ack 用压缩帧回发；成功后应 push NewConnection，随后 enter_play 关连接。
+    // Ack 用压缩帧回发；随后走 Configuration Finish 握手（压缩帧），成功后才 push NewConnection，随后 enter_play。
     let ack = encode_compressed_frame(LOGIN_ACKNOWLEDGED_PACKET_ID, &[], 64);
     let mut lb = Vec::new();
     mc_protocol::write_varint(ack.len() as i32, &mut lb);
     s.write_all(&lb).await.unwrap();
     s.write_all(&ack).await.unwrap();
+    // Configuration Finish（压缩帧 CB 0x03）→ 回压缩帧 Ack（SB 0x03）。
+    let len = read_varint_async(&mut s).await.unwrap();
+    let mut frame = vec![0u8; len as usize];
+    s.read_exact(&mut frame).await.unwrap();
+    let (id, payload) = decode_compressed_frame(&frame).unwrap();
+    assert_eq!(id, CONFIG_FINISH_S2C_ID);
+    packets::decode_config_finish_s2c(&payload).unwrap();
+    let fack = encode_compressed_frame(CONFIG_FINISH_ACK_C2S_ID, &[], 64);
+    let mut flb = Vec::new();
+    mc_protocol::write_varint(fack.len() as i32, &mut flb);
+    s.write_all(&flb).await.unwrap();
+    s.write_all(&fack).await.unwrap();
     tokio::time::timeout(std::time::Duration::from_secs(5), async {
         loop {
             if let Ok(c) = rx.try_recv() {

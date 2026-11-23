@@ -1,9 +1,9 @@
-//! play_login: Join Game (Login Play 0x2B)，只兼容26.3/777，ID待抓包核对
+//! play_login: Join Game (Login Play 0x32)，只兼容26.3/777，ID已按P4A对照表核对777
 use crate::packets::codec::{decode_string, encode_packet, encode_string, read_bool, read_i32_be, read_i64_be, write_bool, write_i32_be, write_i64_be};
 use crate::{read_varint, write_varint, ProtocolError};
 
-/// Login Play（Join Game）包 ID（Play clientbound `0x2B` 左右）。待26.3抓包核对。
-pub const PLAY_LOGIN_PLAY_ID: i32 = 0x2B;
+/// Login Play（Join Game）包 ID（Play CB `0x32` login）。已按P4A对照表核对777（旧值0x2B实为hurt_animation）。
+pub const PLAY_LOGIN_PLAY_ID: i32 = 0x32;
 
 pub struct LoginPlay {
     pub entity_id: i32,

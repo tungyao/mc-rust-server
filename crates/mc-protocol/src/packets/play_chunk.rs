@@ -1,11 +1,11 @@
-//! play_chunk: SetCenter + ChunkData(空section占位)，只兼容26.3/777，ID待抓包核对
+//! play_chunk: SetCenter + ChunkData(空section占位)，只兼容26.3/777，ID已按P4A对照表核对777
 use crate::packets::codec::{decode_string, encode_packet, encode_string, read_i32_be, write_i32_be};
 use crate::{read_varint, write_varint, ProtocolError};
 
-/// Set Center Chunk 包 ID。待26.3抓包核对。
-pub const PLAY_SET_CENTER_CHUNK_ID: i32 = 0x4C;
-/// Chunk Data 包 ID。待26.3抓包核对。
-pub const PLAY_CHUNK_DATA_ID: i32 = 0x27;
+/// Set Center Chunk 包 ID（Play CB `0x60` set_chunk_cache_center）。已按P4A对照表核对777（旧值0x4C实为recipe_book_remove）。
+pub const PLAY_SET_CENTER_CHUNK_ID: i32 = 0x60;
+/// Chunk Data 包 ID（Play CB `0x2E` level_chunk_with_light）。已按P4A对照表核对777（旧值0x27实为game_event）。
+pub const PLAY_CHUNK_DATA_ID: i32 = 0x2E;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct SetCenterChunk {

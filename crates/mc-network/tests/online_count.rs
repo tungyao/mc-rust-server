@@ -1,7 +1,7 @@
 //! 任务E：配置注入 + 在线数语义（真实端口集成测试）。
 //!
 //! - Status ping 走完：不 push `NewConnection`，`online==0`；
-//! - Login 全流程走完（Handshake → Start → Success → Ack）才 push 一次，排空后 `online==1`；
+//! - Login 全流程走完（Handshake → Start → Success → Ack → Config Finish/Ack）才 push 一次，排空后 `online==1`；
 //!   （裸 Handshake 不算成功：服务端等待 Login Start，超时/错包断开且不计数）；
 //! - 错误协议 / 非握手首包：不 push、不计数；
 //! - `NetConfig{max_players,motd}` 透传进 Status JSON。
@@ -130,7 +130,7 @@ async fn status_ping_does_not_count_online() {
 async fn login_full_flow_counts_online_once() {
     let (addr, rx, online) = spawn_server_with(100, "login-count-test").await;
 
-    // 任务D离线全流程：Handshake(Login) → Start → Success → Ack。
+    // 任务D离线全流程：Handshake(Login) → Start → Success → Ack → Config Finish/Ack。
     let mut s = TcpStream::connect(addr).await.unwrap();
     send_handshake(&mut s, 777, addr.port(), HandshakeNextState::Login).await;
 
@@ -149,9 +149,16 @@ async fn login_full_flow_counts_online_once() {
     let mut ack = Vec::new();
     packets::encode_login_acknowledged_packet(&mut ack);
     s.write_all(&ack).await.unwrap();
-    // enter_play 真下发 Join 序列：首包必须是 LoginPlay，随后连接保持进 Play 循环。
+    // Configuration Finish（CB 0x03）→ 回 Ack（SB 0x03），ID已按P4A对照表核对777。
+    let (id, payload) = read_frame(&mut s).await.unwrap();
+    assert_eq!(id, packets::CONFIG_FINISH_S2C_ID, "expected config finish 0x03");
+    packets::decode_config_finish_s2c(&payload).unwrap();
+    let mut fack = Vec::new();
+    packets::encode_config_finish_ack_packet(&mut fack);
+    s.write_all(&fack).await.unwrap();
+    // enter_play 真下发 Join 序列：首包必须是 LoginPlay（CB 0x32，已按P4A对照表核对），随后连接保持进 Play 循环。
     let (id, _) = read_frame(&mut s).await.unwrap();
-    assert_eq!(id, packets::PLAY_LOGIN_PLAY_ID, "expected join game 0x2B");
+    assert_eq!(id, packets::PLAY_LOGIN_PLAY_ID, "expected join game 0x32");
 
     // 等待 push（轮询代替固定 sleep，防 CI flake），最多 2s。
     let mut pushed = 0;

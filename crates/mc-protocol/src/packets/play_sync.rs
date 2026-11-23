@@ -1,12 +1,12 @@
-//! play_sync: PositionSync + KeepAlive，只兼容26.3/777，ID待抓包核对
+//! play_sync: PositionSync + KeepAlive，只兼容26.3/777，ID已按P4A对照表核对777
 use crate::packets::codec::{encode_packet, read_bool, read_f32_be, read_f64_be, read_i32_be, read_i64_be, write_bool, write_f32_be, write_f64_be, write_i32_be, write_i64_be};
 use crate::{read_varint, write_varint, ProtocolError};
 
-/// Player Position Sync 包 ID。待26.3抓包核对。
-pub const PLAY_PLAYER_POSITION_SYNC_ID: i32 = 0x3E;
-/// KeepAlive S2C/C2S 包 ID。待26.3抓包核对。
-pub const PLAY_KEEPALIVE_S2C_ID: i32 = 0x26;
-pub const PLAY_KEEPALIVE_C2S_ID: i32 = 0x1A;
+/// Player Position Sync 包 ID（Play CB `0x49` player_position）。已按P4A对照表核对777（旧值0x3E实为ping）。
+pub const PLAY_PLAYER_POSITION_SYNC_ID: i32 = 0x49;
+/// KeepAlive S2C/C2S 包 ID（Play CB `0x2D` / SB `0x1C` keep_alive）。已按P4A对照表核对777（旧值0x26实为unload_chunk/0x1A实为interact）。
+pub const PLAY_KEEPALIVE_S2C_ID: i32 = 0x2D;
+pub const PLAY_KEEPALIVE_C2S_ID: i32 = 0x1C;
 
 pub struct PlayerPositionSync {
     pub x: f64,
@@ -95,14 +95,14 @@ impl KeepAliveC2S {
     }
 }
 
-/// KeepAlive S2C 打成完整线包（包 ID 待26.3抓包核对）。
+/// KeepAlive S2C 打成完整线包（Play CB `0x2D`，已按P4A对照表核对777）。
 pub fn encode_keepalive_s2c_packet(keepalive_id: i64, out: &mut Vec<u8>) {
     let mut body = Vec::new();
     KeepAliveS2C(keepalive_id).encode_body(&mut body);
     encode_packet(PLAY_KEEPALIVE_S2C_ID, &body, out);
 }
 
-/// KeepAlive C2S 解码（包 ID 待26.3抓包核对），要求 payload 恰好 8 字节。
+/// KeepAlive C2S 解码（Play SB `0x1C`，已按P4A对照表核对777），要求 payload 恰好 8 字节。
 pub fn decode_keepalive_c2s(payload: &[u8]) -> Result<i64, ProtocolError> {
     if payload.len() != 8 {
         return Err(ProtocolError::UnexpectedEof);

@@ -1,5 +1,5 @@
 //! Play 脚手架：Login 队列 → "ready to join" + 每秒 KeepAlive 计数
-//! 包 ID 取 `packets::PLAY_*` 现有常量，待26.3抓包核对。
+//! 包 ID 取 `packets::PLAY_*` 现有常量，已按P4A对照表核对777。
 use bevy_ecs::prelude::*;
 use std::net::SocketAddr;
 use tracing::info;
@@ -25,7 +25,7 @@ pub struct PlayScaffold {
 /// 本系统逐个触发一次 Join 下发（当前为 log，socket 真发包在 net 线程已做）。
 /// TODO(P3后半)：socket 句柄交接进 ECS 后，在此真写 Join Game / Set Center Chunk /
 ///
-/// Chunk Data / Player Position Sync，包 ID 待26.3抓包核对。
+/// Chunk Data / Player Position Sync，包 ID 已按P4A对照表核对777。
 pub fn login_join_system(mut play: ResMut<PlayScaffold>) {
     if play.pending_login.is_empty() {
         return;
@@ -41,7 +41,7 @@ pub fn login_join_system(mut play: ResMut<PlayScaffold>) {
         ));
         let net_bytes = mc_world::chunk_network_bytes(&chunk);
         info!(
-            "ready to join #{} addr={} spawn=({},{},{}) chunk_bytes={} (join已由net线程enter_play真下发; TODO socket句柄进ECS后在此真写 Join 0x2B + Chunk + Position Sync)",
+            "ready to join #{} addr={} spawn=({},{},{}) chunk_bytes={} (join已由net线程enter_play真下发; TODO socket句柄进ECS后在此真写 Join 0x32 + Chunk + Position Sync)",
             play.joined,
             addr,
             spawn.0,
@@ -50,7 +50,7 @@ pub fn login_join_system(mut play: ResMut<PlayScaffold>) {
             net_bytes.len()
         );
         // TODO(P3后半)：socket 从 net 线程交到 ECS 后，在此真下发 Join Game /
-        // Set Center Chunk / Chunk Data / Player Position Sync，包 ID 待26.3抓包核对。
+        // Set Center Chunk / Chunk Data / Player Position Sync，包 ID 已按P4A对照表核对777。
     }
 }
 
@@ -65,7 +65,7 @@ pub fn keepalive_system(tick: Res<TickCounter>, mut play: ResMut<PlayScaffold>) 
     let mut buf = Vec::new();
     mc_protocol::packets::encode_keepalive_s2c_packet(play.keepalive_seq, &mut buf);
     info!(
-        "keepalive seq={} tick={} bytes={} (TODO: 接socket写, s2c 0x26/c2s 0x1A 待26.3抓包核对)",
+        "keepalive seq={} tick={} bytes={} (TODO: 接socket写, s2c 0x2D/c2s 0x1C 已按P4A对照表核对777)",
         play.keepalive_seq,
         tick.0,
         buf.len()

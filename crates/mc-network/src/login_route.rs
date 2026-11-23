@@ -1,4 +1,4 @@
-//! login_route: Login离线流程 Start→[SetCompression]→Success→Ack→enter_play(真下发)
+//! login_route: Login离线流程 Start→[SetCompression]→Success→Ack→Config(Finish→Ack)→enter_play(真下发)
 use super::framing::{read_packet, read_packet_framed, to_io_invalid, write_packet, write_packet_framed};
 use crossbeam_channel::Sender;
 use mc_protocol::packets;
@@ -58,8 +58,35 @@ pub async fn handle_login_with_threshold(mut stream: TcpStream, addr: SocketAddr
         }
     }
     info!("login ok uuid={} name={}", uuid, profile.username);
+    if let Err(e) = config_finish(&mut stream, threshold).await {
+        warn!("{addr} config: finish failed ({e}), disconnect");
+        return Ok(());
+    }
     notify_login_success(tx, addr, &profile);
     enter_play(stream, profile, threshold).await?;
+    Ok(())
+}
+
+/// Configuration阶段骨架：空 registry 直接发 Finish S2C → 等 Finish Ack C2S。
+/// 包 ID 已按P4A对照表核对777；Registry Data / Known Packs 暂不下发，只留 packets::config 占位。
+/// threshold 透传（压缩开启后 Configuration 包同样走压缩帧）。签名保持 `enter_play` 不变，中间只插这一段。
+pub async fn config_finish(stream: &mut TcpStream, threshold: i32) -> io::Result<()> {
+    let compressed = packets::compression_enabled(threshold);
+    debug!("config finish send id={:#04x}", packets::CONFIG_FINISH_S2C_ID);
+    if compressed {
+        write_packet_framed(stream, packets::CONFIG_FINISH_S2C_ID, &[], threshold).await?;
+    } else {
+        write_packet(stream, packets::CONFIG_FINISH_S2C_ID, &[]).await?;
+    }
+    let (id, payload) = if compressed { read_packet_framed(stream, threshold).await } else { read_packet(stream).await }?;
+    if id != packets::CONFIG_FINISH_ACK_C2S_ID {
+        return Err(to_io_invalid(format!(
+            "expected config finish ack {:#04x}, got {id:#04x}",
+            packets::CONFIG_FINISH_ACK_C2S_ID
+        )));
+    }
+    packets::decode_config_finish_ack(&payload).map_err(to_io_invalid)?;
+    debug!("config finish ack ok");
     Ok(())
 }
 
@@ -143,6 +170,39 @@ async fn play_loop(stream: &mut TcpStream, profile: &mc_core::PlayerProfile, mut
 mod tests {
     use super::*;
     use tokio::net::TcpListener;
+
+    #[tokio::test]
+    async fn config_finish_sends_finish_then_reads_ack() {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let server = tokio::spawn(async move {
+            let (mut s, _) = listener.accept().await.unwrap();
+            config_finish(&mut s, packets::COMPRESSION_DISABLED_THRESHOLD).await.unwrap();
+        });
+        let mut c = tokio::net::TcpStream::connect(addr).await.unwrap();
+        let (id, payload) = super::super::framing::read_packet(&mut c).await.unwrap();
+        assert_eq!(id, packets::CONFIG_FINISH_S2C_ID);
+        packets::decode_config_finish_s2c(&payload).unwrap();
+        let mut ack = Vec::new();
+        packets::encode_config_finish_ack_packet(&mut ack);
+        use tokio::io::AsyncWriteExt;
+        c.write_all(&ack).await.unwrap();
+        server.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn config_finish_rejects_wrong_ack_id() {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let server = tokio::spawn(async move {
+            let (mut s, _) = listener.accept().await.unwrap();
+            assert!(config_finish(&mut s, packets::COMPRESSION_DISABLED_THRESHOLD).await.is_err());
+        });
+        let mut c = tokio::net::TcpStream::connect(addr).await.unwrap();
+        let _ = super::super::framing::read_packet(&mut c).await.unwrap();
+        super::super::framing::write_packet(&mut c, 0x7F, &[]).await.unwrap();
+        server.await.unwrap();
+    }
 
     #[tokio::test]
     async fn enter_play_sends_join_then_reads_keepalive_echo() {
