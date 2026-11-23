@@ -37,7 +37,8 @@ pub fn decode_config_finish_ack(_payload: &[u8]) -> Result<(), ProtocolError> { 
 // Registry Data：registry_id + 条目表。ID已按P4A对照表核对（CB 0x07）。
 // 线格式来源 minecraft.wiki 777 `registry_data`：registry_id(Identifier/String) + VarInt条数
 // + 每项 entry_id(Identifier/String) + has_data(Bool) + 有数据时NBT。
-// data语义：Some内即完整未压缩NBT字节（TAG_Compound 0x0A开头，空根名），线格式为 Bool(1) + VarInt(len) + NBT。
+// data语义：Some内即完整未压缩NBT字节（包内NBT：0x0A + fields + 0x00，无根名、无长度前缀）。
+// 线格式（wiki Registry Data：Prefixed Optional NBT）为 Bool(1) + 裸NBT字节。
 // TODO(P7A): nbt.rs encoder合进来后，切 real_*_nbt() 到结构化builder，当前手拼字节保持零依赖。
 fn nbt_name(out: &mut Vec<u8>, name: &str) {
     let b = name.as_bytes();
@@ -68,7 +69,7 @@ fn nbt_string(out: &mut Vec<u8>, name: &str, v: &str) {
 /// monster_spawn_light_level / monster_spawn_block_light_limit 按本任务约定取Int（vanilla新版为uniform对象，此处简化为Int 0）。
 pub fn real_overworld_dimension_nbt() -> Vec<u8> {
     let mut out = Vec::with_capacity(256);
-    out.push(0x0A); out.extend_from_slice(&[0x00, 0x00]); // root compound，空名
+    out.push(0x0A); // root compound（包内NBT：无根名，直接fields）
     nbt_byte(&mut out, "has_skylight", 1);
     nbt_byte(&mut out, "has_ceiling", 0);
     nbt_byte(&mut out, "ultrawarm", 0);
@@ -94,7 +95,7 @@ pub fn real_overworld_dimension_nbt() -> Vec<u8> {
 /// 字段对标 minecraft.wiki Biome JSON：temperature/downfall/effects{4色}为必需，另带has_precipitation=1贴近vanilla。
 pub fn real_plains_biome_nbt() -> Vec<u8> {
     let mut out = Vec::with_capacity(128);
-    out.push(0x0A); out.extend_from_slice(&[0x00, 0x00]); // root compound，空名
+    out.push(0x0A); // root compound（包内NBT：无根名，直接fields）
     nbt_byte(&mut out, "has_precipitation", 1);
     nbt_float(&mut out, "temperature", 0.8);
     nbt_float(&mut out, "downfall", 0.4);
@@ -114,7 +115,8 @@ impl ConfigRegistryEntry {
     pub fn encode_body(&self, out: &mut Vec<u8>) {
         encode_string(&self.entry_id, out);
         match &self.data {
-            Some(d) => { out.push(1); write_varint(d.len() as i32, out); out.extend_from_slice(d); }
+            // Prefixed Optional NBT：Bool(1) + 裸NBT（无长度前缀，NBT自定界）
+            Some(d) => { out.push(1); out.extend_from_slice(d); }
             None => out.push(0),
         }
     }
@@ -122,11 +124,11 @@ impl ConfigRegistryEntry {
         let (entry_id, n1) = decode_string(buf)?;
         if buf.len() <= n1 { return Err(ProtocolError::UnexpectedEof); }
         let (data, off) = if buf[n1] != 0 {
-            let (len, n2) = read_varint(&buf[n1 + 1..])?;
-            if len < 0 { return Err(ProtocolError::UnexpectedEof); }
-            let s = n1 + 1 + n2; let e = s + len as usize;
-            if buf.len() < e { return Err(ProtocolError::UnexpectedEof); }
-            (Some(buf[s..e].to_vec()), e)
+            // 包内NBT：首字节须为 0x0A compound，后跟 fields + 0x00，用 nbt reader 定界
+            let rest = &buf[n1 + 1..];
+            if rest.first() != Some(&0x0A) { return Err(ProtocolError::UnexpectedEof); }
+            let (_c, n) = super::nbt::read_nbt_compound_payload(&rest[1..]).map_err(|_| ProtocolError::UnexpectedEof)?;
+            (Some(buf[n1 + 1..n1 + 1 + 1 + n].to_vec()), n1 + 1 + 1 + n)
         } else {
             (None, n1 + 1)
         };
@@ -283,7 +285,7 @@ mod tests {
             registry_id: "minecraft:dimension_type".into(),
             entries: vec![
                 ConfigRegistryEntry { entry_id: "minecraft:overworld".into(), data: None },
-                ConfigRegistryEntry { entry_id: "minecraft:the_nether".into(), data: Some(vec![1, 2, 3]) },
+                ConfigRegistryEntry { entry_id: "minecraft:the_nether".into(), data: Some(real_plains_biome_nbt()) },
             ],
         };
         let mut pkt = Vec::new(); encode_config_registry_data_packet(&v, &mut pkt);

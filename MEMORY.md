@@ -22,3 +22,4 @@
 - [2026-11-23 07:20 UTC] agent=main task=config-tolerant status=done detail=穿插包忽略+15s超时，真机reset大概率是ClientInformation插队 files=network/login_route.rs
 - [2026-11-23 07:30 UTC] agent=p7b task=real-registry status=start detail=真dimension/biome NBT+minimal带数据 files=packets/config.rs
 - [2026-11-23 07:45 UTC] agent=p7b task=real-registry status=done detail=真overworld/plains NBT+minimal带数据+6单测全过 files=packets/config.rs(374)
+- [2026-11-23 08:00 UTC] agent=main task=registry-wirefix status=done detail=wiki证伪：Data是PrefixedOptional裸NBT，去VarInt长+去根名00 00，35+24全过 files=packets/config.rs
