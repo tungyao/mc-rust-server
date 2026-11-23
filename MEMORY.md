@@ -16,3 +16,5 @@
 - [2026-11-23 05:30 UTC] agent=p5a task=movement status=done detail=C2S 0x1E-0x21解码+ movement tick/15s超时踢减online + play_loop last_seen/move-log 52测试全过 files=packets/play_sync.rs(397),server/movement.rs(330),network/login_route.rs(296),server/main.rs接线
 - [2026-11-23 06:00 UTC] agent=p6a task=registry-data status=start detail=KnownPacks+Registry最小下发+config_finish按序 files=packets/config.rs,network/login_route
 - [2026-11-23 06:30 UTC] agent=p6a task=registry-data status=done detail=KnownPacks单vanilla+Registry最小2包+config_finish按序5步，52测试全过 files=packets/config.rs(269),network/login_route.rs(369),tests/login_flow.rs+online_count.rs
+- [2026-11-23 06:00 UTC] agent=p6b task=real-chunk status=start detail=play_chunk真布局+world真实palette files=play_chunk.rs/world-lib
+- [2026-11-23 06:30 UTC] agent=p6b task=real-chunk status=done detail=777真布局：结构化heightmap+fluid+无data_len+空光照，39测试全过 files=play_chunk.rs(369)/world-lib(259)

@@ -105,10 +105,11 @@ pub fn view_chunks(center: mc_core::ChunkPos, radius: i32) -> Vec<mc_core::Chunk
     });
     out
 }
-/// Chunk 网络字节：按真实 section 数逐节填 8B 占位，P3 填真实高度图/光照
-/// （复用 mc-protocol 空 section 占位布局，每节 8B）。
-/// 按高度区分：空气节全零占位；均匀石头节同布局但调色板记石头 ID、
-/// block_count=4096；混合节记真实非空方块数、调色板 P3 再补。
+/// Chunk 网络字节：24节真布局串接（每节8B，复用 mc-protocol 单值容器：block_count u16be
+/// + fluid_count u16be + block单值(BPE0+全局blockstate) + biome单值(BPE0+plains 0)）。
+/// 来源：Chunk_format#Chunk_Section结构 + Paletted单值（1.21.5+无data_len），与protocol对齐。
+/// 按高度区分：空气节全零占位；均匀石头节调色板记石头ID、block_count=4096；
+/// 混合节记真实非空方块数（palette暂单值air占位，P后续补indirect多值，当前block_count真实）。
 pub fn chunk_network_bytes(chunk: &Chunk) -> Vec<u8> {
     let mut out = Vec::with_capacity(chunk.sections.len() * 8);
     for (idx, kind) in chunk.sections.iter().enumerate() {
@@ -117,27 +118,35 @@ pub fn chunk_network_bytes(chunk: &Chunk) -> Vec<u8> {
                 mc_protocol::packets::encode_empty_section_placeholder(&mut out);
             }
             SectionKind::Uniform(id) => {
-                // 均匀非空节占位（ID 占位值 <256，直接记调色板低字节，待对齐）。
-                out.extend_from_slice(&4096i16.to_be_bytes());
-                out.extend_from_slice(&[0x00, id as u8, 0x00]);
-                out.extend_from_slice(&[0x00, 0x00, 0x00]);
+                // 均匀非空节：单值palette记该blockstate占位ID（<128时VarInt单字节），fluid=0。
+                mc_protocol::packets::encode_uniform_section_single(
+                    id as i32, 0, 4096, 0, &mut out,
+                );
             }
             SectionKind::Paletted | SectionKind::Direct => {
-                // 混合节占位：逐层按 block_at_y 计非空数（每层 16x16）。
+                // 混合节占位：逐层按 block_at_y 计非空数（每层 16x16），palette暂单值air，
+                // block_count真实，待P补indirect多值palette + data数组。
                 let base = MIN_Y + idx as i32 * 16;
-                let mut non_air: i16 = 0;
+                let mut non_air: u16 = 0;
                 for dy in 0..16 {
                     if block_at_y(base + dy) != AIR_BLOCK_ID {
                         non_air += 256;
                     }
                 }
-                out.extend_from_slice(&non_air.to_be_bytes());
-                out.extend_from_slice(&[0x00, 0x00, 0x00]);
-                out.extend_from_slice(&[0x00, 0x00, 0x00]);
+                mc_protocol::packets::encode_uniform_section_single(
+                    AIR_BLOCK_ID as i32, 0, non_air, 0, &mut out,
+                );
             }
         }
     }
     out
+}
+
+/// 空MOTION_BLOCKING高度图（777结构化Heightmaps，非NBT）：count(1)+type(4)+37零long。
+/// 与 protocol::empty_heightmaps_bytes 同字节，world侧真机高度图统一走这里。
+/// 来源：Chunk_format#Heightmap结构（MOTION_BLOCKING=4，37 longs全最小高度）。
+pub fn chunk_heightmaps_bytes() -> Vec<u8> {
+    mc_protocol::packets::empty_heightmaps_bytes()
 }
 
 #[cfg(test)]
@@ -203,6 +212,20 @@ mod tests {
         }
         assert!(bytes[7 * 8..8 * 8].iter().any(|&b| b != 0));
         assert!(bytes[8 * 8..9 * 8].iter().any(|&b| b != 0));
+        // 真布局断言（与protocol单值容器对齐）：石头节8B = 10 00(4096) 00 00(fluid0) 00 01(stone) 00 00(plains)
+        assert_eq!(stone0, &[0x10, 0x00, 0x00, 0x00, 0x00, 0x01, 0x00, 0x00]);
+        // 混合节7全满（4096，palette暂air）：10 00 00 00 00 00 00 00；节8仅草层256：01 00 00 00 00 00 00 00
+        assert_eq!(&bytes[7 * 8..8 * 8], &[0x10, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00]);
+        assert_eq!(&bytes[8 * 8..9 * 8], &[0x01, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00]);
+    }
+
+    #[test]
+    fn chunk_heightmaps_is_empty_motion_blocking() {
+        // world高度图 = protocol结构化空MOTION_BLOCKING（1 + 4 + 37 + 37×8零）
+        let h = chunk_heightmaps_bytes();
+        assert_eq!(h, mc_protocol::packets::empty_heightmaps_bytes());
+        assert_eq!(&h[..3], &[0x01, 0x04, 0x25]);
+        assert_eq!(h.len(), 3 + 37 * 8);
     }
 
     #[test]
