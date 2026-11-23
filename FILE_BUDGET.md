@@ -1,7 +1,7 @@
-# 文件大小预算（硬性）
-- `crates/*/src/**/*.rs`：<=200行（含注释/空行，按 `wc -l` 计）
-- `crates/*/tests/*.rs`：<=250行
-- 超了必须拆：按阶段/职责拆成 `mod`（参考 `packets/` 拆分：codec/handshake/status/login/play_*）
-- 检查：`bash scripts/check_budget.sh`（CI/提交前必跑，agent完工自查）
+# 文件大小预算（软约束）
+- 目标：单文件建议 <=2000行，`wc -l` 计。
+- 原则：能拆的逻辑就拆（按阶段/职责拆 mod），拆不了的不强求，别为了凑行数硬拆。
+- tests 同理 <=2500行宽松，优先保证可读和单测就近。
+- 检查：`bash scripts/check_budget.sh` 只告警，不卡 CI；agent 完工汇报行数即可。
 
-例外：`build.rs` 生成代码不计，但手写部分<=200行。
+例外：`build.rs` 生成代码不计。
