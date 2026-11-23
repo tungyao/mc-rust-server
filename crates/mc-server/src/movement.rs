@@ -3,11 +3,12 @@
 //! Position字段与C2S移动包（`packets::play_sync::MovePlayer*`）对齐：
 //! x/y/z/yaw/pitch/on_ground。
 use bevy_ecs::prelude::*;
+use std::net::SocketAddr;
 use std::sync::atomic::Ordering;
 use std::time::{Duration, Instant};
-use tracing::{info, warn};
+use tracing::{debug, info, warn};
 
-use crate::resources::PlayersOnline;
+use crate::resources::{PlayEventReceiver, PlayersOnline};
 
 /// 世界边界（原版静默clamp值）：x/z ±30M，y ±20M。超界只warn不踢。
 pub const WORLD_BORDER_XZ: f64 = 30_000_000.0;
@@ -42,8 +43,8 @@ impl Default for Position {
     }
 }
 
-/// 玩家KeepAlive活跃度：net线程收到C2S KeepAlive回显即更新（经channel进ECS后写这里，
-/// P5a先log TODO，channel在P6接；此处先提供组件+超时系统供Tick用）。
+/// 玩家KeepAlive活跃度：net线程收到C2S KeepAlive回显/移动包后经 `PlayEvent` 通道进ECS，
+/// 由 `movement_ingest_system` 刷新 `last_seen`；在线数只在 timeout 系统减一次。
 #[derive(Component, Debug, Clone)]
 pub struct PlayerKeepAlive {
     pub last_seen: Instant,
@@ -54,6 +55,10 @@ impl Default for PlayerKeepAlive {
         Self { last_seen: Instant::now() }
     }
 }
+
+/// 网络连接地址 → ECS 玩家实体的映射键（net 线程只带 addr 投递事件）。
+#[derive(Component, Debug, Clone, Copy, PartialEq, Eq)]
+pub struct PlayerAddr(pub SocketAddr);
 
 /// Tick待应用的移动更新（net线程经channel投递后压入这里，P5a先由测试/占位压入）。
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -93,9 +98,52 @@ impl From<mc_protocol::packets::C2SMovement> for MovementUpdate {
     }
 }
 
-/// Tick待应用队列：`(Entity, MovementUpdate)`。net侧TODO经channel压入后在此排空。
+/// Tick待应用队列：`(Entity, MovementUpdate)`。net侧 `PlayEvent::Movement` 经 channel
+/// 由 `movement_ingest_system` 按 addr 找到实体后压入，`movement_system` 排空并更新 Position。
 #[derive(Resource, Default, Debug)]
 pub struct MovementQueue(pub Vec<(Entity, MovementUpdate)>);
+
+/// 排空 net 线程投递的 Play 事件（IO-free）：
+/// - Movement：addr → Entity，转换 `MovementUpdate` 后压入 MovementQueue（下个 system 应用）；
+/// - KeepAlive：刷新 PlayerKeepAlive.last_seen（在线数仍只在 timeout 系统减）。
+pub fn movement_ingest_system(
+    events: Res<PlayEventReceiver>,
+    mut queue: ResMut<MovementQueue>,
+    addr_query: Query<(Entity, &PlayerAddr)>,
+    mut keepalive_query: Query<&mut PlayerKeepAlive>,
+) {
+    if events.0.is_empty() {
+        return;
+    }
+    let mut by_addr = std::collections::HashMap::new();
+    for (ent, addr) in addr_query.iter() {
+        by_addr.insert(addr.0, ent);
+    }
+    while let Ok(ev) = events.0.try_recv() {
+        match ev {
+            mc_network::PlayEvent::Movement { addr, movement } => match by_addr.get(&addr) {
+                Some(&ent) => {
+                    queue.0.push((ent, MovementUpdate::from(movement)));
+                    // 移动包同样证明连接存活：26.3 客户端即使站立也约 1s 发一次，
+                    // 用它刷新可避免 “15s 心跳周期 == 15s 超时” 的临界竞态；
+                    // net 线程仍按 KeepAlive 回显严格执行 15s 踢出。
+                    if let Ok(mut ka) = keepalive_query.get_mut(ent) {
+                        ka.last_seen = Instant::now();
+                    }
+                }
+                None => debug!("movement from unknown addr {addr} ignored"),
+            },
+            mc_network::PlayEvent::KeepAlive { addr } => match by_addr.get(&addr) {
+                Some(&ent) => {
+                    if let Ok(mut ka) = keepalive_query.get_mut(ent) {
+                        ka.last_seen = Instant::now();
+                    }
+                }
+                None => debug!("keepalive from unknown addr {addr} ignored"),
+            },
+        }
+    }
+}
 
 fn finite_or_warn(x: f64, y: f64, z: f64, yaw: f32, pitch: f32) -> bool {
     if !x.is_finite() || !y.is_finite() || !z.is_finite() || !yaw.is_finite() || !pitch.is_finite() {
@@ -180,7 +228,12 @@ pub fn movement_system(mut queue: ResMut<MovementQueue>, mut query: Query<&mut P
     for (ent, upd) in batch {
         match query.get_mut(ent) {
             Ok(mut pos) => {
-                apply_movement_update(&mut pos, &upd);
+                if apply_movement_update(&mut pos, &upd) {
+                    debug!(
+                        "movement applied entity={ent:?} pos=({:.2},{:.2},{:.2}) yaw={:.1} on_ground={}",
+                        pos.x, pos.y, pos.z, pos.yaw, pos.on_ground
+                    );
+                }
             }
             Err(_) => {
                 warn!("movement for missing entity {ent:?} ignored");
@@ -326,5 +379,85 @@ mod tests {
             u,
             MovementUpdate::PosRot { x: 1.0, y: 2.0, z: 3.0, yaw: 10.0, pitch: 20.0, on_ground: true }
         );
+    }
+
+    #[test]
+    fn play_event_movement_reaches_queue_and_updates_position() {
+        use bevy_ecs::schedule::IntoSystemConfigs;
+        let addr: SocketAddr = "127.0.0.1:40000".parse().unwrap();
+        let mut world = World::new();
+        let online = PlayersOnline(Arc::new(std::sync::atomic::AtomicUsize::new(1)));
+        world.insert_resource(online);
+        world.insert_resource(MovementQueue::default());
+        let (tx, rx) = crossbeam_channel::unbounded();
+        world.insert_resource(PlayEventReceiver(rx));
+        let ent = world
+            .spawn((PlayerAddr(addr), Position::default(), PlayerKeepAlive::default()))
+            .id();
+        // 先只发移动包：它也必须刷新 last_seen（26.3 站立时也约 1s 一包），
+        // 否则 15s KeepAlive 周期与 15s 超时会在临界点误踢。
+        world.get_mut::<PlayerKeepAlive>(ent).unwrap().last_seen =
+            Instant::now() - Duration::from_secs(16);
+        tx.send(mc_network::PlayEvent::Movement {
+            addr,
+            movement: mc_protocol::packets::C2SMovement::Pos(
+                mc_protocol::packets::MovePlayerPos {
+                    x: 384.5,
+                    y: 65.0,
+                    z: 381.5,
+                    on_ground: true,
+                    horizontal_collision: false,
+                },
+            ),
+        })
+        .unwrap();
+        let mut sched = Schedule::default();
+        sched.add_systems((movement_ingest_system, movement_system, keepalive_timeout_system).chain());
+        sched.run(&mut world);
+        let pos = world.get::<Position>(ent).unwrap();
+        assert_eq!((pos.x, pos.y, pos.z), (384.5, 65.0, 381.5));
+        assert!(pos.on_ground);
+        assert!(world.get_resource::<MovementQueue>().unwrap().0.is_empty());
+        assert!(world.get_entity(ent).is_some(), "movement event must refresh last_seen");
+        assert_eq!(
+            world.get_resource::<PlayersOnline>().unwrap().0.load(Ordering::SeqCst),
+            1,
+            "movement/keepalive events must not change online count"
+        );
+        // 再验证 KeepAlive 回显同样刷新；两条路径都不重复减 online。
+        world.get_mut::<PlayerKeepAlive>(ent).unwrap().last_seen =
+            Instant::now() - Duration::from_secs(16);
+        tx.send(mc_network::PlayEvent::KeepAlive { addr }).unwrap();
+        sched.run(&mut world);
+        assert!(world.get_entity(ent).is_some(), "keepalive event must refresh last_seen");
+        assert_eq!(
+            world.get_resource::<PlayersOnline>().unwrap().0.load(Ordering::SeqCst),
+            1
+        );
+    }
+
+    #[test]
+    fn play_event_from_unknown_addr_is_ignored() {
+        let mut world = World::new();
+        world.insert_resource(MovementQueue::default());
+        let (tx, rx) = crossbeam_channel::unbounded();
+        world.insert_resource(PlayEventReceiver(rx));
+        let known: SocketAddr = "127.0.0.1:40001".parse().unwrap();
+        let unknown: SocketAddr = "127.0.0.1:40002".parse().unwrap();
+        let ent = world
+            .spawn((PlayerAddr(known), Position::default(), PlayerKeepAlive::default()))
+            .id();
+        tx.send(mc_network::PlayEvent::Movement {
+            addr: unknown,
+            movement: mc_protocol::packets::C2SMovement::Flags(
+                mc_protocol::packets::MovePlayerFlags { on_ground: true, horizontal_collision: false },
+            ),
+        })
+        .unwrap();
+        let mut sched = Schedule::default();
+        sched.add_systems(movement_ingest_system);
+        sched.run(&mut world);
+        assert!(world.get_resource::<MovementQueue>().unwrap().0.is_empty());
+        assert!(!world.get::<Position>(ent).unwrap().on_ground);
     }
 }

@@ -1,6 +1,7 @@
-//! Play 脚手架：Login 队列 → "ready to join" + 初始视距 + 每秒 KeepAlive 计数
+//! Play 脚手架：Login 队列 → "ready to join" + 初始视距编码自检 + KeepAlive 计数
 //! 包 ID 取 `packets::PLAY_*` 现有常量，已按P4A对照表核对777。
-//! P5b 只做视距：spawn 中心 radius=4（81 块），每 tick 只发 1 块（限流防 tick lag）。
+//! 真下发仍由 net 线程 `enter_play` 负责；ECS 侧已接收移动/KeepAlive 事件（P13），
+//! 但 socket 句柄尚未进 ECS（见 TODO socket→ECS）。P5b 视距队列仅保留编码自检/日志。
 use bevy_ecs::prelude::*;
 use std::collections::VecDeque;
 use std::net::SocketAddr;
@@ -16,10 +17,13 @@ pub const VIEW_CHUNK_COUNT: usize = 81;
 pub const CHUNKS_PER_TICK: usize = 1;
 
 /// Play 脚手架状态：net 线程交来的登录排队，P3 接真实 Player 实体。
-/// P3后半 TODO：`NewConnection` 目前只带 addr（profile/socket 句柄留在 net 线程，
-/// 真下发走 `mc_network::login_route::enter_play`）；要把 socket 从 net 线程交到 ECS，
-/// 需扩展 channel 信封携带 `PlayerProfile` + socket 句柄（或 tokio mpsc 发包通道），
-/// 届时本队列升级为 `Vec<PlayerProfile>`，真下发从 net 侧移到 ECS 侧。
+/// P13：`systems::handle_new_connections` 已为每个登录 spawn
+/// `PlayerAddr/Position/PlayerKeepAlive`，`PlayEvent`（移动/KeepAlive）经 channel 进 ECS。
+/// TODO(P13/socket→ECS)：socket 句柄仍留在 net 线程（真下发走 `enter_play`）。
+/// 若要把 socket 交给 ECS，需要：1) `NewConnection` 信封扩展携带 `PlayerProfile` +
+/// tokio 写通道（或 socket 所有权）；2) net 线程只保留读循环/超时；3) 本队列升级为
+/// `Vec<PlayerProfile>`，`login_join_system` 通过写通道真发 Join/Chunk/PositionSync。
+/// 该拆分会影响当前已验证可进 Play 的链路，本轮保持现状并保留 TODO。
 #[derive(Resource, Default, Debug)]
 pub struct PlayScaffold {
     /// channel 收到的 NewConnection 按到达顺序排队（替代 P2 的 u64 计数器）。
@@ -43,10 +47,11 @@ pub fn spawn_center_chunk() -> mc_core::ChunkPos {
     mc_core::ChunkPos(spawn.0.div_euclid(16), spawn.2.div_euclid(16))
 }
 
-/// Login 成功队列排空 + 初始视距入队 + 每 tick 限流 1 块。
-/// 调用链（main.rs）：`handle_new_connections`（收 NewConnection 入 `pending_login`）
-/// → 本系统（join + 视距入队 + 发 1 块）。包 ID 已按P4A对照表核对777。
-/// TODO(P5c)：socket 句柄交接进 ECS 后，在此真写 Join Game / Set Center Chunk /
+/// Login 成功队列排空 + 初始视距入队 + 每 tick 限流 1 块（仅编码/log 自检）。
+/// 调用链（main.rs）：`handle_new_connections`（收 NewConnection + spawn ECS 实体）
+/// → `movement_ingest_system`（PlayEvent）→ 本系统 → `movement_system`。
+/// 包 ID 已按P4A对照表核对777。
+/// TODO(P13/socket→ECS)：socket 句柄交接进 ECS 后，在此真写 Join Game / Set Center Chunk /
 /// Chunk Data / Player Position Sync；视距队列按 Player 实体拆分，本处共享队列仅脚手架。
 pub fn login_join_system(mut play: ResMut<PlayScaffold>) {
     // 1) 新登录：逐个触发一次 Join 下发（当前为 log，socket 真发包在 net 线程已做），

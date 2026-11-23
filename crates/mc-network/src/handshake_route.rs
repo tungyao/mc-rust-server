@@ -1,7 +1,7 @@
 //! handshake_route: 首包Handshake + 777校验 + 分流 Status/Login
 use super::config::NetConfig;
 use super::framing::{read_packet, to_io_invalid};
-use super::login_route::handle_login;
+use super::login_route::handle_login_configured;
 use super::status_route::handle_status;
 use super::NewConnection;
 use crossbeam_channel::Sender;
@@ -30,7 +30,14 @@ pub async fn handle_connection(mut stream: TcpStream, addr: SocketAddr, tx: Send
         }
         HandshakeNextState::Login => {
             debug!("{addr} login handshake (server={}:{})", hs.server_address, hs.server_port);
-            handle_login(stream, addr, &tx).await?;
+            handle_login_configured(
+                stream,
+                addr,
+                &tx,
+                config.compression_threshold,
+                config.play_events.clone(),
+            )
+            .await?;
         }
     }
     Ok(())

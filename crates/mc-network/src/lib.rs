@@ -1,14 +1,18 @@
 //! mc-network: tokio 监听 + 包收发，只兼容26.3/777
 //! 模块上限200行：config/framing/handshake_route/status_route/login_route
+pub mod chunk_view;
 pub mod config;
 pub mod framing;
 pub mod handshake_route;
 pub mod login_route;
+pub mod play_events;
 pub mod status_route;
 
+pub use chunk_view::{ChunkView, ChunkViewUpdate, PLAY_VIEW_CHUNK_COUNT, PLAY_VIEW_RADIUS};
 pub use config::{NetConfig, STATUS_MAX_PLAYERS, STATUS_MOTD};
 pub use framing::{MAX_PACKET_LEN, READ_TIMEOUT};
-pub use login_route::{enter_play, notify_login_success};
+pub use login_route::{enter_play, enter_play_with_events, notify_login_success};
+pub use play_events::PlayEvent;
 
 use crossbeam_channel::Sender;
 use tokio::net::TcpListener;

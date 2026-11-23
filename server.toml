@@ -3,3 +3,4 @@ motd = "Rust MC 26.3 (777) self-made"
 max_players = 100
 view_distance = 10
 seed = 123456789
+compression_threshold = -1

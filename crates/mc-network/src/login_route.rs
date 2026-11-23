@@ -1,5 +1,9 @@
 //! login_route: Login离线流程 Start→[SetCompression]→Success→Ack→Config(Finish→Ack)→enter_play(真下发)
+//! Play 期：KeepAlive + C2S 移动包；移动包经 crossbeam channel 投递 ECS（PlayEvent），
+//! 同时 net 线程自身按玩家跨区块动态补发 radius=4 区块并卸载越界区块。
+use super::chunk_view::ChunkView;
 use super::framing::{read_packet, read_packet_framed, to_io_invalid, write_packet, write_packet_framed};
+use super::play_events::PlayEvent;
 use crossbeam_channel::Sender;
 use mc_protocol::packets;
 use std::net::SocketAddr;
@@ -13,11 +17,22 @@ use std::time::{Duration, Instant};
 
 /// 默认压缩禁用（阈值 -1，原行为）。
 pub async fn handle_login(stream: TcpStream, addr: SocketAddr, tx: &Sender<NewConnection>) -> io::Result<()> {
-    handle_login_with_threshold(stream, addr, tx, packets::COMPRESSION_DISABLED_THRESHOLD).await
+    handle_login_configured(stream, addr, tx, packets::COMPRESSION_DISABLED_THRESHOLD, None).await
 }
 
 /// 阈值可配：threshold>=0 时 Success 前先发 SetCompression，其后走压缩帧。
-pub async fn handle_login_with_threshold(mut stream: TcpStream, addr: SocketAddr, tx: &Sender<NewConnection>, threshold: i32) -> io::Result<()> {
+pub async fn handle_login_with_threshold(stream: TcpStream, addr: SocketAddr, tx: &Sender<NewConnection>, threshold: i32) -> io::Result<()> {
+    handle_login_configured(stream, addr, tx, threshold, None).await
+}
+
+/// 完整登录入口：压缩阈值 + Play 事件通道（Serve 从 NetConfig 透传）。
+pub async fn handle_login_configured(
+    mut stream: TcpStream,
+    addr: SocketAddr,
+    tx: &Sender<NewConnection>,
+    threshold: i32,
+    events: Option<Sender<PlayEvent>>,
+) -> io::Result<()> {
     let (id, payload) = read_packet(&mut stream).await?;
     if id != packets::LOGIN_START_PACKET_ID {
         warn!("{addr} login: expected start 0x00, got {id:#04x}, disconnect");
@@ -65,7 +80,7 @@ pub async fn handle_login_with_threshold(mut stream: TcpStream, addr: SocketAddr
         return Ok(());
     }
     notify_login_success(tx, addr, &profile);
-    enter_play(stream, profile, threshold).await?;
+    enter_play_with_events(stream, addr, profile, threshold, events).await?;
     Ok(())
 }
 
@@ -161,60 +176,113 @@ pub fn notify_login_success(tx: &Sender<NewConnection>, addr: SocketAddr, profil
 }
 
 /// 进入 Play：拿住 socket，按序真下发后进循环。threshold透传，压缩开启后Play包走压缩帧。
-pub async fn enter_play(mut stream: TcpStream, profile: mc_core::PlayerProfile, threshold: i32) -> io::Result<()> {
-    info!("enter_play uuid={} name={} threshold={threshold}", profile.uuid, profile.username);
-    let keepalive_id = send_join_sequence(&mut stream, &profile, threshold).await?;
-    info!("play join sent uuid={} name={} keepalive={keepalive_id}", profile.uuid, profile.username);
-    play_loop(&mut stream, &profile, keepalive_id, threshold).await
+/// 旧签名保留（无 ECS 事件通道）；Serve 走 [`enter_play_with_events`]。
+pub async fn enter_play(stream: TcpStream, addr: SocketAddr, profile: mc_core::PlayerProfile, threshold: i32) -> io::Result<()> {
+    enter_play_with_events(stream, addr, profile, threshold, None).await
 }
 
-async fn send_join_sequence(stream: &mut TcpStream, profile: &mc_core::PlayerProfile, threshold: i32) -> io::Result<i64> {
-    let compressed = packets::compression_enabled(threshold);
-    let mut body = Vec::new();
-    packets::LoginPlay::default().encode_body(&mut body);
-    if compressed { write_packet_framed(stream, packets::PLAY_LOGIN_PLAY_ID, &body, threshold).await?; }
-    else { write_packet(stream, packets::PLAY_LOGIN_PLAY_ID, &body).await?; }
-    debug!("play {} login play sent", profile.username);
+/// 进入 Play（带 Play 事件通道）：Join 序列发送后进入循环，移动/KeepAlive 事件投递 ECS。
+pub async fn enter_play_with_events(
+    mut stream: TcpStream,
+    addr: SocketAddr,
+    profile: mc_core::PlayerProfile,
+    threshold: i32,
+    events: Option<Sender<PlayEvent>>,
+) -> io::Result<()> {
+    info!("enter_play uuid={} name={} threshold={threshold}", profile.uuid, profile.username);
     // 出生点与中心区块统一由 mc-world::SPAWN_POS 推导（369,67,381 → chunk 23,23），
     // 避免网络层与 world 层各写一份坐标。
     let spawn = mc_world::SPAWN_POS;
     let center = mc_core::ChunkPos(spawn.0.div_euclid(16), spawn.2.div_euclid(16));
+    let mut view = ChunkView::new(center);
+    let keepalive_id = send_join_sequence(&mut stream, &profile, threshold, &mut view).await?;
+    info!(
+        "play join sent uuid={} name={} keepalive={} view_sent={}",
+        profile.uuid,
+        profile.username,
+        keepalive_id,
+        view.sent_count()
+    );
+    play_loop(&mut stream, addr, &profile, keepalive_id, threshold, view, events).await
+}
+
+/// 压缩感知写包：threshold>=0 走压缩帧，否则普通帧。
+async fn write_packet_any(stream: &mut TcpStream, packet_id: i32, payload: &[u8], threshold: i32) -> io::Result<()> {
+    if packets::compression_enabled(threshold) {
+        write_packet_framed(stream, packet_id, payload, threshold).await
+    } else {
+        write_packet(stream, packet_id, payload).await
+    }
+}
+
+/// 单块 ChunkData 包体（真实 palette/heightmap/light，来自 mc-world）。
+fn play_chunk_body(pos: mc_core::ChunkPos) -> Vec<u8> {
+    let chunk = mc_world::chunk_for(pos);
+    let chunk_data = packets::PlayChunkData {
+        chunk_x: pos.0,
+        chunk_z: pos.1,
+        heightmaps_nbt: mc_world::chunk_heightmaps_bytes(),
+        section_bytes: mc_world::chunk_network_bytes(&chunk),
+        light_bytes: mc_world::chunk_light_bytes(),
+    };
+    let mut body = Vec::new();
+    chunk_data.encode_body(&mut body);
+    body
+}
+
+/// 发一批 ChunkData：ChunkBatchStart → N×ChunkData → ChunkBatchFinished(batch_size=N)。
+/// 空批次不发（客户端 ChunkBatchSizeCalculator 只接受正 batch_size）。
+async fn send_chunk_batch(stream: &mut TcpStream, add: &[mc_core::ChunkPos], threshold: i32) -> io::Result<()> {
+    if add.is_empty() {
+        return Ok(());
+    }
+    write_packet_any(stream, packets::PLAY_CHUNK_BATCH_START_ID, &[], threshold).await?;
+    for pos in add {
+        let body = play_chunk_body(*pos);
+        write_packet_any(stream, packets::PLAY_CHUNK_DATA_ID, &body, threshold).await?;
+    }
+    let mut body = Vec::new();
+    mc_protocol::write_varint(add.len() as i32, &mut body);
+    write_packet_any(stream, packets::PLAY_CHUNK_BATCH_FINISHED_ID, &body, threshold).await
+}
+
+/// 逐个发 UnloadChunk（0x26 forget_level_chunk）。
+async fn send_unload_chunks(stream: &mut TcpStream, remove: &[mc_core::ChunkPos], threshold: i32) -> io::Result<()> {
+    for pos in remove {
+        let mut body = Vec::new();
+        packets::UnloadChunk { chunk_x: pos.0, chunk_z: pos.1 }.encode_body(&mut body);
+        write_packet_any(stream, packets::PLAY_UNLOAD_CHUNK_ID, &body, threshold).await?;
+    }
+    Ok(())
+}
+
+async fn send_join_sequence(
+    stream: &mut TcpStream,
+    profile: &mc_core::PlayerProfile,
+    threshold: i32,
+    view: &mut ChunkView,
+) -> io::Result<i64> {
+    let mut body = Vec::new();
+    packets::LoginPlay::default().encode_body(&mut body);
+    write_packet_any(stream, packets::PLAY_LOGIN_PLAY_ID, &body, threshold).await?;
+    debug!("play {} login play sent", profile.username);
+    let spawn = mc_world::SPAWN_POS;
+    let center = mc_core::ChunkPos(spawn.0.div_euclid(16), spawn.2.div_euclid(16));
     body.clear();
     packets::SetCenterChunk { chunk_x: center.0, chunk_z: center.1 }.encode_body(&mut body);
-    if compressed { write_packet_framed(stream, packets::PLAY_SET_CENTER_CHUNK_ID, &body, threshold).await?; }
-    else { write_packet(stream, packets::PLAY_SET_CENTER_CHUNK_ID, &body).await?; }
+    write_packet_any(stream, packets::PLAY_SET_CENTER_CHUNK_ID, &body, threshold).await?;
     // 26.3 客户端要 Game Event LEVEL_CHUNKS_LOAD_START(type=13) 才离开 WaitingForServer。
     body.clear();
     packets::encode_game_event_level_chunks_load_start(&mut body);
-    if compressed { write_packet_framed(stream, packets::PLAY_GAME_EVENT_ID, &body, threshold).await?; }
-    else { write_packet(stream, packets::PLAY_GAME_EVENT_ID, &body).await?; }
+    write_packet_any(stream, packets::PLAY_GAME_EVENT_ID, &body, threshold).await?;
     // 26.3 必须把区块包夹在 chunk_batch_start(0x0C) / chunk_batch_finished(0x0B) 之间，
-    // 否则客户端一直停在“加载地形中…”。区块数据来自 mc-world（真实间接 palette +
-    // 高度图）。关键：SectionUpdateTracker.hasAllNeighbors 要求中心 section 的 4 正+4 斜
-    // 邻居区块都存在，只发 1 块时 player section 永远不会编译，30s 后客户端超时放行。
-    // 因此一次性发 radius=4 的 81 块（同一批），与 mc-server 视距队列一致。
-    let chunks = mc_world::view_chunks(center, 4);
-    if compressed { write_packet_framed(stream, packets::PLAY_CHUNK_BATCH_START_ID, &[], threshold).await?; }
-    else { write_packet(stream, packets::PLAY_CHUNK_BATCH_START_ID, &[]).await?; }
-    let mut chunk_body = Vec::new();
-    for pos in &chunks {
-        let chunk = mc_world::chunk_for(*pos);
-        let chunk_data = packets::PlayChunkData {
-            chunk_x: pos.0,
-            chunk_z: pos.1,
-            heightmaps_nbt: mc_world::chunk_heightmaps_bytes(),
-            section_bytes: mc_world::chunk_network_bytes(&chunk),
-            light_bytes: mc_world::chunk_light_bytes(),
-        };
-        chunk_body.clear();
-        chunk_data.encode_body(&mut chunk_body);
-        if compressed { write_packet_framed(stream, packets::PLAY_CHUNK_DATA_ID, &chunk_body, threshold).await?; }
-        else { write_packet(stream, packets::PLAY_CHUNK_DATA_ID, &chunk_body).await?; }
-    }
-    body.clear();
-    mc_protocol::write_varint(chunks.len() as i32, &mut body);
-    if compressed { write_packet_framed(stream, packets::PLAY_CHUNK_BATCH_FINISHED_ID, &body, threshold).await?; }
-    else { write_packet(stream, packets::PLAY_CHUNK_BATCH_FINISHED_ID, &body).await?; }
+    // 否则客户端一直停在“加载地形中…”。关键：SectionUpdateTracker.hasAllNeighbors 要求
+    // 中心 section 的 4 正+4 斜邻居区块都存在，只发 1 块时 player section 永远不会编译，
+    // 30s 后客户端超时放行。因此一次性发 radius=4 的 81 块（同一批），
+    // 与 mc-server 视距队列 / ChunkView 一致。
+    let update = view.plan(center);
+    debug_assert_eq!(update.add.len(), super::chunk_view::PLAY_VIEW_CHUNK_COUNT);
+    send_chunk_batch(stream, &update.add, threshold).await?;
     body.clear();
     packets::PlayerPositionSync {
         teleport_id: 1,
@@ -222,32 +290,88 @@ async fn send_join_sequence(stream: &mut TcpStream, profile: &mc_core::PlayerPro
         delta_x: 0.0, delta_y: 0.0, delta_z: 0.0,
         yaw: 0.0, pitch: 0.0, relatives: 0,
     }.encode_body(&mut body);
-    if compressed { write_packet_framed(stream, packets::PLAY_PLAYER_POSITION_SYNC_ID, &body, threshold).await?; }
-    else { write_packet(stream, packets::PLAY_PLAYER_POSITION_SYNC_ID, &body).await?; }
+    write_packet_any(stream, packets::PLAY_PLAYER_POSITION_SYNC_ID, &body, threshold).await?;
     let keepalive_id = 1i64;
     body.clear();
     packets::KeepAliveS2C(keepalive_id).encode_body(&mut body);
-    if compressed { write_packet_framed(stream, packets::PLAY_KEEPALIVE_S2C_ID, &body, threshold).await?; }
-    else { write_packet(stream, packets::PLAY_KEEPALIVE_S2C_ID, &body).await?; }
+    write_packet_any(stream, packets::PLAY_KEEPALIVE_S2C_ID, &body, threshold).await?;
     Ok(keepalive_id)
 }
 
-async fn play_loop(stream: &mut TcpStream, profile: &mc_core::PlayerProfile, mut seq: i64, threshold: i32) -> io::Result<()> {
-    let compressed = packets::compression_enabled(threshold);
-    // 最后一次收到KeepAlive回显的时间；移动包不刷新它（只证明位置变化，不证明存活）。
+/// 压缩感知读包：threshold>=0 按压缩帧解析，否则普通帧。
+async fn read_packet_any(stream: &mut TcpStream, threshold: i32) -> io::Result<(i32, Vec<u8>)> {
+    if packets::compression_enabled(threshold) {
+        read_packet_framed(stream, threshold).await
+    } else {
+        read_packet(stream).await
+    }
+}
+
+/// 向 ECS 投递 Play 事件：不阻塞 net 线程；通道满/关闭只 debug（主循环用无界通道）。
+fn emit_play_event(events: &Option<Sender<PlayEvent>>, ev: PlayEvent) {
+    if let Some(tx) = events {
+        if let Err(e) = tx.try_send(ev) {
+            debug!("play event dropped ({e})");
+        }
+    }
+}
+
+/// 玩家跨区块：SetCenterChunk → 卸载越界区块 → 一批补发缺失区块（batch_size = add.len）。
+async fn maybe_move_view(
+    stream: &mut TcpStream,
+    profile: &mc_core::PlayerProfile,
+    view: &mut ChunkView,
+    x: f64,
+    z: f64,
+    threshold: i32,
+) -> io::Result<()> {
+    let Some(center) = ChunkView::chunk_of_block(x, z) else {
+        return Ok(());
+    };
+    if center == view.center() {
+        return Ok(());
+    }
+    let mut body = Vec::new();
+    packets::SetCenterChunk { chunk_x: center.0, chunk_z: center.1 }.encode_body(&mut body);
+    write_packet_any(stream, packets::PLAY_SET_CENTER_CHUNK_ID, &body, threshold).await?;
+    let update = view.plan(center);
+    send_unload_chunks(stream, &update.remove, threshold).await?;
+    send_chunk_batch(stream, &update.add, threshold).await?;
+    info!(
+        "play view move uuid={} name={} center=({},{}) add={} remove={} sent_total={}",
+        profile.uuid,
+        profile.username,
+        center.0,
+        center.1,
+        update.add.len(),
+        update.remove.len(),
+        view.sent_count()
+    );
+    Ok(())
+}
+
+async fn play_loop(
+    stream: &mut TcpStream,
+    addr: SocketAddr,
+    profile: &mc_core::PlayerProfile,
+    mut seq: i64,
+    threshold: i32,
+    mut view: ChunkView,
+    events: Option<Sender<PlayEvent>>,
+) -> io::Result<()> {
+    // net 线程的 last_seen 只认 KeepAlive 回显（移动包不刷新，避免客户端只发移动不回心跳）；
+    // ECS 侧的 PlayerKeepAlive.last_seen 另由 movement_ingest_system 按移动包刷新，用于离线清理。
     let mut last_seen = Instant::now();
     // 客户端在 Play 里每 tick 都发 0x0D，read_packet 不会超时；必须按时间主动发 KeepAlive，
     // 否则客户端 30s 收不到 0x2D 会 “连接超时” 断开（2026-11-23 真机实测）。
     let mut last_keepalive = Instant::now();
     loop {
-        let next = if compressed { read_packet_framed(stream, threshold).await } else { read_packet(stream).await };
+        let next = read_packet_any(stream, threshold).await;
         if last_keepalive.elapsed() >= Duration::from_secs(15) {
             seq += 1;
             let mut body = Vec::new();
             packets::KeepAliveS2C(seq).encode_body(&mut body);
-            let r = if compressed { write_packet_framed(stream, packets::PLAY_KEEPALIVE_S2C_ID, &body, threshold).await }
-                    else { write_packet(stream, packets::PLAY_KEEPALIVE_S2C_ID, &body).await };
-            if let Err(e) = r {
+            if let Err(e) = write_packet_any(stream, packets::PLAY_KEEPALIVE_S2C_ID, &body, threshold).await {
                 debug!("play uuid={} keepalive send failed ({e}), closing", profile.uuid);
                 break;
             }
@@ -260,6 +384,8 @@ async fn play_loop(stream: &mut TcpStream, profile: &mc_core::PlayerProfile, mut
                     Ok(echo) => {
                         last_seen = Instant::now();
                         info!("play keepalive echo uuid={} name={} id={echo}", profile.uuid, profile.username);
+                        // ECS 用它刷新 PlayerKeepAlive.last_seen；在线数仍只在 ECS timeout 系统减。
+                        emit_play_event(&events, PlayEvent::KeepAlive { addr });
                     }
                     Err(e) => debug!("play uuid={} bad keepalive: {e}", profile.uuid),
                 }
@@ -271,10 +397,24 @@ async fn play_loop(stream: &mut TcpStream, profile: &mc_core::PlayerProfile, mut
                     || id == packets::PLAY_MOVE_FLAGS_C2S_ID =>
             {
                 match packets::decode_c2s_movement(id, &payload) {
-                    Ok(m) => info!(
-                        "play move uuid={} name={} id={:#04x} m={:?} (TODO P5a: forward via channel to ECS MovementQueue)",
-                        profile.uuid, profile.username, id, m
-                    ),
+                    Ok(m) => {
+                        info!(
+                            "play move uuid={} name={} id={:#04x} m={:?} forwarded_to_ecs={}",
+                            profile.uuid, profile.username, id, m, events.is_some()
+                        );
+                        let pos = match m {
+                            packets::C2SMovement::Pos(p) => Some((p.x, p.z)),
+                            packets::C2SMovement::PosRot(p) => Some((p.x, p.z)),
+                            _ => None,
+                        };
+                        if let Some((x, z)) = pos {
+                            if let Err(e) = maybe_move_view(stream, profile, &mut view, x, z, threshold).await {
+                                debug!("play uuid={} view move failed ({e}), closing", profile.uuid);
+                                break;
+                            }
+                        }
+                        emit_play_event(&events, PlayEvent::Movement { addr, movement: m });
+                    }
                     Err(e) => debug!("play uuid={} bad movement id={id:#04x}: {e}", profile.uuid),
                 }
             }
@@ -291,9 +431,7 @@ async fn play_loop(stream: &mut TcpStream, profile: &mc_core::PlayerProfile, mut
                 seq += 1;
                 let mut body = Vec::new();
                 packets::KeepAliveS2C(seq).encode_body(&mut body);
-                let r = if compressed { write_packet_framed(stream, packets::PLAY_KEEPALIVE_S2C_ID, &body, threshold).await }
-                        else { write_packet(stream, packets::PLAY_KEEPALIVE_S2C_ID, &body).await };
-                if let Err(e) = r {
+                if let Err(e) = write_packet_any(stream, packets::PLAY_KEEPALIVE_S2C_ID, &body, threshold).await {
                     debug!("play uuid={} keepalive resend failed ({e}), closing", profile.uuid);
                     break;
                 }
@@ -395,8 +533,8 @@ mod tests {
         let addr = listener.local_addr().unwrap();
         let profile = mc_core::PlayerProfile { uuid: packets::offline_uuid("Steve"), username: "Steve".into() };
         let server = tokio::spawn(async move {
-            let (s, _) = listener.accept().await.unwrap();
-            enter_play(s, profile, packets::COMPRESSION_DISABLED_THRESHOLD).await.unwrap();
+            let (s, peer) = listener.accept().await.unwrap();
+            enter_play(s, peer, profile, packets::COMPRESSION_DISABLED_THRESHOLD).await.unwrap();
         });
         let mut c = tokio::net::TcpStream::connect(addr).await.unwrap();
         // 读完整 Join 序列：4 包头 + 81 块 ChunkData + BatchFinished/Pos/KeepAlive。
@@ -418,21 +556,25 @@ mod tests {
         let addr = listener.local_addr().unwrap();
         let profile = mc_core::PlayerProfile { uuid: packets::offline_uuid("Alex"), username: "Alex".into() };
         let server = tokio::spawn(async move {
-            let (s, _) = listener.accept().await.unwrap();
-            enter_play(s, profile, packets::COMPRESSION_DISABLED_THRESHOLD).await.unwrap();
+            let (s, peer) = listener.accept().await.unwrap();
+            enter_play(s, peer, profile, packets::COMPRESSION_DISABLED_THRESHOLD).await.unwrap();
         });
         let mut c = tokio::net::TcpStream::connect(addr).await.unwrap();
         // 读完整 Join 序列（4 + 81 + 3 包），否则服务端写满 socket 缓冲会阻塞。
         for _ in 0..88 {
             let _ = super::super::framing::read_packet(&mut c).await.unwrap();
         }
-        // 依次发 0x1E/0x1F/0x20/0x21，服务端只log TODO进ECS，不断开
+        // 依次发 0x1E/0x1F/0x20/0x21，服务端转发 ECS（本测试无通道，只log）且不断开；
+        // 坐标保持在出生区块，避免触发跨区块动态补发。
+        let spawn = mc_world::SPAWN_POS;
+        let x = spawn.0 as f64 + 0.5;
+        let z = spawn.2 as f64 + 0.5;
         let mut body = Vec::new();
-        packets::MovePlayerPos { x: 9.5, y: 80.0, z: 9.5, on_ground: true, horizontal_collision: false }
+        packets::MovePlayerPos { x, y: 80.0, z, on_ground: true, horizontal_collision: false }
             .encode_body(&mut body);
         super::super::framing::write_packet(&mut c, packets::PLAY_MOVE_POS_C2S_ID, &body).await.unwrap();
         body.clear();
-        packets::MovePlayerPosRot { x: 9.5, y: 80.0, z: 9.5, yaw: 90.0, pitch: 0.0, on_ground: true, horizontal_collision: false }
+        packets::MovePlayerPosRot { x, y: 80.0, z, yaw: 90.0, pitch: 0.0, on_ground: true, horizontal_collision: false }
             .encode_body(&mut body);
         super::super::framing::write_packet(&mut c, packets::PLAY_MOVE_POSROT_C2S_ID, &body).await.unwrap();
         body.clear();
@@ -443,7 +585,6 @@ mod tests {
         packets::MovePlayerFlags { on_ground: true, horizontal_collision: false }.encode_body(&mut body);
         super::super::framing::write_packet(&mut c, packets::PLAY_MOVE_FLAGS_C2S_ID, &body).await.unwrap();
         // 300ms内不应EOF（连接仍开着）
-        let mut buf = [0u8; 1];
         match tokio::time::timeout(std::time::Duration::from_millis(300), super::super::framing::read_packet(&mut c)).await {
             Err(_) => {} // 超时=服务端没发新包但连接仍开着，符合预期
             Ok(Ok(_)) => {} // 若收到keepalive重发也算连接正常

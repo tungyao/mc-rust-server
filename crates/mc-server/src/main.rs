@@ -10,7 +10,7 @@ mod systems;
 use bevy_app::{App, Startup, Update};
 use bevy_ecs::schedule::IntoSystemConfigs;
 use crossbeam_channel::unbounded;
-use resources::{NetReceiver, PlayersOnline, TickCounter};
+use resources::{NetReceiver, PlayEventReceiver, PlayersOnline, TickCounter};
 use std::sync::{Arc, atomic::{AtomicBool, Ordering}};
 use std::time::{Duration, Instant};
 use tracing::{info, warn};
@@ -26,14 +26,18 @@ fn main() {
     };
     let bind = cfg.bind.clone();
     let online = PlayersOnline::default();
+    let (play_tx, play_rx) = unbounded::<mc_network::PlayEvent>();
     let net_config = mc_network::NetConfig::new(cfg.max_players, cfg.motd.clone(), Arc::clone(&online.0))
-        .with_view_distance(cfg.view_distance);
+        .with_view_distance(cfg.view_distance)
+        .with_compression_threshold(cfg.compression_threshold)
+        .with_play_events(play_tx);
     let (tx, rx) = unbounded::<mc_network::NewConnection>();
     let mut app = App::new();
     app.insert_resource(cfg);
     app.insert_resource(TickCounter::default());
     app.insert_resource(online);
     app.insert_resource(NetReceiver(rx));
+    app.insert_resource(PlayEventReceiver(play_rx));
     app.insert_resource(play::PlayScaffold::default());
     app.insert_resource(movement::MovementQueue::default());
     app.add_systems(Startup, systems::startup_system);
@@ -42,6 +46,7 @@ fn main() {
         (
             systems::tick_system,
             systems::handle_new_connections,
+            movement::movement_ingest_system,
             play::login_join_system,
             movement::movement_system,
             play::keepalive_system,

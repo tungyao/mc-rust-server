@@ -12,7 +12,7 @@
 //! - Light掩码：https://minecraft.wiki/w/Java_Edition_protocol/Data_types#Type:Light_Data
 //!   （Sky/Block Mask BitSet + Empty Sky/Block Mask BitSet + Sky/Block Light arrays；
 //!   BitSet = VarInt long数 + Long数组，全0最小可接受）。
-use crate::packets::codec::{encode_packet, read_i32_be, write_i32_be, write_i64_be, write_u16_be};
+use crate::packets::codec::{encode_packet, read_i32_be, read_i64_be, write_i32_be, write_i64_be, write_u16_be};
 use crate::{read_varint, write_varint, ProtocolError};
 
 /// Set Center Chunk 包 ID（Play CB `0x60` set_chunk_cache_center）。已按P4A对照表核对777（旧值0x4C实为recipe_book_remove）。
@@ -67,8 +67,10 @@ pub fn encode_set_center_chunk_packet(v: &SetCenterChunk, out: &mut Vec<u8>) {
     encode_packet(PLAY_SET_CENTER_CHUNK_ID, &body, out);
 }
 
-/// Unload Chunk（CB `0x26` forget_level_chunk）：chunk_x i32be + chunk_z i32be。
-/// 与 ChunkData 头两字段同布局（SetCenter 才用 VarInt），只兼容 26.3/777。
+/// Unload Chunk（CB `0x26` forget_level_chunk）：**单个 packed i64 ChunkPos**。
+/// 26.3 客户端 `ClientboundForgetLevelChunkPacket` 用 `FriendlyByteBuf.read/writeChunkPos`，
+/// 即 `ChunkPos.pack() = (x & 0xffffffff) | ((z & 0xffffffff) << 32)` 的 big-endian Long；
+/// 不是旧版的 Chunk X Int + Chunk Z Int（已用 26.3.jar javap 反编译确认）。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct UnloadChunk {
     pub chunk_x: i32,
@@ -76,15 +78,22 @@ pub struct UnloadChunk {
 }
 
 impl UnloadChunk {
+    pub fn packed_pos(&self) -> i64 {
+        ((self.chunk_x as u32 as u64) | ((self.chunk_z as u32 as u64) << 32)) as i64
+    }
+
+    pub fn from_packed_pos(packed: i64) -> Self {
+        let u = packed as u64;
+        Self { chunk_x: u as u32 as i32, chunk_z: (u >> 32) as u32 as i32 }
+    }
+
     pub fn encode_body(&self, out: &mut Vec<u8>) {
-        write_i32_be(self.chunk_x, out);
-        write_i32_be(self.chunk_z, out);
+        write_i64_be(self.packed_pos(), out);
     }
 
     pub fn decode_body(buf: &[u8]) -> Result<(Self, usize), ProtocolError> {
-        let (chunk_x, n1) = read_i32_be(buf)?;
-        let (chunk_z, n2) = read_i32_be(&buf[n1..])?;
-        Ok((Self { chunk_x, chunk_z }, n1 + n2))
+        let (packed, n) = read_i64_be(buf)?;
+        Ok((Self::from_packed_pos(packed), n))
     }
 }
 
@@ -590,14 +599,22 @@ mod tests {
         assert_eq!(last >> 36, 0);
     }
     #[test]
-    fn play_unload_chunk_roundtrip() {
-        // 0x26 在 777 就是 Unload（packet-map §4.1），不是 KeepAlive
+    fn play_unload_chunk_is_packed_long() {
+        // 0x26 在 777 就是 Unload（packet-map §4.1），不是 KeepAlive。
         assert_eq!(PLAY_UNLOAD_CHUNK_ID, 0x26);
         let v = UnloadChunk { chunk_x: 3, chunk_z: -5 };
-        let mut pkt = Vec::new(); encode_unload_chunk_packet(&v, &mut pkt);
+        // x 在低 32 位、z 在高 32 位，big-endian Long。
+        assert_eq!(v.packed_pos(), 0xFFFF_FFFB_0000_0003u64 as i64);
+        let mut body = Vec::new();
+        v.encode_body(&mut body);
+        assert_eq!(body, vec![0xFF, 0xFF, 0xFF, 0xFB, 0x00, 0x00, 0x00, 0x03]);
+        let (back, used) = UnloadChunk::decode_body(&body).unwrap();
+        assert_eq!((back, used), (v, 8));
+        let mut pkt = Vec::new();
+        encode_unload_chunk_packet(&v, &mut pkt);
         let (_, n) = read_varint(&pkt).unwrap();
         let (id, m) = decode_packet_id(&pkt[n..]).unwrap();
         assert_eq!(id, PLAY_UNLOAD_CHUNK_ID);
-        assert_eq!(UnloadChunk::decode_body(&pkt[n+m..]).unwrap().0, v);
+        assert_eq!(UnloadChunk::decode_body(&pkt[n + m..]).unwrap().0, v);
     }
 }

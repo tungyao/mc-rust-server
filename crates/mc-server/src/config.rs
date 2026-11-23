@@ -8,6 +8,9 @@ use std::path::Path;
 pub const DEFAULT_VIEW_DISTANCE: i32 = 10;
 /// 默认种子，与 mc-world 空世界 WORLD_SEED 对齐。
 pub const DEFAULT_SEED: i64 = 123456789;
+/// 默认压缩阈值：-1 = 禁用（原行为，不发 SetCompression，全链路明文帧）。
+/// >=0 = Login Success 前发 SetCompression(threshold)，Login/Configuration/Play 后续包全走压缩帧。
+pub const DEFAULT_COMPRESSION_THRESHOLD: i32 = -1;
 
 #[derive(Debug, Clone, Resource, Serialize, Deserialize)]
 #[serde(default)]
@@ -17,6 +20,8 @@ pub struct ServerConfig {
     pub max_players: usize,
     pub view_distance: i32,
     pub seed: i64,
+    /// 压缩阈值（字节）：-1 禁用；>=0 启用。旧 server.toml 缺该键时按默认 -1 补齐。
+    pub compression_threshold: i32,
 }
 
 impl Default for ServerConfig {
@@ -27,6 +32,7 @@ impl Default for ServerConfig {
             max_players: 100,
             view_distance: DEFAULT_VIEW_DISTANCE,
             seed: DEFAULT_SEED,
+            compression_threshold: DEFAULT_COMPRESSION_THRESHOLD,
         }
     }
 }
@@ -85,12 +91,29 @@ mod tests {
         assert_eq!(cfg.max_players, 100);
         assert_eq!(cfg.view_distance, DEFAULT_VIEW_DISTANCE);
         assert_eq!(cfg.seed, DEFAULT_SEED);
+        assert_eq!(cfg.compression_threshold, DEFAULT_COMPRESSION_THRESHOLD, "compression stays disabled by default");
         // 文件已落盘，且内容可再解析
         let text = std::fs::read_to_string(&p).unwrap();
         assert!(text.contains("view_distance"));
+        assert!(text.contains("compression_threshold"));
         let again = ServerConfig::load_or_create(&p).unwrap();
         assert_eq!(again.view_distance, cfg.view_distance);
         assert_eq!(again.seed, cfg.seed);
+        assert_eq!(again.compression_threshold, cfg.compression_threshold);
+        let _ = std::fs::remove_file(&p);
+    }
+
+    #[test]
+    fn legacy_file_without_compression_key_defaults_to_disabled() {
+        let p = tmp_toml();
+        std::fs::write(
+            &p,
+            "bind = \"127.0.0.1:25565\"\nmotd = \"old\"\nmax_players = 7\nview_distance = 4\nseed = 42\n",
+        )
+        .unwrap();
+        let cfg = ServerConfig::load_or_create(&p).unwrap();
+        assert_eq!(cfg.compression_threshold, -1, "old toml must keep old plain-frame behavior");
+        assert_eq!(cfg.max_players, 7);
         let _ = std::fs::remove_file(&p);
     }
 
@@ -103,6 +126,7 @@ mod tests {
             max_players: 42,
             view_distance: 12,
             seed: 987654321,
+            compression_threshold: 256,
         };
         std::fs::write(&p, toml::to_string_pretty(&cfg).unwrap()).unwrap();
         let back = ServerConfig::load_or_create(&p).unwrap();
@@ -110,6 +134,7 @@ mod tests {
         assert_eq!(back.max_players, 42);
         assert_eq!(back.view_distance, 12);
         assert_eq!(back.seed, 987654321);
+        assert_eq!(back.compression_threshold, 256);
         let _ = std::fs::remove_file(&p);
     }
 

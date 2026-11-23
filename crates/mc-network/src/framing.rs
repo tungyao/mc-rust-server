@@ -139,4 +139,33 @@ mod tests {
         assert_eq!(read_varint(&f).unwrap().0, 0);
         assert_eq!(decode_compressed_frame(&f).unwrap(), (0x02, b"hi".to_vec()));
     }
+    /// raw 原文 = packet_id VarInt(1B) + payload；threshold 语义是 `raw.len() >= threshold`
+    /// 才压缩，等于阈值必须压缩、大于原文长度才明文。
+    #[test]
+    fn compressed_frame_threshold_boundary_is_inclusive() {
+        let payload = [0xAA, 0xBB]; // raw.len() = 1 (id) + 2 = 3
+        let at = encode_compressed_frame(0x02, &payload, 3);
+        assert!(read_varint(&at).unwrap().0 > 0, "raw.len()==threshold must compress");
+        assert_eq!(decode_compressed_frame(&at).unwrap(), (0x02, payload.to_vec()));
+        let above = encode_compressed_frame(0x02, &payload, 4);
+        assert_eq!(read_varint(&above).unwrap().0, 0, "threshold above raw len stays plain");
+        assert_eq!(decode_compressed_frame(&above).unwrap(), (0x02, payload.to_vec()));
+        // threshold=0：空 payload 的 raw（仅 packet id）也要压缩。
+        let zero = encode_compressed_frame(0x02, &[], 0);
+        assert!(read_varint(&zero).unwrap().0 > 0, "threshold 0 compresses even 1-byte raw");
+        assert_eq!(decode_compressed_frame(&zero).unwrap(), (0x02, Vec::new()));
+    }
+    #[test]
+    fn compressed_frame_rejects_truncated_and_bad_data_len() {
+        assert!(decode_compressed_frame(&[]).is_err());
+        // data_len=2 但只有 1 字节 zlib 数据。
+        let mut f = Vec::new();
+        write_varint(2, &mut f);
+        f.push(0);
+        assert!(decode_compressed_frame(&f).is_err());
+        // 明文 data_len=0 但 raw 为空（无 packet id）。
+        let mut plain = Vec::new();
+        write_varint(0, &mut plain);
+        assert!(decode_compressed_frame(&plain).is_err());
+    }
 }

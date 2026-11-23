@@ -11,3 +11,7 @@ pub struct PlayersOnline(pub Arc<AtomicUsize>);
 
 #[derive(Resource)]
 pub struct NetReceiver(pub Receiver<mc_network::NewConnection>);
+
+/// Play 期事件通道（net 线程 → ECS：移动包/KeepAlive 回显）。
+#[derive(Resource)]
+pub struct PlayEventReceiver(pub Receiver<mc_network::PlayEvent>);
