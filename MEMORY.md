@@ -25,3 +25,5 @@
 - [2026-11-23 08:00 UTC] agent=main task=registry-wirefix status=done detail=wiki证伪：Data是PrefixedOptional裸NBT，去VarInt长+去根名00 00，35+24全过 files=packets/config.rs
 - [2026-11-23 08:30 UTC] agent=p8 task=full-registry-docs status=start detail=777全量同步注册表文档+清单，不动代码 files=docs/registries-777.md
 - [2026-11-23 08:50 UTC] agent=p8 task=full-registry-docs status=done detail=30表+最小NBT+实现清单约1440行，不动代码未跑cargo files=docs/registries-777.md
+- [2026-11-23 09:00 UTC] agent=p9 task=registry-nbt-rewrite status=start detail=手拼NBT切nbt.rs builder按777§2.1/§2.2 files=crates/mc-protocol/src/packets/config.rs
+- [2026-11-23 09:10 UTC] agent=p9 task=registry-nbt-rewrite status=done detail=builder重写2 NBT+删手拼helper+新字段断言，mc-protocol 35全过 files=crates/mc-protocol/src/packets/config.rs(392行)

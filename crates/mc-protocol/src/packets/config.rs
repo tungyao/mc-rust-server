@@ -38,74 +38,55 @@ pub fn decode_config_finish_ack(_payload: &[u8]) -> Result<(), ProtocolError> { 
 // 线格式来源 minecraft.wiki 777 `registry_data`：registry_id(Identifier/String) + VarInt条数
 // + 每项 entry_id(Identifier/String) + has_data(Bool) + 有数据时NBT。
 // data语义：Some内即完整未压缩NBT字节（包内NBT：0x0A + fields + 0x00，无根名、无长度前缀）。
-// 线格式（wiki Registry Data：Prefixed Optional NBT）为 Bool(1) + 裸NBT字节。
-// TODO(P7A): nbt.rs encoder合进来后，切 real_*_nbt() 到结构化builder，当前手拼字节保持零依赖。
-fn nbt_name(out: &mut Vec<u8>, name: &str) {
-    let b = name.as_bytes();
-    out.extend_from_slice(&(b.len() as u16).to_be_bytes());
-    out.extend_from_slice(b);
-}
-fn nbt_byte(out: &mut Vec<u8>, name: &str, v: u8) {
-    out.push(1); nbt_name(out, name); out.push(v);
-}
-fn nbt_int(out: &mut Vec<u8>, name: &str, v: i32) {
-    out.push(3); nbt_name(out, name); out.extend_from_slice(&v.to_be_bytes());
-}
-fn nbt_float(out: &mut Vec<u8>, name: &str, v: f32) {
-    out.push(5); nbt_name(out, name); out.extend_from_slice(&v.to_be_bytes());
-}
-fn nbt_double(out: &mut Vec<u8>, name: &str, v: f64) {
-    out.push(6); nbt_name(out, name); out.extend_from_slice(&v.to_be_bytes());
-}
-fn nbt_string(out: &mut Vec<u8>, name: &str, v: &str) {
-    out.push(8); nbt_name(out, name);
-    let b = v.as_bytes();
-    out.extend_from_slice(&(b.len() as u16).to_be_bytes());
-    out.extend_from_slice(b);
-}
+use super::nbt::{NbtCompound, NbtList, NbtTag};
 
-/// overworld dimension_type 真NBT（未压缩，根TAG_Compound空名）。
-/// 字段对标 minecraft.wiki Dimension JSON：vanilla overworld值。
-/// monster_spawn_light_level / monster_spawn_block_light_limit 按本任务约定取Int（vanilla新版为uniform对象，此处简化为Int 0）。
+/// overworld dimension_type 真NBT（未压缩包内格式：0x0A + fields + 0x00，无根名、无长度前缀）。
+/// 字段对标 docs/registries-777.md §2.1（26.3现行codec，已删7旧字段，补5新字段）。
+/// monster_spawn_light_level 取 Int 0（文档确认 Int 与 int-provider 对象两种都合法，见 §2.1）。
 pub fn real_overworld_dimension_nbt() -> Vec<u8> {
+    let tag = NbtTag::Compound(
+        NbtCompound::new()
+            .with("has_skylight", NbtTag::Byte(1))
+            .with("has_ceiling", NbtTag::Byte(0))
+            .with("has_ender_dragon_fight", NbtTag::Byte(0))
+            .with("coordinate_scale", NbtTag::Double(1.0))
+            .with("has_fixed_time", NbtTag::Byte(0))
+            .with("ambient_light", NbtTag::Float(0.0))
+            .with("monster_spawn_block_light_limit", NbtTag::Int(0))
+            .with("monster_spawn_light_level", NbtTag::Int(0))
+            .with("logical_height", NbtTag::Int(384))
+            .with("min_y", NbtTag::Int(-64))
+            .with("height", NbtTag::Int(384))
+            .with("infiniburn", NbtTag::String("#minecraft:infiniburn_overworld".into()))
+            .with("skybox", NbtTag::String("overworld".into()))
+            .with("cardinal_light", NbtTag::String("default".into()))
+            .with("default_clock", NbtTag::String("minecraft:overworld".into()))
+            .clone(),
+    );
     let mut out = Vec::with_capacity(256);
-    out.push(0x0A); // root compound（包内NBT：无根名，直接fields）
-    nbt_byte(&mut out, "has_skylight", 1);
-    nbt_byte(&mut out, "has_ceiling", 0);
-    nbt_byte(&mut out, "ultrawarm", 0);
-    nbt_byte(&mut out, "natural", 1);
-    nbt_double(&mut out, "coordinate_scale", 1.0);
-    nbt_byte(&mut out, "bed_works", 1);
-    nbt_byte(&mut out, "respawn_anchor_works", 0);
-    nbt_int(&mut out, "min_y", -64);
-    nbt_int(&mut out, "height", 384);
-    nbt_int(&mut out, "logical_height", 384);
-    nbt_string(&mut out, "infiniburn", "minecraft:infiniburn_overworld");
-    nbt_string(&mut out, "effects", "minecraft:overworld");
-    nbt_float(&mut out, "ambient_light", 0.0);
-    nbt_byte(&mut out, "piglin_safe", 0);
-    nbt_byte(&mut out, "has_raids", 1);
-    nbt_int(&mut out, "monster_spawn_light_level", 0);
-    nbt_int(&mut out, "monster_spawn_block_light_limit", 0);
-    out.push(0x00); // TAG_End
+    out.push(0x0A); // 包内NBT：根compound id，无根名，直接fields
+    tag.write_payload(&mut out);
     out
 }
 
-/// plains biome 真NBT（未压缩，根TAG_Compound空名）。
-/// 字段对标 minecraft.wiki Biome JSON：temperature/downfall/effects{4色}为必需，另带has_precipitation=1贴近vanilla。
+/// plains biome 真NBT（未压缩包内格式：0x0A + fields + 0x00，无根名、无长度前缀）。
+/// 字段对标 docs/registries-777.md §2.2：删3旧色值字段，补 temperature_modifier + carvers/features 空list。
 pub fn real_plains_biome_nbt() -> Vec<u8> {
+    let effects = NbtTag::compound(vec![("water_color", NbtTag::Int(4_159_204))]);
+    let tag = NbtTag::Compound(
+        NbtCompound::new()
+            .with("has_precipitation", NbtTag::Byte(1))
+            .with("temperature", NbtTag::Float(0.8))
+            .with("temperature_modifier", NbtTag::String("none".into()))
+            .with("downfall", NbtTag::Float(0.4))
+            .with("effects", effects)
+            .with("carvers", NbtTag::List(NbtList::empty()))
+            .with("features", NbtTag::List(NbtList::empty()))
+            .clone(),
+    );
     let mut out = Vec::with_capacity(128);
-    out.push(0x0A); // root compound（包内NBT：无根名，直接fields）
-    nbt_byte(&mut out, "has_precipitation", 1);
-    nbt_float(&mut out, "temperature", 0.8);
-    nbt_float(&mut out, "downfall", 0.4);
-    out.push(10); nbt_name(&mut out, "effects"); // nested compound
-    nbt_int(&mut out, "sky_color", 7_907_327);
-    nbt_int(&mut out, "fog_color", 12_638_463);
-    nbt_int(&mut out, "water_fog_color", 329_011);
-    nbt_int(&mut out, "water_color", 4_159_204);
-    out.push(0x00); // end effects
-    out.push(0x00); // TAG_End root
+    out.push(0x0A); // 包内NBT：根compound id，无根名，直接fields
+    tag.write_payload(&mut out);
     out
 }
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -316,19 +297,54 @@ mod tests {
     }
     #[test]
     fn config_real_nbt_shape_and_roundtrip() {
+        use super::super::nbt::{NbtTag, TAG_END, read_nbt_compound_payload};
         let dim = real_overworld_dimension_nbt();
         let bio = real_plains_biome_nbt();
         for nbt in [&dim, &bio] {
             assert!(!nbt.is_empty(), "NBT非空");
             assert_eq!(nbt[0], 0x0A, "NBT以TAG_Compound 0x0A开头");
             assert_eq!(nbt[nbt.len() - 1], 0x00, "NBT以TAG_End结尾");
+            // 包内格式自定界：0x0A后compound payload恰好消费到尾（无根名、无长度前缀）
+            let (_, used) = read_nbt_compound_payload(&nbt[1..]).unwrap();
+            assert_eq!(1 + used, nbt.len(), "NBT payload必须字节对齐消费");
         }
-        // 维度含 effects 标签名与 minecraft:overworld 取值
-        assert!(dim.windows(b"effects".len()).any(|w| w == b"effects"), "维度NBT含effects");
-        assert!(dim.windows(b"minecraft:overworld".len()).any(|w| w == b"minecraft:overworld"));
-        // plains关键值：temperature/downfall标签 + effects四色标签名
-        for key in ["temperature", "downfall", "sky_color", "fog_color", "water_fog_color", "water_color"] {
-            assert!(bio.windows(key.len()).any(|w| w == key.as_bytes()), "plains缺{key}");
+        // 维度：§2.1全字段结构化断言（新字段存在，7个已删除旧字段不存在）
+        let (dim_c, _) = read_nbt_compound_payload(&dim[1..]).unwrap();
+        assert_eq!(dim_c.get("has_skylight"), Some(&NbtTag::Byte(1)));
+        assert_eq!(dim_c.get("has_ceiling"), Some(&NbtTag::Byte(0)));
+        assert_eq!(dim_c.get("has_ender_dragon_fight"), Some(&NbtTag::Byte(0)));
+        assert_eq!(dim_c.get("coordinate_scale"), Some(&NbtTag::Double(1.0)));
+        assert_eq!(dim_c.get("has_fixed_time"), Some(&NbtTag::Byte(0)));
+        assert_eq!(dim_c.get("ambient_light"), Some(&NbtTag::Float(0.0)));
+        assert_eq!(dim_c.get("monster_spawn_block_light_limit"), Some(&NbtTag::Int(0)));
+        assert_eq!(dim_c.get("monster_spawn_light_level"), Some(&NbtTag::Int(0)));
+        assert_eq!(dim_c.get("logical_height"), Some(&NbtTag::Int(384)));
+        assert_eq!(dim_c.get("min_y"), Some(&NbtTag::Int(-64)));
+        assert_eq!(dim_c.get("height"), Some(&NbtTag::Int(384)));
+        assert_eq!(dim_c.get("infiniburn"), Some(&NbtTag::String("#minecraft:infiniburn_overworld".into())));
+        assert_eq!(dim_c.get("skybox"), Some(&NbtTag::String("overworld".into())));
+        assert_eq!(dim_c.get("cardinal_light"), Some(&NbtTag::String("default".into())));
+        assert_eq!(dim_c.get("default_clock"), Some(&NbtTag::String("minecraft:overworld".into())));
+        for gone in ["ultrawarm", "natural", "bed_works", "respawn_anchor_works", "piglin_safe", "has_raids", "effects"] {
+            assert_eq!(dim_c.get(gone), None, "维度旧字段已删:{gone}");
+        }
+        // plains：§2.2全字段结构化断言（新字段存在，3个已删除旧色值不存在）
+        let (bio_c, _) = read_nbt_compound_payload(&bio[1..]).unwrap();
+        assert_eq!(bio_c.get("has_precipitation"), Some(&NbtTag::Byte(1)));
+        assert_eq!(bio_c.get("temperature"), Some(&NbtTag::Float(0.8)));
+        assert_eq!(bio_c.get("temperature_modifier"), Some(&NbtTag::String("none".into())));
+        assert_eq!(bio_c.get("downfall"), Some(&NbtTag::Float(0.4)));
+        let eff = bio_c.get("effects").expect("plains缺effects");
+        let NbtTag::Compound(eff_c) = eff else { panic!("effects须为Compound") };
+        assert_eq!(eff_c.get("water_color"), Some(&NbtTag::Int(4_159_204)));
+        for gone in ["sky_color", "fog_color", "water_fog_color"] {
+            assert_eq!(eff_c.get(gone), None, "biome旧色值已删:{gone}");
+        }
+        for key in ["carvers", "features"] {
+            let l = bio_c.get(key).unwrap_or_else(|| panic!("plains缺{key}"));
+            let NbtTag::List(l) = l else { panic!("{key}须为List") };
+            assert!(l.is_empty(), "{key}须为空list");
+            assert_eq!(l.elem_type(), TAG_END, "{key}空list元素类型按惯例为TAG_End");
         }
         // 往返 decode_body 通过（含包头线包与纯body两层）
         for (reg_id, entry_id, nbt) in [
