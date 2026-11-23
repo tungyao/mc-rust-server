@@ -71,10 +71,13 @@ pub async fn handle_login_with_threshold(mut stream: TcpStream, addr: SocketAddr
 
 /// Configuration阶段最小可用：按序 KnownPacks S2C→KnownPacks C2S→Registry Data(最小2包)→Finish S2C→等 Finish Ack C2S。
 /// 包 ID 已按P4A对照表核对777（CB 0x0F/0x07/0x03，SB 0x07/0x03）；字段见 packets::config（来源 minecraft.wiki 777）。
-/// 任一步错包/解码失败即 Err，上层 warn 后断开。threshold 透传（压缩开启后 Configuration 包同样走压缩帧）。
+/// 容忍度：真机在 Configuration 会穿插 ClientInformation(0x00)/PluginMessage/Pong/KeepAlive 等，
+/// 这些与进服无关，先 debug 忽略，只认 KnownPacks 回包与 Finish Ack；规定步数内收不齐才 Err。
+/// threshold 透传（压缩开启后 Configuration 包同样走压缩帧）。
 pub async fn config_finish(stream: &mut TcpStream, threshold: i32) -> io::Result<()> {
+    use tokio::time::{timeout, Duration};
     let compressed = packets::compression_enabled(threshold);
-    // 1. Known Packs S2C（单vanilla包，更贴近真服；空列表亦可，客户端仅记录）。
+    // 1. Known Packs S2C（单vanilla包）。
     let known = packets::ConfigKnownPacks::vanilla();
     let mut body = Vec::new();
     known.encode_body(&mut body);
@@ -84,16 +87,26 @@ pub async fn config_finish(stream: &mut TcpStream, threshold: i32) -> io::Result
     } else {
         write_packet(stream, packets::CONFIG_KNOWN_PACKS_S2C_ID, &body).await?;
     }
-    // 2. 等 Known Packs C2S（客户端回其已知包，一般也是单vanilla包；内容不强校验，解码通过即可）。
-    let (id, payload) = if compressed { read_packet_framed(stream, threshold).await } else { read_packet(stream).await }?;
-    if id != packets::CONFIG_KNOWN_PACKS_C2S_ID {
-        return Err(to_io_invalid(format!(
-            "expected config known packs {:#04x}, got {id:#04x}",
-            packets::CONFIG_KNOWN_PACKS_C2S_ID
-        )));
+    // 2. 等 Known Packs C2S：中间穿插包全部忽略，最多等 32 个包/整体 15s。
+    let mut got_known = false;
+    for _ in 0..32 {
+        let next = timeout(Duration::from_secs(15), async {
+            if compressed { read_packet_framed(stream, threshold).await } else { read_packet(stream).await }
+        })
+        .await
+        .map_err(|_| to_io_invalid("config known packs wait timed out"))??;
+        let (id, payload) = next;
+        if id == packets::CONFIG_KNOWN_PACKS_C2S_ID {
+            let reply = packets::decode_config_known_packs_c2s(&payload).map_err(to_io_invalid)?.0;
+            debug!("config known packs ack n={}", reply.packs.len());
+            got_known = true;
+            break;
+        }
+        debug!("config: ignore interleaved id={id:#04x} len={} while waiting known packs", payload.len());
     }
-    let reply = packets::decode_config_known_packs_c2s(&payload).map_err(to_io_invalid)?.0;
-    debug!("config known packs ack n={}", reply.packs.len());
+    if !got_known {
+        return Err(to_io_invalid("config known packs response missing"));
+    }
     // 3. Registry Data 最小2包（dimension_type + biome，各1项 has_data=false，客户端用内置默认即站住）。
     for reg in packets::default_configuration_registries() {
         let mut b = Vec::new();
@@ -105,23 +118,28 @@ pub async fn config_finish(stream: &mut TcpStream, threshold: i32) -> io::Result
             write_packet(stream, packets::CONFIG_REGISTRY_DATA_S2C_ID, &b).await?;
         }
     }
-    // 4. Finish S2C → 等 Finish Ack C2S。
+    // 4. Finish S2C → 等 Finish Ack C2S，中间穿插包同样忽略。
     debug!("config finish send id={:#04x}", packets::CONFIG_FINISH_S2C_ID);
     if compressed {
         write_packet_framed(stream, packets::CONFIG_FINISH_S2C_ID, &[], threshold).await?;
     } else {
         write_packet(stream, packets::CONFIG_FINISH_S2C_ID, &[]).await?;
     }
-    let (id, payload) = if compressed { read_packet_framed(stream, threshold).await } else { read_packet(stream).await }?;
-    if id != packets::CONFIG_FINISH_ACK_C2S_ID {
-        return Err(to_io_invalid(format!(
-            "expected config finish ack {:#04x}, got {id:#04x}",
-            packets::CONFIG_FINISH_ACK_C2S_ID
-        )));
+    for _ in 0..32 {
+        let next = timeout(Duration::from_secs(15), async {
+            if compressed { read_packet_framed(stream, threshold).await } else { read_packet(stream).await }
+        })
+        .await
+        .map_err(|_| to_io_invalid("config finish ack wait timed out"))??;
+        let (id, payload) = next;
+        if id == packets::CONFIG_FINISH_ACK_C2S_ID {
+            packets::decode_config_finish_ack(&payload).map_err(to_io_invalid)?;
+            debug!("config finish ack ok");
+            return Ok(());
+        }
+        debug!("config: ignore interleaved id={id:#04x} len={} while waiting finish ack", payload.len());
     }
-    packets::decode_config_finish_ack(&payload).map_err(to_io_invalid)?;
-    debug!("config finish ack ok");
-    Ok(())
+    Err(to_io_invalid("config finish ack missing"))
 }
 
 /// Login 成功后的唯一真实连接上报点（在线数只认这里）。
