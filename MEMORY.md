@@ -27,3 +27,5 @@
 - [2026-11-23 08:50 UTC] agent=p8 task=full-registry-docs status=done detail=30表+最小NBT+实现清单约1440行，不动代码未跑cargo files=docs/registries-777.md
 - [2026-11-23 09:00 UTC] agent=p9 task=registry-nbt-rewrite status=start detail=手拼NBT切nbt.rs builder按777§2.1/§2.2 files=crates/mc-protocol/src/packets/config.rs
 - [2026-11-23 09:10 UTC] agent=p9 task=registry-nbt-rewrite status=done detail=builder重写2 NBT+删手拼helper+新字段断言，mc-protocol 35全过 files=crates/mc-protocol/src/packets/config.rs(392行)
+- [2026-11-23 09:30 UTC] agent=p10 task=timeline-worldclock-tags status=start detail=dimension重写+timeline/world_clock注册表+UpdateTags files=config.rs,login_route.rs
+- [2026-11-23 10:10 UTC] agent=p10 task=timeline-worldclock-tags status=done detail=4包+tags+0x0E勘误，mc-protocol 38+mc-network全过 files=config.rs(810)data/*.json(637)login_route.rs(406)

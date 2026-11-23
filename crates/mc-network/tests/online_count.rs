@@ -149,18 +149,21 @@ async fn login_full_flow_counts_online_once() {
     let mut ack = Vec::new();
     packets::encode_login_acknowledged_packet(&mut ack);
     s.write_all(&ack).await.unwrap();
-    // Configuration：KnownPacks S2C→C2S→Registry Data(最小2包)→Finish(CB 0x03)→Ack(SB 0x03)，ID已按P4A对照表核对777。
+    // Configuration：KnownPacks S2C→C2S→Registry Data(4包)→Update Tags→Finish(CB 0x03)→Ack(SB 0x03)，ID已按P4A对照表核对777。
     let (id, payload) = read_frame(&mut s).await.unwrap();
     assert_eq!(id, packets::CONFIG_KNOWN_PACKS_S2C_ID, "expected known packs 0x0F");
     packets::decode_config_known_packs_s2c(&payload).unwrap();
     let mut kpack = Vec::new();
     packets::encode_config_known_packs_c2s_packet(&packets::ConfigKnownPacks::vanilla(), &mut kpack);
     s.write_all(&kpack).await.unwrap();
-    for want in ["minecraft:dimension_type", "minecraft:worldgen/biome"] {
+    for want in ["minecraft:dimension_type", "minecraft:worldgen/biome", "minecraft:timeline", "minecraft:world_clock"] {
         let (id, payload) = read_frame(&mut s).await.unwrap();
         assert_eq!(id, packets::CONFIG_REGISTRY_DATA_S2C_ID, "expected registry 0x07");
         assert_eq!(packets::decode_config_registry_data(&payload).unwrap().0.registry_id, want);
     }
+    let (id, payload) = read_frame(&mut s).await.unwrap();
+    assert_eq!(id, packets::CONFIG_UPDATE_TAGS_S2C_ID, "expected update tags 0x0E");
+    packets::decode_config_update_tags(&payload).unwrap();
     let (id, payload) = read_frame(&mut s).await.unwrap();
     assert_eq!(id, packets::CONFIG_FINISH_S2C_ID, "expected config finish 0x03");
     packets::decode_config_finish_s2c(&payload).unwrap();

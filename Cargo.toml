@@ -28,6 +28,7 @@ mc-plugins = { path = "crates/mc-plugins" }
 thiserror = "1"
 serde = { version = "1", features = ["derive"] }
 toml = "0.8"
+serde_json = "1"
 tokio = { version = "1", features = ["full"] }
 bevy_ecs = "0.14"
 bevy_app = "0.14"

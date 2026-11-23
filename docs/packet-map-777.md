@@ -75,3 +75,5 @@
 - 错（6 个，全在 Play）：`PLAY_LOGIN_PLAY_ID 0x2B→0x32`、`PLAY_SET_CENTER_CHUNK_ID 0x4C→0x60`、`PLAY_CHUNK_DATA_ID 0x27→0x2E`、`PLAY_PLAYER_POSITION_SYNC_ID 0x3E→0x49`、`PLAY_KEEPALIVE_S2C_ID 0x26→0x2D`、`PLAY_KEEPALIVE_C2S_ID 0x1A→0x1C`。另 `mc-server/src/play.rs:44,68` 注释里的 `0x2B/0x26/0x1A` 同步改。
 - 缺（4 组，Configuration）：Finish Configuration CB `0x03` / Ack SB `0x03` / Registry Data CB `0x07` / Known Packs CB `0x0F` + SB `0x07`。P4b 新增常量+最小握手（Known Packs 双向 + Registry Data + Finish）时引入。
 - 本文件只做对照，不改任何 `.rs`；`cargo check/test` 未跑（按任务要求不跑，但未动代码故不破坏）。
+
+> 勘误（P10）：Update Tags CB 在777是 **0x0E**（0x0D是feature_flags，26.1残留）。见config.rs常量注释三方证据。

@@ -17,7 +17,7 @@
      缺必需字段（`carvers` + `features`）。见 §2.2。
    - Mojang codec 对缺失必需字段是 error → 客户端解析失败 → Finish 后断开（时序上正好 ~250ms）。
 2. **缺 `damage_type` 注册表**：Login(play) 要求 27 个指定 damage type，缺失则拒收 Login(play)。见 §2.4。
-3. **缺 Update Tags（Configuration CB `0x0D`），且从未发送过**（`login_route.rs` 无 tags 逻辑）。
+3. **缺 Update Tags（Configuration CB `0x0E`），且从未发送过**（`login_route.rs` 无 tags 逻辑）。
    以下 tag 缺失则拒收 Finish Configuration：`pattern_item/*`（10 项）、`axe/hoe/shovel`（block_transformer）、
    `bypasses_shield/is_explosion/is_fire`（damage_type）。见 §4。
 

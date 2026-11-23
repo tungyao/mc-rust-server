@@ -90,18 +90,21 @@ async fn login_offline_full_flow() {
     packets::encode_login_acknowledged_packet(&mut ack);
     s.write_all(&ack).await.unwrap();
 
-    // Configuration：KnownPacks S2C→C2S→Registry Data(最小2包)→Finish(CB 0x03)→Ack(SB 0x03)；ID已按P4A对照表核对777。
+    // Configuration：KnownPacks S2C→C2S→Registry Data(4包)→Update Tags→Finish(CB 0x03)→Ack(SB 0x03)；ID已按P4A对照表核对777。
     let (id, payload) = read_frame(&mut s).await.unwrap();
     assert_eq!(id, packets::CONFIG_KNOWN_PACKS_S2C_ID, "expected known packs 0x0F");
     packets::decode_config_known_packs_s2c(&payload).unwrap();
     let mut kpack = Vec::new();
     packets::encode_config_known_packs_c2s_packet(&packets::ConfigKnownPacks::vanilla(), &mut kpack);
     s.write_all(&kpack).await.unwrap();
-    for want in ["minecraft:dimension_type", "minecraft:worldgen/biome"] {
+    for want in ["minecraft:dimension_type", "minecraft:worldgen/biome", "minecraft:timeline", "minecraft:world_clock"] {
         let (id, payload) = read_frame(&mut s).await.unwrap();
         assert_eq!(id, packets::CONFIG_REGISTRY_DATA_S2C_ID, "expected registry 0x07");
         assert_eq!(packets::decode_config_registry_data(&payload).unwrap().0.registry_id, want);
     }
+    let (id, payload) = read_frame(&mut s).await.unwrap();
+    assert_eq!(id, packets::CONFIG_UPDATE_TAGS_S2C_ID, "expected update tags 0x0E");
+    assert_eq!(packets::decode_config_update_tags(&payload).unwrap().0, packets::ConfigUpdateTags::minimal_timeline_tags());
     let (id, payload) = read_frame(&mut s).await.unwrap();
     assert_eq!(id, CONFIG_FINISH_S2C_ID, "expected config finish 0x03");
     packets::decode_config_finish_s2c(&payload).unwrap();
@@ -231,6 +234,7 @@ fn play_and_config_packet_ids_match_p4a_map() {
     assert_eq!(packets::CONFIG_REGISTRY_DATA_S2C_ID, 0x07);
     assert_eq!(packets::CONFIG_KNOWN_PACKS_S2C_ID, 0x0F);
     assert_eq!(packets::CONFIG_KNOWN_PACKS_C2S_ID, 0x07);
+    assert_eq!(packets::CONFIG_UPDATE_TAGS_S2C_ID, 0x0E);
 }
 
 /// 压缩Login流程：threshold>=0 时 Success 前先发 SetCompression，其后走压缩帧。
@@ -272,7 +276,7 @@ async fn login_compression_flow_sends_set_compression_first() {
     mc_protocol::write_varint(ack.len() as i32, &mut lb);
     s.write_all(&lb).await.unwrap();
     s.write_all(&ack).await.unwrap();
-    // Configuration（压缩帧）：KnownPacks S2C→C2S→Registry 2包→Finish CB 0x03→Ack SB 0x03。
+    // Configuration（压缩帧）：KnownPacks S2C→C2S→Registry 4包→Update Tags→Finish CB 0x03→Ack SB 0x03。
     let len = read_varint_async(&mut s).await.unwrap();
     let mut frame = vec![0u8; len as usize];
     s.read_exact(&mut frame).await.unwrap();
@@ -288,7 +292,7 @@ async fn login_compression_flow_sends_set_compression_first() {
     mc_protocol::write_varint(kp.len() as i32, &mut klb);
     s.write_all(&klb).await.unwrap();
     s.write_all(&kp).await.unwrap();
-    for want in ["minecraft:dimension_type", "minecraft:worldgen/biome"] {
+    for want in ["minecraft:dimension_type", "minecraft:worldgen/biome", "minecraft:timeline", "minecraft:world_clock"] {
         let len = read_varint_async(&mut s).await.unwrap();
         let mut frame = vec![0u8; len as usize];
         s.read_exact(&mut frame).await.unwrap();
@@ -296,6 +300,12 @@ async fn login_compression_flow_sends_set_compression_first() {
         assert_eq!(id, packets::CONFIG_REGISTRY_DATA_S2C_ID);
         assert_eq!(packets::decode_config_registry_data(&payload).unwrap().0.registry_id, want);
     }
+    let len = read_varint_async(&mut s).await.unwrap();
+    let mut frame = vec![0u8; len as usize];
+    s.read_exact(&mut frame).await.unwrap();
+    let (id, payload) = decode_compressed_frame(&frame).unwrap();
+    assert_eq!(id, packets::CONFIG_UPDATE_TAGS_S2C_ID);
+    assert_eq!(packets::decode_config_update_tags(&payload).unwrap().0, packets::ConfigUpdateTags::minimal_timeline_tags());
     let len = read_varint_async(&mut s).await.unwrap();
     let mut frame = vec![0u8; len as usize];
     s.read_exact(&mut frame).await.unwrap();

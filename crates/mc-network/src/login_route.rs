@@ -69,8 +69,10 @@ pub async fn handle_login_with_threshold(mut stream: TcpStream, addr: SocketAddr
     Ok(())
 }
 
-/// Configuration阶段最小可用：按序 KnownPacks S2C→KnownPacks C2S→Registry Data(最小2包)→Finish S2C→等 Finish Ack C2S。
-/// 包 ID 已按P4A对照表核对777（CB 0x0F/0x07/0x03，SB 0x07/0x03）；字段见 packets::config（来源 minecraft.wiki 777）。
+/// Configuration阶段最小可用：按序 KnownPacks S2C→KnownPacks C2S→Registry Data(4包)→Update Tags→Finish S2C→等 Finish Ack C2S。
+/// 包 ID 已按P4A对照表核对777（CB 0x0F/0x07/0x0E/0x03，SB 0x07/0x03）；字段见 packets::config（来源 minecraft.wiki 777）。
+/// Update Tags（CB 0x0E，见 config.rs 勘误注释，旧文档 0x0D 是 26.1 值）在 Finish 前发送：
+/// tag 永不走 known packs，timeline 4 tag 缺失则 dimension 引用的 `#minecraft:in_overworld` 悬空，真机拒收 Finish。
 /// 容忍度：真机在 Configuration 会穿插 ClientInformation(0x00)/PluginMessage/Pong/KeepAlive 等，
 /// 这些与进服无关，先 debug 忽略，只认 KnownPacks 回包与 Finish Ack；规定步数内收不齐才 Err。
 /// threshold 透传（压缩开启后 Configuration 包同样走压缩帧）。
@@ -107,7 +109,7 @@ pub async fn config_finish(stream: &mut TcpStream, threshold: i32) -> io::Result
     if !got_known {
         return Err(to_io_invalid("config known packs response missing"));
     }
-    // 3. Registry Data 最小2包（dimension_type + biome，各1项 has_data=false，客户端用内置默认即站住）。
+    // 3. Registry Data 4包（dimension_type + biome + timeline + world_clock，各条目 has_data=true真NBT）。
     for reg in packets::default_configuration_registries() {
         let mut b = Vec::new();
         reg.encode_body(&mut b);
@@ -118,7 +120,19 @@ pub async fn config_finish(stream: &mut TcpStream, threshold: i32) -> io::Result
             write_packet(stream, packets::CONFIG_REGISTRY_DATA_S2C_ID, &b).await?;
         }
     }
-    // 4. Finish S2C → 等 Finish Ack C2S，中间穿插包同样忽略。
+    // 4. Update Tags（timeline 4 tag，供 dimension `#minecraft:in_overworld` 引用消解）。
+    {
+        let tags = packets::ConfigUpdateTags::minimal_timeline_tags();
+        let mut b = Vec::new();
+        tags.encode_body(&mut b);
+        debug!("config update tags send registries={}", tags.registries.len());
+        if compressed {
+            write_packet_framed(stream, packets::CONFIG_UPDATE_TAGS_S2C_ID, &b, threshold).await?;
+        } else {
+            write_packet(stream, packets::CONFIG_UPDATE_TAGS_S2C_ID, &b).await?;
+        }
+    }
+    // 5. Finish S2C → 等 Finish Ack C2S，中间穿插包同样忽略。
     debug!("config finish send id={:#04x}", packets::CONFIG_FINISH_S2C_ID);
     if compressed {
         write_packet_framed(stream, packets::CONFIG_FINISH_S2C_ID, &[], threshold).await?;
@@ -249,7 +263,7 @@ mod tests {
     use tokio::net::TcpListener;
 
     #[tokio::test]
-    async fn config_finish_sends_known_registry_finish_in_order() {
+    async fn config_finish_sends_known_registry_tags_finish_in_order() {
         let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
         let addr = listener.local_addr().unwrap();
         let server = tokio::spawn(async move {
@@ -268,15 +282,20 @@ mod tests {
         packets::encode_config_known_packs_c2s_packet(&packets::ConfigKnownPacks::vanilla(), &mut kp);
         use tokio::io::AsyncWriteExt;
         c.write_all(&kp).await.unwrap();
-        // 3. Registry Data 2包（CB 0x07：dimension_type + biome）。
-        for want in ["minecraft:dimension_type", "minecraft:worldgen/biome"] {
+        // 3. Registry Data 4包（CB 0x07：dimension_type + biome + timeline + world_clock）。
+        for want in ["minecraft:dimension_type", "minecraft:worldgen/biome", "minecraft:timeline", "minecraft:world_clock"] {
             let (id, payload) = super::super::framing::read_packet(&mut c).await.unwrap();
             assert_eq!(id, packets::CONFIG_REGISTRY_DATA_S2C_ID);
             let (reg, _) = packets::decode_config_registry_data(&payload).unwrap();
             assert_eq!(reg.registry_id, want);
-            assert_eq!(reg.entries.len(), 1);
+            assert!(!reg.entries.is_empty());
         }
-        // 4. Finish S2C → 回 Finish Ack。
+        // 4. Update Tags 1包（CB 0x0E：timeline 4 tag）。
+        let (id, payload) = super::super::framing::read_packet(&mut c).await.unwrap();
+        assert_eq!(id, packets::CONFIG_UPDATE_TAGS_S2C_ID);
+        let (tags, _) = packets::decode_config_update_tags(&payload).unwrap();
+        assert_eq!(tags, packets::ConfigUpdateTags::minimal_timeline_tags());
+        // 5. Finish S2C → 回 Finish Ack。
         let (id, payload) = super::super::framing::read_packet(&mut c).await.unwrap();
         assert_eq!(id, packets::CONFIG_FINISH_S2C_ID);
         packets::decode_config_finish_s2c(&payload).unwrap();
@@ -309,15 +328,15 @@ mod tests {
             assert!(config_finish(&mut s, packets::COMPRESSION_DISABLED_THRESHOLD).await.is_err());
         });
         let mut c = tokio::net::TcpStream::connect(addr).await.unwrap();
-        // 先走完 KnownPacks 往返 + 读掉 2 个 Registry，再在 Finish 处错包。
+        // 先走完 KnownPacks 往返 + 读掉 4 个 Registry + 1 个 Update Tags，再在 Finish 处错包。
         let _ = super::super::framing::read_packet(&mut c).await.unwrap();
         let mut kp = Vec::new();
         packets::encode_config_known_packs_c2s_packet(&packets::ConfigKnownPacks::vanilla(), &mut kp);
         use tokio::io::AsyncWriteExt;
         c.write_all(&kp).await.unwrap();
-        let _ = super::super::framing::read_packet(&mut c).await.unwrap();
-        let _ = super::super::framing::read_packet(&mut c).await.unwrap();
-        let _ = super::super::framing::read_packet(&mut c).await.unwrap();
+        for _ in 0..5 {
+            let _ = super::super::framing::read_packet(&mut c).await.unwrap();
+        }
         super::super::framing::write_packet(&mut c, 0x7F, &[]).await.unwrap();
         server.await.unwrap();
     }
