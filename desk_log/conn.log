@@ -1,7 +1,7 @@
 ---- Minecraft Network Protocol Error Report ----
-// +'${`%&NO CARRIER
+// Could be worse, I guess
 
-Time: 2026-11-23 10:37:26
+Time: 2026-11-23 11:25:55
 Description: Registry Loading
 
 java.lang.IllegalStateException: Failed to load registries due to errors
@@ -27,9 +27,7 @@ Stacktrace:
 -- Loading info --
 Details:
 	Errors: 
-		minecraft:dimension_type/minecraft:overworld: Failed to parse minecraft:overworld from pack vanilla
-		minecraft:root/minecraft:timeline: Unbound tags in registry ResourceKey[minecraft:root / minecraft:timeline]: [minecraft:in_overworld]
-		minecraft:root/minecraft:world_clock: Unbound values in registry ResourceKey[minecraft:root / minecraft:world_clock]: [minecraft:overworld]
+		minecraft:dimension_type/minecraft:overworld: Failed to parse value {ambient_light:0.0f,attributes:{"minecraft:audio/ambient_sounds":{mood:{block_search_extent:8,offset:2,sound:"minecraft:ambient.cave",tick_delay:6000}},"minecraft:audio/background_music":{creative:{max_delay:24000,min_delay:12000,sound:"minecraft:music.creative"},default:{max_delay:24000,min_delay:12000,sound:"minecraft:music.game"}},"minecraft:gameplay/bed_rule":{can_set_spawn:"always",can_sleep:"when_dark",error_message:{translate:"block.minecraft.bed.no_sleep"}},"minecraft:gameplay/nether_portal_spawns_piglin":1b,"minecraft:gameplay/respawn_anchor_works":0b,"minecraft:gameplay/straw_bed_rule":{can_set_spawn:"never",can_sleep:"when_dark",destroy_on_leave:1b,error_message:{translate:"block.minecraft.bed.no_sleep"}},"minecraft:visual/ambient_light_color":"#0a0a0a","minecraft:visual/cloud_color":"#ccffffff","minecraft:visual/cloud_height":192.33f,"minecraft:visual/fog_color":"#c0d8ff","minecraft:visual/sky_color":"#78a7ff"},cardinal_light:"default",coordinate_scale:1.0d,default_clock:"minecraft:overworld",has_ceiling:0b,has_ender_dragon_fight:0b,has_fixed_time:0b,has_skylight:1b,height:384,infiniburn:"#minecraft:infiniburn_overworld",logical_height:384,min_y:-64,monster_spawn_block_light_limit:0,monster_spawn_light_level:{max_inclusive:7,min_inclusive:0,type:"minecraft:uniform"},skybox:"overworld",timelines:"#minecraft:in_overworld"} for key minecraft:overworld from server
 Stacktrace:
 	at net.minecraft.resources.RegistryDataLoader.createReportWithBriefInfo(RegistryDataLoader.java:313)
 	at net.minecraft.resources.RegistryDataLoader.logErrors(RegistryDataLoader.java:294)
@@ -45,6 +43,8 @@ Stacktrace:
 Details:
 	Dynamic Registries: 
 		minecraft:dimension_type: elements=1 tags=0
+		minecraft:timeline: elements=4 tags=4
+		minecraft:world_clock: elements=2 tags=0
 		minecraft:worldgen/biome: elements=1 tags=0
 	Static Registries: 
 Stacktrace:
@@ -83,9 +83,9 @@ Details:
 	Operating System: Windows 10 (amd64) version 10.0
 	Java Version: 25.0.1, Microsoft
 	Java VM Version: OpenJDK 64-Bit Server VM (mixed mode), Microsoft
-	Memory: 1465909248 bytes (1398 MiB) / 2147483648 bytes (2048 MiB) up to 4294967296 bytes (4096 MiB)
-	Memory (heap): init: 2048MiB, used: 650MiB, committed: 2048MiB, max: 4096MiB
-	Memory (non-heap): init: 007MiB, used: 165MiB, committed: 189MiB, max: 000MiB
+	Memory: 1633681408 bytes (1558 MiB) / 2147483648 bytes (2048 MiB) up to 4294967296 bytes (4096 MiB)
+	Memory (heap): init: 2048MiB, used: 490MiB, committed: 2048MiB, max: 4096MiB
+	Memory (non-heap): init: 007MiB, used: 164MiB, committed: 189MiB, max: 000MiB
 	CPUs: 16
 	Processor Vendor: AuthenticAMD
 	Processor Name: AMD Ryzen 7 5700X 8-Core Processor             
@@ -112,18 +112,18 @@ Details:
 	Memory slot #1 clockSpeed (GHz): 2.40
 	Memory slot #1 type: DDR4
 	Virtual memory max (MiB): 35239.44
-	Virtual memory used (MiB): 15511.97
+	Virtual memory used (MiB): 15513.46
 	Swap memory total (MiB): 2560.00
-	Swap memory used (MiB): 126.49
-	Space in storage for jna.tmpdir (MiB): available: 262030.52, total: 487659.97
-	Space in storage for org.lwjgl.system.SharedLibraryExtractPath (MiB): available: 262030.52, total: 487659.97
-	Space in storage for io.netty.native.workdir (MiB): available: 262030.52, total: 487659.97
-	Space in storage for java.io.tmpdir (MiB): available: 262030.52, total: 487659.97
-	Space in storage for workdir (MiB): available: 262030.52, total: 487659.97
+	Swap memory used (MiB): 28.80
+	Space in storage for jna.tmpdir (MiB): available: 262009.16, total: 487659.97
+	Space in storage for org.lwjgl.system.SharedLibraryExtractPath (MiB): available: 262009.16, total: 487659.97
+	Space in storage for io.netty.native.workdir (MiB): available: 262009.16, total: 487659.97
+	Space in storage for java.io.tmpdir (MiB): available: 262009.16, total: 487659.97
+	Space in storage for workdir (MiB): available: 262009.16, total: 487659.97
 	Operating System Version: Microsoft Windows 10 build 19045
 	Process Elevated: false
-	Process Loads: Uptime: 1700s, user: 184s (10.81%), kernel: 19s (1.11%), total: 203s (11.93%)
-	Process Virtual Size (MiB): 2424.23
-	Process Resident Size (MiB): 1329.07
+	Process Loads: Uptime: 4609s, user: 345s (7.49%), kernel: 34s (0.74%), total: 379s (8.23%)
+	Process Virtual Size (MiB): 2621.77
+	Process Resident Size (MiB): 1530.72
 	JVM Flags: 11 total; -XX:HeapDumpPath=MojangTricksIntelDriversForPerformance_javaw.exe_minecraft.exe.heapdump -Xss1M -XX:+UnlockDiagnosticVMOptions -XX:-UseBASE64Intrinsics -XX:StackShadowPages=32 -Xms2G -Xmx4G -XX:+UseCompactObjectHeaders -XX:+AlwaysPreTouch -XX:+UseStringDeduplication -XX:+UseZGC
 	Debug Flags: 0 total; 

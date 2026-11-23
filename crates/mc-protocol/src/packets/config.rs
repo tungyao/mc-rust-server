@@ -51,7 +51,6 @@ pub fn real_overworld_dimension_nbt() -> Vec<u8> {
             .with("has_ceiling", NbtTag::Byte(0))
             .with("has_ender_dragon_fight", NbtTag::Byte(0))
             .with("coordinate_scale", NbtTag::Double(1.0))
-            .with("has_fixed_time", NbtTag::Byte(0))
             .with("ambient_light", NbtTag::Float(0.0))
             .with("monster_spawn_block_light_limit", NbtTag::Int(0))
             .with("monster_spawn_light_level", NbtTag::compound(vec![
@@ -63,8 +62,6 @@ pub fn real_overworld_dimension_nbt() -> Vec<u8> {
             .with("min_y", NbtTag::Int(-64))
             .with("height", NbtTag::Int(384))
             .with("infiniburn", NbtTag::String("#minecraft:infiniburn_overworld".into()))
-            .with("skybox", NbtTag::String("overworld".into()))
-            .with("cardinal_light", NbtTag::String("default".into()))
             .with("default_clock", NbtTag::String("minecraft:overworld".into()))
             .with("attributes", real_overworld_attributes_nbt())
             .with("timelines", NbtTag::String("#minecraft:in_overworld".into()))
@@ -78,13 +75,13 @@ pub fn real_overworld_dimension_nbt() -> Vec<u8> {
 
 /// overworld attributes 整棵（照抄真机 dimension_overworld.json，类型按 wiki Environment_attribute 页取 NBT 类型）：
 /// bool→Byte；整数→Int；字符串（颜色/sound/规则）→String；cloud_height 按 wiki [Float] 取 Float；
-/// 唯独 mood.offset 真数据写作 2.0 但 wiki 明确 [Int]，故取 Int(2)（vanilla codec 读 int，Float 会校验失败）。
+/// mood.offset 取 Float(2.0)：原版JSON字面即2.0，若codec是Int原版自己先炸，故必为浮点类；wiki的[Int]存疑。
 fn real_overworld_attributes_nbt() -> NbtTag {
     NbtTag::compound(vec![
         ("minecraft:audio/ambient_sounds", NbtTag::compound(vec![
             ("mood", NbtTag::compound(vec![
                 ("block_search_extent", NbtTag::Int(8)),
-                ("offset", NbtTag::Int(2)),
+                ("offset", NbtTag::Float(2.0)),
                 ("sound", NbtTag::String("minecraft:ambient.cave".into())),
                 ("tick_delay", NbtTag::Int(6000)),
             ])),
@@ -579,7 +576,6 @@ mod tests {
         assert_eq!(dim_c.get("has_ceiling"), Some(&NbtTag::Byte(0)));
         assert_eq!(dim_c.get("has_ender_dragon_fight"), Some(&NbtTag::Byte(0)));
         assert_eq!(dim_c.get("coordinate_scale"), Some(&NbtTag::Double(1.0)));
-        assert_eq!(dim_c.get("has_fixed_time"), Some(&NbtTag::Byte(0)));
         assert_eq!(dim_c.get("ambient_light"), Some(&NbtTag::Float(0.0)));
         assert_eq!(dim_c.get("monster_spawn_block_light_limit"), Some(&NbtTag::Int(0)));
         // monster_spawn_light_level：真数据 int-provider 对象 {type, min_inclusive, max_inclusive}。
@@ -592,10 +588,8 @@ mod tests {
         assert_eq!(dim_c.get("min_y"), Some(&NbtTag::Int(-64)));
         assert_eq!(dim_c.get("height"), Some(&NbtTag::Int(384)));
         assert_eq!(dim_c.get("infiniburn"), Some(&NbtTag::String("#minecraft:infiniburn_overworld".into())));
-        assert_eq!(dim_c.get("skybox"), Some(&NbtTag::String("overworld".into())));
-        assert_eq!(dim_c.get("cardinal_light"), Some(&NbtTag::String("default".into())));
         assert_eq!(dim_c.get("default_clock"), Some(&NbtTag::String("minecraft:overworld".into())));
-        for gone in ["ultrawarm", "natural", "bed_works", "respawn_anchor_works", "piglin_safe", "has_raids", "effects"] {
+        for gone in ["ultrawarm", "natural", "bed_works", "respawn_anchor_works", "piglin_safe", "has_raids", "effects", "has_fixed_time", "skybox", "cardinal_light"] {
             assert_eq!(dim_c.get(gone), None, "维度旧字段已删:{gone}");
         }
         // timelines：字符串 tag 引用（维度引 timeline 注册表即靠它）。
@@ -608,7 +602,7 @@ mod tests {
         let NbtTag::Compound(mood_c) = mood else { panic!("ambient_sounds须为Compound") };
         let NbtTag::Compound(m) = mood_c.get("mood").expect("缺mood") else { panic!("mood须为Compound") };
         assert_eq!(m.get("block_search_extent"), Some(&NbtTag::Int(8)));
-        assert_eq!(m.get("offset"), Some(&NbtTag::Int(2)), "offset真数据2.0但wiki为[Int]，须取Int(2)");
+        assert_eq!(m.get("offset"), Some(&NbtTag::Float(2.0)), "offset与原版JSON字面2.0一致取Float");
         assert_eq!(m.get("sound"), Some(&NbtTag::String("minecraft:ambient.cave".into())));
         assert_eq!(m.get("tick_delay"), Some(&NbtTag::Int(6000)));
         let NbtTag::Compound(_) = attrs_c.get("minecraft:audio/background_music").expect("缺background_music")

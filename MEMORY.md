@@ -29,3 +29,4 @@
 - [2026-11-23 09:10 UTC] agent=p9 task=registry-nbt-rewrite status=done detail=builder重写2 NBT+删手拼helper+新字段断言，mc-protocol 35全过 files=crates/mc-protocol/src/packets/config.rs(392行)
 - [2026-11-23 09:30 UTC] agent=p10 task=timeline-worldclock-tags status=start detail=dimension重写+timeline/world_clock注册表+UpdateTags files=config.rs,login_route.rs
 - [2026-11-23 10:10 UTC] agent=p10 task=timeline-worldclock-tags status=done detail=4包+tags+0x0E勘误，mc-protocol 38+mc-network全过 files=config.rs(810)data/*.json(637)login_route.rs(406)
+- [2026-11-23 08:10 UTC] agent=main task=dim-offset-fix status=done detail=offset改Float删3多余字段，向原版JSON对齐 files=config.rs
