@@ -1,0 +1,39 @@
+[workspace]
+resolver = "2"
+members = [
+  "crates/mc-core",
+  "crates/mc-protocol",
+  "crates/mc-registry",
+  "crates/mc-network",
+  "crates/mc-world",
+  "crates/mc-commands",
+  "crates/mc-plugins",
+  "crates/mc-server",
+]
+
+[workspace.package]
+edition = "2021"
+version = "0.1.0"
+license = "MIT"
+
+[workspace.dependencies]
+mc-core = { path = "crates/mc-core" }
+mc-protocol = { path = "crates/mc-protocol" }
+mc-registry = { path = "crates/mc-registry" }
+mc-network = { path = "crates/mc-network" }
+mc-world = { path = "crates/mc-world" }
+mc-commands = { path = "crates/mc-commands" }
+mc-plugins = { path = "crates/mc-plugins" }
+
+thiserror = "1"
+serde = { version = "1", features = ["derive"] }
+toml = "0.8"
+tokio = { version = "1", features = ["full"] }
+bevy_ecs = "0.14"
+bevy_app = "0.14"
+crossbeam-channel = "0.5"
+rayon = "1"
+tracing = "0.1"
+tracing-subscriber = "0.3"
+uuid = { version = "1", features = ["v4", "serde"] }
+bytes = "1"
