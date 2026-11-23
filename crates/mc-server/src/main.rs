@@ -1,6 +1,7 @@
 //! mc-server: Bevy App组装 + 50ms主循环，只兼容26.3/777
-//! 模块上限200行：config/resources/systems/net_thread/play
+//! 模块：config/resources/systems/net_thread/play/movement
 mod config;
+mod movement;
 mod net_thread;
 mod play;
 mod resources;
@@ -34,10 +35,19 @@ fn main() {
     app.insert_resource(online);
     app.insert_resource(NetReceiver(rx));
     app.insert_resource(play::PlayScaffold::default());
+    app.insert_resource(movement::MovementQueue::default());
     app.add_systems(Startup, systems::startup_system);
     app.add_systems(
         Update,
-        (systems::tick_system, systems::handle_new_connections, play::login_join_system, play::keepalive_system).chain(),
+        (
+            systems::tick_system,
+            systems::handle_new_connections,
+            play::login_join_system,
+            movement::movement_system,
+            play::keepalive_system,
+            movement::keepalive_timeout_system,
+        )
+            .chain(),
     );
     let shutdown = Arc::new(AtomicBool::new(false));
     let shutdown_net = Arc::clone(&shutdown);

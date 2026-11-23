@@ -9,6 +9,8 @@ use std::io;
 
 use super::NewConnection;
 
+use std::time::{Duration, Instant};
+
 /// 默认压缩禁用（阈值 -1，原行为）。
 pub async fn handle_login(stream: TcpStream, addr: SocketAddr, tx: &Sender<NewConnection>) -> io::Result<()> {
     handle_login_with_threshold(stream, addr, tx, packets::COMPRESSION_DISABLED_THRESHOLD).await
@@ -134,19 +136,44 @@ async fn send_join_sequence(stream: &mut TcpStream, profile: &mc_core::PlayerPro
 
 async fn play_loop(stream: &mut TcpStream, profile: &mc_core::PlayerProfile, mut seq: i64, threshold: i32) -> io::Result<()> {
     let compressed = packets::compression_enabled(threshold);
+    // 最后一次收到KeepAlive回显的时间；移动包不刷新它（只证明位置变化，不证明存活）。
+    let mut last_seen = Instant::now();
     loop {
         let next = if compressed { read_packet_framed(stream, threshold).await } else { read_packet(stream).await };
         match next {
             Ok((id, payload)) if id == packets::PLAY_KEEPALIVE_C2S_ID => {
                 match packets::decode_keepalive_c2s(&payload) {
-                    Ok(echo) => info!("play keepalive echo uuid={} name={} id={echo}", profile.uuid, profile.username),
+                    Ok(echo) => {
+                        last_seen = Instant::now();
+                        info!("play keepalive echo uuid={} name={} id={echo}", profile.uuid, profile.username);
+                    }
                     Err(e) => debug!("play uuid={} bad keepalive: {e}", profile.uuid),
+                }
+            }
+            Ok((id, payload))
+                if id == packets::PLAY_MOVE_POS_C2S_ID
+                    || id == packets::PLAY_MOVE_POSROT_C2S_ID
+                    || id == packets::PLAY_MOVE_ROT_C2S_ID
+                    || id == packets::PLAY_MOVE_FLAGS_C2S_ID =>
+            {
+                match packets::decode_c2s_movement(id, &payload) {
+                    Ok(m) => info!(
+                        "play move uuid={} name={} id={:#04x} m={:?} (TODO P5a: forward via channel to ECS MovementQueue)",
+                        profile.uuid, profile.username, id, m
+                    ),
+                    Err(e) => debug!("play uuid={} bad movement id={id:#04x}: {e}", profile.uuid),
                 }
             }
             Ok((id, payload)) => {
                 debug!("play uuid={} c2s id={id:#04x} len={} (ignored)", profile.uuid, payload.len());
             }
             Err(e) if e.kind() == io::ErrorKind::TimedOut => {
+                if last_seen.elapsed() > Duration::from_secs(15) {
+                    warn!("play uuid={} keepalive timeout >15s without echo, kicking (online-- in ECS timeout system)", profile.uuid);
+                    // online递减单点放在ECS keepalive_timeout_system，避免net/ECS双减；
+                    // net线程只关socket（踢出）。
+                    break;
+                }
                 seq += 1;
                 let mut body = Vec::new();
                 packets::KeepAliveS2C(seq).encode_body(&mut body);
@@ -223,6 +250,46 @@ mod tests {
         packets::KeepAliveC2S(1).encode_body(&mut b);
         super::super::framing::write_packet(&mut c, packets::PLAY_KEEPALIVE_C2S_ID, &b).await.unwrap();
         tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+        drop(c);
+        server.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn enter_play_accepts_movement_packets_without_disconnect() {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let profile = mc_core::PlayerProfile { uuid: packets::offline_uuid("Alex"), username: "Alex".into() };
+        let server = tokio::spawn(async move {
+            let (s, _) = listener.accept().await.unwrap();
+            enter_play(s, profile, packets::COMPRESSION_DISABLED_THRESHOLD).await.unwrap();
+        });
+        let mut c = tokio::net::TcpStream::connect(addr).await.unwrap();
+        for _ in 0..5 {
+            let _ = super::super::framing::read_packet(&mut c).await.unwrap();
+        }
+        // 依次发 0x1E/0x1F/0x20/0x21，服务端只log TODO进ECS，不断开
+        let mut body = Vec::new();
+        packets::MovePlayerPos { x: 9.5, y: 80.0, z: 9.5, on_ground: true, horizontal_collision: false }
+            .encode_body(&mut body);
+        super::super::framing::write_packet(&mut c, packets::PLAY_MOVE_POS_C2S_ID, &body).await.unwrap();
+        body.clear();
+        packets::MovePlayerPosRot { x: 9.5, y: 80.0, z: 9.5, yaw: 90.0, pitch: 0.0, on_ground: true, horizontal_collision: false }
+            .encode_body(&mut body);
+        super::super::framing::write_packet(&mut c, packets::PLAY_MOVE_POSROT_C2S_ID, &body).await.unwrap();
+        body.clear();
+        packets::MovePlayerRot { yaw: 180.0, pitch: 0.0, on_ground: false, horizontal_collision: false }
+            .encode_body(&mut body);
+        super::super::framing::write_packet(&mut c, packets::PLAY_MOVE_ROT_C2S_ID, &body).await.unwrap();
+        body.clear();
+        packets::MovePlayerFlags { on_ground: true, horizontal_collision: false }.encode_body(&mut body);
+        super::super::framing::write_packet(&mut c, packets::PLAY_MOVE_FLAGS_C2S_ID, &body).await.unwrap();
+        // 300ms内不应EOF（连接仍开着）
+        let mut buf = [0u8; 1];
+        match tokio::time::timeout(std::time::Duration::from_millis(300), super::super::framing::read_packet(&mut c)).await {
+            Err(_) => {} // 超时=服务端没发新包但连接仍开着，符合预期
+            Ok(Ok(_)) => {} // 若收到keepalive重发也算连接正常
+            Ok(Err(e)) => panic!("server closed play after movement packets: {e:?}"),
+        }
         drop(c);
         server.await.unwrap();
     }

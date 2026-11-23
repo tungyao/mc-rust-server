@@ -12,3 +12,5 @@
 - [2026-11-23 04:00 UTC] agent=p4b task=id-fix status=start detail=按P4A表改6个Play ID+Config常量 files=packets/play_*.rs,packets/config.rs,tests
 - [2026-11-23 04:30 UTC] agent=p4b task=id-fix status=done detail=6个Play ID+4个Config ID按P4A表改对，41测试全过 files=packets/play_*.rs,packets/config.rs,packets/mod.rs,server/play.rs,tests/login_flow.rs,tests/online_count.rs,network/login_route注释
 - [2026-11-23 05:00 UTC] agent=main task=P5BC-merge status=done detail=P5B视距81块限流+P5C toml+Anvil占位合完 files=world/play/config
+- [2026-11-23 05:00 UTC] agent=p5a task=movement status=start detail=C2S 0x1E-0x21+ movement.rs + play_loop last_seen files=packets/play_sync.rs,server/movement.rs,network/login_route.rs
+- [2026-11-23 05:30 UTC] agent=p5a task=movement status=done detail=C2S 0x1E-0x21解码+ movement tick/15s超时踢减online + play_loop last_seen/move-log 52测试全过 files=packets/play_sync.rs(397),server/movement.rs(330),network/login_route.rs(296),server/main.rs接线
