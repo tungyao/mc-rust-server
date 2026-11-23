@@ -14,3 +14,5 @@
 - [2026-11-23 05:00 UTC] agent=main task=P5BC-merge status=done detail=P5B视距81块限流+P5C toml+Anvil占位合完 files=world/play/config
 - [2026-11-23 05:00 UTC] agent=p5a task=movement status=start detail=C2S 0x1E-0x21+ movement.rs + play_loop last_seen files=packets/play_sync.rs,server/movement.rs,network/login_route.rs
 - [2026-11-23 05:30 UTC] agent=p5a task=movement status=done detail=C2S 0x1E-0x21解码+ movement tick/15s超时踢减online + play_loop last_seen/move-log 52测试全过 files=packets/play_sync.rs(397),server/movement.rs(330),network/login_route.rs(296),server/main.rs接线
+- [2026-11-23 06:00 UTC] agent=p6a task=registry-data status=start detail=KnownPacks+Registry最小下发+config_finish按序 files=packets/config.rs,network/login_route
+- [2026-11-23 06:30 UTC] agent=p6a task=registry-data status=done detail=KnownPacks单vanilla+Registry最小2包+config_finish按序5步，52测试全过 files=packets/config.rs(269),network/login_route.rs(369),tests/login_flow.rs+online_count.rs

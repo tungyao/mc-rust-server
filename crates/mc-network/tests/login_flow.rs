@@ -90,7 +90,18 @@ async fn login_offline_full_flow() {
     packets::encode_login_acknowledged_packet(&mut ack);
     s.write_all(&ack).await.unwrap();
 
-    // Configuration Finish（CB 0x03 空包，需回 Ack SB 0x03；ID已按P4A对照表核对777）。
+    // Configuration：KnownPacks S2C→C2S→Registry Data(最小2包)→Finish(CB 0x03)→Ack(SB 0x03)；ID已按P4A对照表核对777。
+    let (id, payload) = read_frame(&mut s).await.unwrap();
+    assert_eq!(id, packets::CONFIG_KNOWN_PACKS_S2C_ID, "expected known packs 0x0F");
+    packets::decode_config_known_packs_s2c(&payload).unwrap();
+    let mut kpack = Vec::new();
+    packets::encode_config_known_packs_c2s_packet(&packets::ConfigKnownPacks::vanilla(), &mut kpack);
+    s.write_all(&kpack).await.unwrap();
+    for want in ["minecraft:dimension_type", "minecraft:worldgen/biome"] {
+        let (id, payload) = read_frame(&mut s).await.unwrap();
+        assert_eq!(id, packets::CONFIG_REGISTRY_DATA_S2C_ID, "expected registry 0x07");
+        assert_eq!(packets::decode_config_registry_data(&payload).unwrap().0.registry_id, want);
+    }
     let (id, payload) = read_frame(&mut s).await.unwrap();
     assert_eq!(id, CONFIG_FINISH_S2C_ID, "expected config finish 0x03");
     packets::decode_config_finish_s2c(&payload).unwrap();
@@ -261,7 +272,30 @@ async fn login_compression_flow_sends_set_compression_first() {
     mc_protocol::write_varint(ack.len() as i32, &mut lb);
     s.write_all(&lb).await.unwrap();
     s.write_all(&ack).await.unwrap();
-    // Configuration Finish（压缩帧 CB 0x03）→ 回压缩帧 Ack（SB 0x03）。
+    // Configuration（压缩帧）：KnownPacks S2C→C2S→Registry 2包→Finish CB 0x03→Ack SB 0x03。
+    let len = read_varint_async(&mut s).await.unwrap();
+    let mut frame = vec![0u8; len as usize];
+    s.read_exact(&mut frame).await.unwrap();
+    let (id, payload) = decode_compressed_frame(&frame).unwrap();
+    assert_eq!(id, packets::CONFIG_KNOWN_PACKS_S2C_ID);
+    packets::decode_config_known_packs_s2c(&payload).unwrap();
+    let kp = encode_compressed_frame(packets::CONFIG_KNOWN_PACKS_C2S_ID, &{
+        let mut b = Vec::new();
+        packets::ConfigKnownPacks::vanilla().encode_body(&mut b);
+        b
+    }, 64);
+    let mut klb = Vec::new();
+    mc_protocol::write_varint(kp.len() as i32, &mut klb);
+    s.write_all(&klb).await.unwrap();
+    s.write_all(&kp).await.unwrap();
+    for want in ["minecraft:dimension_type", "minecraft:worldgen/biome"] {
+        let len = read_varint_async(&mut s).await.unwrap();
+        let mut frame = vec![0u8; len as usize];
+        s.read_exact(&mut frame).await.unwrap();
+        let (id, payload) = decode_compressed_frame(&frame).unwrap();
+        assert_eq!(id, packets::CONFIG_REGISTRY_DATA_S2C_ID);
+        assert_eq!(packets::decode_config_registry_data(&payload).unwrap().0.registry_id, want);
+    }
     let len = read_varint_async(&mut s).await.unwrap();
     let mut frame = vec![0u8; len as usize];
     s.read_exact(&mut frame).await.unwrap();

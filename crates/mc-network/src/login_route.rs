@@ -69,11 +69,43 @@ pub async fn handle_login_with_threshold(mut stream: TcpStream, addr: SocketAddr
     Ok(())
 }
 
-/// Configuration阶段骨架：空 registry 直接发 Finish S2C → 等 Finish Ack C2S。
-/// 包 ID 已按P4A对照表核对777；Registry Data / Known Packs 暂不下发，只留 packets::config 占位。
-/// threshold 透传（压缩开启后 Configuration 包同样走压缩帧）。签名保持 `enter_play` 不变，中间只插这一段。
+/// Configuration阶段最小可用：按序 KnownPacks S2C→KnownPacks C2S→Registry Data(最小2包)→Finish S2C→等 Finish Ack C2S。
+/// 包 ID 已按P4A对照表核对777（CB 0x0F/0x07/0x03，SB 0x07/0x03）；字段见 packets::config（来源 minecraft.wiki 777）。
+/// 任一步错包/解码失败即 Err，上层 warn 后断开。threshold 透传（压缩开启后 Configuration 包同样走压缩帧）。
 pub async fn config_finish(stream: &mut TcpStream, threshold: i32) -> io::Result<()> {
     let compressed = packets::compression_enabled(threshold);
+    // 1. Known Packs S2C（单vanilla包，更贴近真服；空列表亦可，客户端仅记录）。
+    let known = packets::ConfigKnownPacks::vanilla();
+    let mut body = Vec::new();
+    known.encode_body(&mut body);
+    debug!("config known packs send id={:#04x} n={}", packets::CONFIG_KNOWN_PACKS_S2C_ID, known.packs.len());
+    if compressed {
+        write_packet_framed(stream, packets::CONFIG_KNOWN_PACKS_S2C_ID, &body, threshold).await?;
+    } else {
+        write_packet(stream, packets::CONFIG_KNOWN_PACKS_S2C_ID, &body).await?;
+    }
+    // 2. 等 Known Packs C2S（客户端回其已知包，一般也是单vanilla包；内容不强校验，解码通过即可）。
+    let (id, payload) = if compressed { read_packet_framed(stream, threshold).await } else { read_packet(stream).await }?;
+    if id != packets::CONFIG_KNOWN_PACKS_C2S_ID {
+        return Err(to_io_invalid(format!(
+            "expected config known packs {:#04x}, got {id:#04x}",
+            packets::CONFIG_KNOWN_PACKS_C2S_ID
+        )));
+    }
+    let reply = packets::decode_config_known_packs_c2s(&payload).map_err(to_io_invalid)?.0;
+    debug!("config known packs ack n={}", reply.packs.len());
+    // 3. Registry Data 最小2包（dimension_type + biome，各1项 has_data=false，客户端用内置默认即站住）。
+    for reg in packets::default_configuration_registries() {
+        let mut b = Vec::new();
+        reg.encode_body(&mut b);
+        debug!("config registry send {} entries={}", reg.registry_id, reg.entries.len());
+        if compressed {
+            write_packet_framed(stream, packets::CONFIG_REGISTRY_DATA_S2C_ID, &b, threshold).await?;
+        } else {
+            write_packet(stream, packets::CONFIG_REGISTRY_DATA_S2C_ID, &b).await?;
+        }
+    }
+    // 4. Finish S2C → 等 Finish Ack C2S。
     debug!("config finish send id={:#04x}", packets::CONFIG_FINISH_S2C_ID);
     if compressed {
         write_packet_framed(stream, packets::CONFIG_FINISH_S2C_ID, &[], threshold).await?;
@@ -199,7 +231,7 @@ mod tests {
     use tokio::net::TcpListener;
 
     #[tokio::test]
-    async fn config_finish_sends_finish_then_reads_ack() {
+    async fn config_finish_sends_known_registry_finish_in_order() {
         let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
         let addr = listener.local_addr().unwrap();
         let server = tokio::spawn(async move {
@@ -207,13 +239,46 @@ mod tests {
             config_finish(&mut s, packets::COMPRESSION_DISABLED_THRESHOLD).await.unwrap();
         });
         let mut c = tokio::net::TcpStream::connect(addr).await.unwrap();
+        // 1. KnownPacks S2C（CB 0x0F，单vanilla包）。
+        let (id, payload) = super::super::framing::read_packet(&mut c).await.unwrap();
+        assert_eq!(id, packets::CONFIG_KNOWN_PACKS_S2C_ID);
+        let packs = packets::decode_config_known_packs_s2c(&payload).unwrap().0;
+        assert_eq!(packs.packs.len(), 1);
+        assert_eq!(packs.packs[0].namespace, "minecraft");
+        // 2. 回 KnownPacks C2S（SB 0x07）。
+        let mut kp = Vec::new();
+        packets::encode_config_known_packs_c2s_packet(&packets::ConfigKnownPacks::vanilla(), &mut kp);
+        use tokio::io::AsyncWriteExt;
+        c.write_all(&kp).await.unwrap();
+        // 3. Registry Data 2包（CB 0x07：dimension_type + biome）。
+        for want in ["minecraft:dimension_type", "minecraft:worldgen/biome"] {
+            let (id, payload) = super::super::framing::read_packet(&mut c).await.unwrap();
+            assert_eq!(id, packets::CONFIG_REGISTRY_DATA_S2C_ID);
+            let (reg, _) = packets::decode_config_registry_data(&payload).unwrap();
+            assert_eq!(reg.registry_id, want);
+            assert_eq!(reg.entries.len(), 1);
+        }
+        // 4. Finish S2C → 回 Finish Ack。
         let (id, payload) = super::super::framing::read_packet(&mut c).await.unwrap();
         assert_eq!(id, packets::CONFIG_FINISH_S2C_ID);
         packets::decode_config_finish_s2c(&payload).unwrap();
         let mut ack = Vec::new();
         packets::encode_config_finish_ack_packet(&mut ack);
-        use tokio::io::AsyncWriteExt;
         c.write_all(&ack).await.unwrap();
+        server.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn config_finish_rejects_wrong_known_packs_id() {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let server = tokio::spawn(async move {
+            let (mut s, _) = listener.accept().await.unwrap();
+            assert!(config_finish(&mut s, packets::COMPRESSION_DISABLED_THRESHOLD).await.is_err());
+        });
+        let mut c = tokio::net::TcpStream::connect(addr).await.unwrap();
+        let _ = super::super::framing::read_packet(&mut c).await.unwrap();
+        super::super::framing::write_packet(&mut c, 0x7F, &[]).await.unwrap();
         server.await.unwrap();
     }
 
@@ -226,6 +291,14 @@ mod tests {
             assert!(config_finish(&mut s, packets::COMPRESSION_DISABLED_THRESHOLD).await.is_err());
         });
         let mut c = tokio::net::TcpStream::connect(addr).await.unwrap();
+        // 先走完 KnownPacks 往返 + 读掉 2 个 Registry，再在 Finish 处错包。
+        let _ = super::super::framing::read_packet(&mut c).await.unwrap();
+        let mut kp = Vec::new();
+        packets::encode_config_known_packs_c2s_packet(&packets::ConfigKnownPacks::vanilla(), &mut kp);
+        use tokio::io::AsyncWriteExt;
+        c.write_all(&kp).await.unwrap();
+        let _ = super::super::framing::read_packet(&mut c).await.unwrap();
+        let _ = super::super::framing::read_packet(&mut c).await.unwrap();
         let _ = super::super::framing::read_packet(&mut c).await.unwrap();
         super::super::framing::write_packet(&mut c, 0x7F, &[]).await.unwrap();
         server.await.unwrap();
