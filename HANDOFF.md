@@ -1,17 +1,18 @@
 # 交接文档：Rust 自研 MC 服务器（只兼容 Java 26.3 / protocol 777 / data 5023）
 
-> 日期：2026-11-24；分支 `main`；本轮 P17（基线 `97c241b`；P16.1 `561cc7e`/`fc91291`；P16 `2d8c89d`/`4b4cb08`/`b83a096`）
-> 目标：单人可挖/放方块 + 服务端权威判定 + 重启不丢（自有稀疏格式落盘，Anvil 差距见 §5.4）。
+> 日期：2026-11-24；分支 `main`；本轮 P18（基线 `7a0dca7`；P17 代码 `c5c57af`/`db8f666`/`1fc0a45`/`4de7bbe`、文档 `3744455`/`7a0dca7`）
+> 目标：**掉落看得见、捡得起来、进背包看得见**（生存第一棒；窗口整理/工具等级/精准采集/经验球留后续）。
 
 ## 1. 一句话现状
 
-**P17：单人可挖/放方块，服务端权威判定，重启不丢。** 原版 26.3 客户端进 Play
-后可即时破坏方块（仿创造）与放置石头；非法操作（超距/出视距/挖空气或水/
-目标被占/点空气）服务端回滚重发原方块。世界 = WorldGen 确定性基底 +
-`MutableWorld` 稀疏 override；编辑后 ChunkCache 对应 chunk 失效，
-本人视角与走远走回（add=21/remove=21）均可见新方块。存档为自有稀疏格式
-`world/overrides-<seed>.dat`（31B/1 方块起），60s 周期 / 断线即刷 / 退出全量刷；
-真机杀进程重启后重进，石头仍在。
+**P18：掉落看得见、捡得起来、进背包看得见。** 挖方块按掉落表生成物品实体
+（AddEntity+SetEntityData），重力下落停在支撑面（Teleport 同步），靠近 <1.5 格
+（delay 10 ticks 后）拾取（TakeItem 动画+Remove+入库+全量背包同步）；
+C2S SetHeldItem 切手持，放置按手持映射扣 1（单槽同步），未知/空手回退石头
+（P17 兼容）。背包存档 `world/player-<user>-<seed>.dat`（用户名键、seed 隔离），
+断线/拾取/放置即刷；重启重进石头与背包都在。原版 26.3 真机进服正常
+（Join 441 块 304ms 缓存命中 Rendertime 无 DecoderException，站稳 y=73 on_ground；
+真人游玩挖 17/放 12 块，放置精确扣 12 石头，无超时/tick lag）。
 
 P16.1 的能力保持：ECS 只做登录/视距诊断（`last_view_radius`/`last_view_chunks`），
 Join 附近无 tick lag（每次登录 1 条 `ready to join`）。真机默认 seed：
@@ -127,6 +128,49 @@ $natives = 'C:\Users\qwe\AppData\Local\Temp\mc263natives'
 - `world` 为 None（旧入口/单测无世界）时交互包只忽略不断线——旧行为与 Play 链路不受影响。
 - 单测：挖草/完成都破坏、挖空气·超距·出视距·y越界回滚且不加条目、cancel 只 ack、3–7/无世界忽略；
   点泥土顶放置成功、目标被占/点空气/非法face/超距回滚；socket 端到端（见 §4）。
+- P18：`BlockEditOutcome` 新增 `drops: Vec<Drop>`（仅挖掘成功时非空，回滚/cancel 为空；
+  `world.seed()` 内部取 seed 算树叶概率）。`decide_place` 签名不变，材料由调用方按手持选定。
+
+### 掉落/实体/背包（P18：生存第一棒）
+
+- 包 ID（777，已按 `docs/packet-map-777.md` §7 核对，来源 minecraft.wiki Play 包表 +
+  26.3 客户端 jar 实测）：
+  S2C SpawnEntity `0x01`（type=`minecraft:item`=72，data=0）/ SetEntityData `0x65`
+  （index 8/type Slot(7)）/ RemoveEntities `0x4E` / TeleportEntity `0x23`（线性路径，
+  掉落同步用它，不用差量基准）/ UpdateEntityPos `0x36`（step=0，实现+单测，运行时
+  优先用 0x23）/ TakeItemEntity `0x7F`（collector=LoginPlay entity_id 1）/
+  SetContainerContent `0x12`（window 0 全量 46 槽）/ SetContainerSlot `0x14`；
+  C2S SetHeldItem `0x36`（**Short** 0..=8，与 S2C `0x6B` VarInt 不同，已纠正旧文档
+  “VarInt”误写）/ ClickContainer `0x12`（只忽略，Hashed Slot 复杂留后续）。
+- 物品 ID（`BuiltInRegistries.ITEM` 实测，工具放 Temp 未提交）：
+  stone 1 / dirt 55 / cobblestone 62 / oak_sapling 77 / sand 88 / oak_log 163 /
+  coal 1010 / stick 1060 / raw_iron 1017；entity：item 72 / exp orb 50 / player 159。
+- 掉落表（`mc-world/src/drops.rs`，确定性、无随机状态；工具等级/精准采集留 TODO，
+  限制见 §5）：
+  grass/dirt→dirt(55)，stone→cobblestone(62)，sand→sand(88)，oak_log→oak_log(163)，
+  oak_leaves→1/8 sapling(77)另 1/8 stick(1060)（world+pos hash），coal_ore→coal(1010)，
+  iron_ore→raw_iron(1017)，其余无掉落。
+- 物品实体（`mc-world/src/items.rs` 纯逻辑 + `mc-network/src/drop_state.rs` 共享状态；
+  net 线程权威，ECS 无写通道，沿用 P17 模式）：
+  生成 pickup_delay=10 ticks、初速上抛 0.25+hash 水平扰动、重力 0.04/阻尼 0.98、
+  落点 `support_top_y`（生成时一次算好，tick 内不再查世界）；
+  同物品同 chunk 半径 1 格合并（上限 64，超出留新实体）；
+  6000 ticks despawn；delay 到期 + 与脚位置 <1.5 拾取；
+  entity_id 全局自增（1000 起，LoginPlay entity_id=1 不冲突，永不复用）。
+- 同步：生成 Spawn+Data（视距内才发）；每 50ms tick（读超时即跑，不改变 10s 半开语义）
+  移动发 Teleport(0x23)，despawn/出视距发 Remove；进视距补发；拾取发 TakeItem+Remove。
+  跨区块按 ChunkView 半径判定。多人只同步到触发连接（与 P17 BlockUpdate 同限制，
+  见 §5.9）。
+- 背包（`mc-world/src/inventory.rs`，46 槽：9–35 主/36–44 快捷栏/0–8 合成盔甲未用；
+  selected 0..=8 ↔ 36+selected）：
+  Join 读盘+全量 Content；拾取 add_item（同物合并→主包→快捷栏，上限 64）后全量同步；
+  放置按手持映射（`block_for_item`：stone/dirt/sand/log）选材料、成功 consume_held 扣 1
+  + 单槽同步；空手/未知物品回退石头且不扣（P17 兼容）。
+  新背包开局送 64 石头（hotbar 槽 36，后续生存模式替换）。
+  存档 `world/player-<user>-<seed>.dat`（P18I 魔数/版本/selected/state/条目，tmp+rename；
+  **键用用户名**：离线 `offline_uuid` 每次随机 v4，uuid 键重连永远 miss，见 inventory 文档；
+  在线模式落地后切回 uuid）。
+  刷盘：拾取/放置/断线即刷（net 线程，ECS 不经手）；`unload_inventory` 断线保存+释状态。
 
 ### 可变世界与存档（P17：MutableWorld + 自有稀疏格式）
 
@@ -309,7 +353,29 @@ $natives = 'C:\Users\qwe\AppData\Local\Temp\mc263natives'
 - 原版 26.3 客户端冒烟：**未完成**。本环境两次启动均停在 atlas 加载后、无连接尝试
   （服务端无 accept，客户端 stdout 只有离线 401/Realms 噪声前即停滞；与服务端无关——同期脚本客户端
   正常进服）。Join 路径与 P16.1 逐字节一致（只新增 C2S 分支与可选 mutable 编码路径，无交互时行为不变），
-  且脚本客户端已对真服务端验证完整握手/配置/Play/压缩全流程。下轮在可用显示环境补原版进服截图。
+  且脚本客户端已对真服务端验证完整握手/配置/Play/压缩全流程。**P18 已补上**（见下）。
+
+### P18 真机（掉落+拾取+背包；原版 26.3 客户端 + 脚本客户端真服务端）
+
+- **脚本客户端真服务端**（`mc-server` 二进制，默认 seed，view_distance=10，threshold=-1）：
+  Join **441 块 330ms**（P17 的 383ms 量级；P18 Join 多 1 个 Content 包，开销可忽略）；
+  挖脚下草 → `BlockUpdate(air)+Ack` + `SpawnEntity(id=1000)+SetEntityData(dirt×1)`；
+  0.5s 后（delay 10 ticks）`TakeItemEntity(collector=1)` + `RemoveEntities` +
+  全量 `SetContainerContent`（dirt 进槽 9）；切手持 1→0；点泥土顶放石头 →
+  `BlockUpdate(stone)+Ack` + `SetContainerSlot(36→63)`。
+  断线当 tick 存盘（`world saved ... on_disconnect=true`），`player-Smoke18-*.dat` 30B；
+  杀进程重启 → `world loaded ... overrides=1`，重进 Join Content 即 63 石头+1 泥土，
+  世界石头仍在。压缩链路未变（P17 已覆盖），本轮 e2e 跑明文。
+- **原版 26.3 客户端**（首次进服成功，P17 曾卡 atlas）：
+  `enter_play ... view_chunks=441` → `play join chunks sent ... count=441 elapsed_ms=304`
+  → `play join sent ... view_sent=441`；客户端渲染 chunk（Chunk Sections 扩容日志），
+  无 `DecoderException`、无 `Timed out while waiting for the client to load chunks`；
+  站稳 `y=73.0, on_ground=true`，移动包约 1s 一包、KeepAlive 正常；**P18 Join 新增的
+  Content 包被原版接受**（进 Play 链路未破）。
+  真人游玩约 3 分钟：挖 17 块（草/泥土 9/10→0）+ 放 12 块石头（0→1），服务端精确扣
+  12 石头（64→52，`player-ProbePlayer-*.dat` 21B），不断线、无报错、无 tick lag。
+  掉落物拾取的“可见动画”由脚本 e2e 覆盖（真人未做砍树/跟随拾取，留手动复验）。
+- 客户端日志只有离线模式预期的 authlib/Realms 401，无区块加载超时/解码错误。
 
 ### 动态区块真机（P13）
 
@@ -320,8 +386,9 @@ $natives = 'C:\Users\qwe\AppData\Local\Temp\mc263natives'
 
 ### 本地检查
 
-- `cargo test --workspace`：全部通过（184 个测试；P16.1 的 156 + P17 新增 28：
-  play_block 8、mutable 10、cache 失效 1、decide 判定 5、persist 3、socket 端到端 1）。
+- `cargo test --workspace`：全部通过（215 个测试；P17 的 184 + P18 新增 31：
+  play_entity 11、drops 3、items 6、inventory 5、mutable support_top 1、drop_state 3、
+  decide 掉落 1、socket 端到端 1）。
 - `cargo check --workspace --tests`：0 error。
 - `scripts/check_budget.sh`（Windows 用 `C:\Program Files\Git\bin\bash.exe`）：通过（src ≤2000 行软约束）。
 
@@ -339,10 +406,12 @@ $natives = 'C:\Users\qwe\AppData\Local\Temp\mc263natives'
    下轮补真 Anvil 时：读 `r.<rx>.<rz>.mca`（Region 头 + zlib NBT），写 Sections 的 block_states/biomes
    palette + MOTION_BLOCKING 高度图 + 空 block_entities；自有格式文件届时做一次性迁移或废弃。
    `save/load.rs` 的旧 `Chunk` 占位格式未动，与本存档无关。
-5. **放置材料固定为石头**：`Set Held Item 0x36` / `Set Creative Mode Slot 0x39` 暂不解析
-   （Slot 的 data component 需注册表驱动解码，误解析会错位整条 TCP 流），服务端无条件放
-   `DEFAULT_PLACE_BLOCK_ID = stone(1)`；`is_placeable` allowlist 有石头/泥土/草/橡木原木/沙子，
-   待背包跟踪接上后按手持选择。创造/生存都按即时破坏处理（生存按住挖会触发两次：start 已破坏，
+5. **放置按手持映射（P18 半步）**：`Set Held Item 0x36` 已按 Short 解析切手持
+   （`Set Creative Mode Slot 0x39` 仍忽略，data component 需注册表驱动解码）；
+   放置材料 = 手持物品映射（stone/dirt/sand/oak_log→对应方块）+ 成功扣 1，
+   空手/未知物品回退石头且不扣（P17 兼容）；cobblestone 等无对应方块的掉落物暂不可放。
+   新背包开局送 64 石头（后续生存模式/创造背包替换）。
+   创造/生存都按即时破坏处理（生存按住挖会触发两次：start 已破坏，
    finish 命中空气回滚重发空气，无副作用）。
 6. **跨区块仍是即时整批**：单轴 `2r+1` 块、斜跨最多 `4r+1` 块一次写完，没有每 tick pending 队列/发送限流；r=10 时单次最多 41 块，真机未出现写阻塞或超时。
 6. **地形/水/树仍是最小实现**：
@@ -354,8 +423,15 @@ $natives = 'C:\Users\qwe\AppData\Local\Temp\mc263natives'
    - 矿物只有 coal/iron，只在 stone 中替换；没有铜/金/红石/钻石，也没有矿洞光照。
 7. **压缩只有阈值可配**：zlib level 固定 6；没有压缩统计/限流；`threshold=0` 会让所有包压缩（仅单测覆盖，未做真机）。
 8. `mc-registry` 的 216 项占位表仍是旧数据；区块直接用 `mc-world` 常量，未走该表。
-9. **多人同步缺失**：编辑只回包给操作者本人（单连接单 socket）；其它视距内玩家收不到 BlockUpdate，
-   需走远重进或等 chunk 重发才能看到。掉落物/挖掘动画阶段（`Set Block Destroy Stage 0x05`）未发。
+9. **多人同步缺失**：编辑/掉落只回包给操作者本人（单连接单 socket）；
+   其它视距内玩家收不到 BlockUpdate/Spawn，需走远重进或等 chunk 重发才能看到
+   （实体进视距补发只针对本连接的 known 集）。掉落物挖掘动画阶段
+   （`Set Block Destroy Stage 0x05`）未发。未来 socket→ECS（per-player 写通道）后做广播。
+10. **P18 剩余（生存完整版）**：窗口点击整理（ClickContainer 只忽略，整理留后续）；
+   工具等级/精准采集（掉落无视工具，TODO）；经验球（entity 50，不生成不拾取）；
+   创造/生存模式切换（全按即时破坏+开局石头）；背包键为用户名（离线 uuid 随机，
+   在线模式落地后切回 uuid，见 inventory 文档）；实体 UUID 为 id 派生（非随机，
+   客户端仅 warn，不影响）；掉落落地高度生成时一次算好（下方被挖会悬空，TODO 重算）。
 
 ## 6. 关键文件
 
@@ -366,20 +442,25 @@ crates/mc-protocol/src/packets/
   data/vanilla_config_777/   抓包二进制（33 个文件，约 216KB）
   block_tags_777.rs          300 个 block tag / 14825 项的回归数据
   play_chunk.rs              SetCenter/ChunkData/GameEvent/Batch/Unload（0x26 packed i64）
-  play_block.rs              挖掘/放置 C2S（0x29/0x42/0x43/0x2E）+ BlockUpdate 0x08/Ack 0x04 + Position pack/unpack
+  play_block.rs              挖掘/放置 C2S（0x29/0x42/0x43/0x2E）+ BlockUpdate 0x08/Ack 0x04 + Position pack/unpack + P18 ClickContainer 0x12 常量
+  play_entity.rs             P18 掉落/背包包：Spawn 0x01/SetData 0x65/Remove 0x4E/Teleport 0x23/PosDelta 0x36/TakeItem 0x7F/Content 0x12/SlotPkt 0x14 + Slot/LpVec3/元数据编解码 + C2S SetHeld Short 解析
   play_login.rs              LoginPlay 777 布局 + 抓包往返测试
   play_sync.rs               PlayerPositionSync/KeepAlive/C2S 移动包
   data/*_777.bin             LoginPlay / PositionSync / UpdateTags 抓包
 crates/mc-network/src/
-  login_route.rs             PlayOptions（+mutable_world）、发送序列、`(2r+1)^2` 块、KeepAlive/动态区块/移动/Disconnect 事件、P17 decide_dig/decide_place + BlockUpdate/Ack 即时回包
+  login_route.rs             PlayOptions（+mutable_world/+drops）、发送序列、`(2r+1)^2` 块、KeepAlive/动态区块/移动/Disconnect 事件、P17 decide_dig/decide_place（+P18 drops 带出）+ BlockUpdate/Ack 即时回包 + P18 掉落生成/50ms tick/拾取/背包同步接线
+  drop_state.rs              P18 DropState：ItemEntities + conn_id→背包 + entity_id 自增 + known 视距集 + 用户名键存档
   chunk_view.rs              clamp_view_radius/view_chunk_count、per-connection 视距集合/去重/跨区块 add/remove 规划
   chunk_cache.rs             共享已编码 ChunkData 0x2E 包体缓存（Mutex+HashMap+FIFO，默认 1024；`bodies` rayon 并行批量；P17 `with_mutable` + `invalidate`）
   play_events.rs             net 线程 → ECS 的移动/KeepAlive/Disconnect/BlockEdit 事件（conn_id 实体键）
-  config.rs                  NetConfig（视距/压缩阈值/seed/Play 事件通道/ChunkCache/MutableWorld）
+  config.rs                  NetConfig（视距/压缩阈值/seed/Play 事件通道/ChunkCache/MutableWorld/DropState）
   framing.rs                 VarInt 帧 + zlib 压缩帧 + 阈值边界
-crates/mc-network/tests/play_stream.rs   移动事件/压缩配置/seed 透传/视距 2/4 初始块与跨区块批次/P17 挖放端到端集成测试
+crates/mc-network/tests/play_stream.rs   移动事件/压缩配置/seed 透传/视距 2/4 初始块与跨区块批次/P17 挖放端到端/P18 挖→掉落→拾取→背包→放置扣减→存档端到端集成测试
 crates/mc-world/src/
-  mutable.rs                 MutableWorld（基底 + 稀疏 override + dirty）+ 自有稀疏存档读/写 + 出生点抬升
+  mutable.rs                 MutableWorld（基底 + 稀疏 override + dirty）+ 自有稀疏存档读/写 + 出生点抬升 + P18 support_top_y
+  drops.rs                   P18 确定性掉落表 + item ID 常量 + 手持→方块映射
+  items.rs                   P18 物品实体纯逻辑（生成/合并/重力/拾取/despawn/视距过滤）
+  inventory.rs               P18 背包（46 槽/手持/合并/扣减）+ `player-<user>-<seed>.dat` 存档
   worldgen/
     mod.rs                   WorldGen、高度/出生保护/biome/洞穴/矿/树、跨 chunk 扫描
     noise.rs                 2D/3D 平滑 value noise + 确定性 hash
@@ -388,11 +469,12 @@ crates/mc-world/src/
 crates/mc-world/src/lib.rs             SPAWN_BLOCK_X/Z、方块 ID 常量、PLACEABLE allowlist、旧 Chunk/save 占位、palette/heightmap/light
 crates/mc-server/src/
   config.rs                  ServerConfig.seed/compression_threshold/view_distance/world_dir + effective_view_distance()
+  main.rs                    P18 DropState 创建 + NetConfig 注入（world_dir 同目录、seed 隔离）
   systems.rs                 NewConnection(addr,conn_id) → ECS 玩家实体（SharedWorld 出生点优先，重复 conn_id 幂等）
   movement.rs                PlayEvent 排空 + MovementQueue/Position/KeepAlive + PendingPlayerRemoval 唯一删除点（+BlockEdit 日志臂）
   play.rs                    ECS PlayScaffold：登录队列 + `last_view_radius/chunks` 诊断 + KeepAlive 计数（P16.1 无区块生成/编码；socket 未接入）
   persist.rs                 autosave_system（60s 周期/断线即刷；必须排在 player_removal 之前）+ SharedWorld/WorldSaveDir
-docs/packet-map-777.md                 777 包 ID 对照表（权威；§6 新增挖掘/放置 9 个 ID）
+docs/packet-map-777.md                 777 包 ID 对照表（权威；§6 挖掘/放置 9 个 ID；§7 P18 掉落/背包 10 个 ID + 物品/实体 ID 表）
 docs/registries-777.md                 注册表清单
 ```
 
@@ -406,7 +488,8 @@ bash scripts/check_budget.sh     # Windows 可用 C:\Program Files\Git\bin\bash.
 
 ## 8. Git 状态 / 提交注意
 
-- 当前分支 `main`；P17 代码 `c5c57af`/`db8f666`/`1fc0a45`/`4de7bbe`、文档 `3744455`（基线 `97c241b`）；P16.1 代码 `561cc7e`、文档 `fc91291`；P16 代码 `2d8c89d`、文档 `4b4cb08`/`b83a096`（基线 `ceec052`）；P15 代码 `7f44b20`、文档 `0df9b40`（基线 `12bdaa4`）；P14 `1e47e69`/`12bdaa4`（基线 `c3bd992`）；P13 `02d31ee`/`0aaf8ed`。
+- 当前分支 `main`；P18 代码（待填）/基线 `7a0dca7`；P17 代码 `c5c57af`/`db8f666`/`1fc0a45`/`4de7bbe`、文档 `3744455`/`7a0dca7`（基线 `97c241b`）；P16.1 代码 `561cc7e`、文档 `fc91291`；P16 代码 `2d8c89d`、文档 `4b4cb08`/`b83a096`（基线 `ceec052`）；P15 代码 `7f44b20`、文档 `0df9b40`（基线 `12bdaa4`）；P14 `1e47e69`/`12bdaa4`（基线 `c3bd992`）；P13 `02d31ee`/`0aaf8ed`。
+- P18 注意：`DropState` 进 `NetConfig`/`PlayOptions`（`handshake_route` 透传）；`decide_*` 仍在 net 线程（ECS 无写通道，实体/背包同步同理，见 §5.1）；50ms tick 是读超时驱动，不改变 10s 半开语义；背包键用用户名（离线 uuid 随机，见 §5.10）；临时 Java 实测工具/冒烟 ps1/测试世界只放 Temp、不提交；冒烟服 `C:\Users\qwe\AppData\Local\Temp\p18smoke` 不在仓库。
 - P17 注意：`autosave_system` 必须排在 `player_removal_system` 之前（断线登记靠 `PendingPlayerRemoval` 非空触发，唯一删除点会 drain 它）；`decide_*` 在 net 线程做判定是刻意设计（ECS 无写通道），见 §5.1；脚本客户端 `live_edit.py` 只放 Temp、不提交。
 - P16.1 注意：ECS `PlayScaffold` 已不再生成/编码区块；`ready to join` 每次登录 1 条，`chunk data (...)` 脚手架日志和 `tick lag` 已消失。未来 socket→ECS 时用 per-player 写通道 + `ChunkView`，不要恢复全量生成脚手架。
 - P16 注意：`crates/mc-world/src/worldgen.rs` 已拆成 `worldgen/{mod,noise,encode,tests}.rs`；新增 `rayon` 到 `mc-network`（workspace 依赖，`Cargo.lock` 无版本变化）；临时 seed 搜索程序/截图均在 `logs/`/Temp，未提交。
