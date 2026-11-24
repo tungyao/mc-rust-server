@@ -49,13 +49,16 @@ fn main() {
         mc_network::ChunkCache::new(cfg.seed, mc_network::DEFAULT_CHUNK_CACHE_CAPACITY)
             .with_mutable(Arc::clone(&mutable)),
     );
+    // P18 掉落物实体 + 背包：net 线程共享状态（存档与 overrides 同目录、seed 隔离）。
+    let drop_state = std::sync::Arc::new(mc_network::DropState::new(world_dir.clone().into(), cfg.seed));
     let net_config = mc_network::NetConfig::new(cfg.max_players, cfg.motd.clone(), Arc::clone(&online.0))
         .with_view_distance(cfg.view_distance)
         .with_seed(cfg.seed)
         .with_compression_threshold(cfg.compression_threshold)
         .with_play_events(play_tx)
         .with_chunk_cache(chunk_cache)
-        .with_mutable_world(Arc::clone(&mutable));
+        .with_mutable_world(Arc::clone(&mutable))
+        .with_drops(Arc::clone(&drop_state));
     info!(
         "config view_distance={} effective_view_radius={} seed={} compression_threshold={}",
         cfg.view_distance, cfg.effective_view_distance(), cfg.seed, cfg.compression_threshold

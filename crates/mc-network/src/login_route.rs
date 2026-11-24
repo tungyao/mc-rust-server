@@ -5,6 +5,7 @@
 //! 区块包体优先走共享 `ChunkCache`；连接结束在所有退出路径恰好投递一次 Disconnect。
 use super::chunk_cache::{encode_chunk_data_body, encode_chunk_data_body_mutable, ChunkCache};
 use super::chunk_view::{clamp_view_radius, view_chunk_count, ChunkView, PLAY_VIEW_RADIUS};
+use super::drop_state::{DropState, PLAYER_ENTITY_ID};
 use super::framing::{read_packet, read_packet_framed, to_io_invalid, write_packet, write_packet_framed};
 use super::play_events::PlayEvent;
 use crossbeam_channel::Sender;
@@ -39,6 +40,8 @@ pub struct PlayOptions {
     pub chunk_cache: Option<Arc<ChunkCache>>,
     /// 服务端权威可变世界（P17 挖掘/放置）；None 时方块交互包只忽略不断线。
     pub mutable_world: Option<Arc<MutableWorld>>,
+    /// 掉落物实体 + 背包共享状态（P18）；None 时挖/放不掉落不同步（旧行为）。
+    pub drops: Option<Arc<DropState>>,
 }
 
 impl PlayOptions {
@@ -51,6 +54,7 @@ impl PlayOptions {
             events: None,
             chunk_cache: None,
             mutable_world: None,
+            drops: None,
         }
     }
 
@@ -76,6 +80,11 @@ impl PlayOptions {
 
     pub fn with_mutable_world(mut self, world: Arc<MutableWorld>) -> Self {
         self.mutable_world = Some(world);
+        self
+    }
+
+    pub fn with_drops(mut self, drops: Arc<DropState>) -> Self {
+        self.drops = Some(drops);
         self
     }
 }
@@ -302,6 +311,10 @@ pub async fn enter_play_with_options(
     let conn_id = opts.conn_id;
     let events = opts.events.clone();
     let result = enter_play_inner(&mut stream, addr, &profile, &opts).await;
+    // P18 背包刷盘：断线时落盘 + 释放连接状态（seed 隔离，缺文件下次按新背包开局）。
+    if let Some(drops) = &opts.drops {
+        drops.unload_inventory(conn_id, &user_tag(&profile));
+    }
     // 正常 EOF / 读错误 / 写失败 / KeepAlive 超时 / Join 序列失败全部走这里，
     // 只发一次 Disconnect。ECS 按 conn_id 立即 despawn，与 15s timeout 去重。
     emit_play_event(&events, PlayEvent::Disconnect { addr, conn_id });
@@ -361,7 +374,23 @@ async fn enter_play_inner(
         spawn.1,
         spawn.2
     );
+    // P18 背包 Join 同步（读盘/开局 + 全量 Content），失败不阻断进服。
+    send_join_inventory(stream, profile, opts).await;
     play_loop(stream, addr, profile, opts, keepalive_id, view, &world, cache, mutable).await
+}
+
+/// P18 Join 背包同步：读盘（缺文件=新背包+石头开局）→ 全量 Content。
+/// 失败只记 debug，不阻断 Join（背包下次拾取/重进再同步）。
+async fn send_join_inventory(
+    stream: &mut TcpStream,
+    profile: &mc_core::PlayerProfile,
+    opts: &PlayOptions,
+) {
+    let Some(drops) = &opts.drops else { return };
+    drops.load_inventory(opts.conn_id, &user_tag(profile));
+    if let Err(e) = send_full_inventory(stream, opts, drops).await {
+        debug!("play uuid={} join inventory send failed ({e})", profile.uuid);
+    }
 }
 
 /// 压缩感知写包：threshold>=0 走压缩帧，否则普通帧。
@@ -529,11 +558,13 @@ pub struct BlockChange {
     pub new_id: u16,
 }
 
-/// 权威判定结果：ack 序列号 + 要下发的 BlockUpdate 列表（空 = 只 ack）。
+/// 权威判定结果：ack 序列号 + 要下发的 BlockUpdate 列表（空 = 只 ack）+
+/// P18 掉落（仅挖掘成功时非空，调用方负责生成物品实体）。
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct BlockEditOutcome {
     pub sequence: i32,
     pub changes: Vec<BlockChange>,
+    pub drops: Vec<mc_world::Drop>,
 }
 
 fn eye_of(pos: (f64, f64, f64)) -> (f64, f64, f64) {
@@ -582,6 +613,7 @@ pub fn decide_dig(
                 return Some(BlockEditOutcome {
                     sequence: act.sequence,
                     changes: vec![rollback(world, x, y, z)],
+                    drops: Vec::new(),
                 });
             }
             let cur = world.get(x, y, z);
@@ -589,16 +621,19 @@ pub fn decide_dig(
                 return Some(BlockEditOutcome {
                     sequence: act.sequence,
                     changes: vec![BlockChange { x, y, z, old_id: cur, new_id: cur }],
+                    drops: Vec::new(),
                 });
             }
             let old = world.set(x, y, z, mc_world::AIR_BLOCK_ID);
+            let drops = mc_world::drops_for_block(old, x, y, z, world.seed());
             Some(BlockEditOutcome {
                 sequence: act.sequence,
                 changes: vec![BlockChange { x, y, z, old_id: old, new_id: mc_world::AIR_BLOCK_ID }],
+                drops,
             })
         }
         packets::PLAYER_ACTION_CANCEL_DIG => {
-            Some(BlockEditOutcome { sequence: act.sequence, changes: Vec::new() })
+            Some(BlockEditOutcome { sequence: act.sequence, changes: Vec::new(), drops: Vec::new() })
         }
         _ => None,
     }
@@ -618,7 +653,7 @@ pub fn decide_place(
     let world = world?;
     let face = i8::try_from(act.face).ok().and_then(packets::face_offset);
     let Some((dx, dy, dz)) = face else {
-        return Some(BlockEditOutcome { sequence: act.sequence, changes: Vec::new() });
+        return Some(BlockEditOutcome { sequence: act.sequence, changes: Vec::new(), drops: Vec::new() });
     };
     let (tx, ty, tz) = (act.x + dx, act.y + dy, act.z + dz);
     if !(mc_world::MIN_Y..=mc_world::WORLD_TOP_Y).contains(&act.y)
@@ -630,6 +665,7 @@ pub fn decide_place(
         return Some(BlockEditOutcome {
             sequence: act.sequence,
             changes: vec![rollback(world, tx, ty, tz)],
+            drops: Vec::new(),
         });
     }
     let clicked = world.get(act.x, act.y, act.z);
@@ -637,6 +673,7 @@ pub fn decide_place(
         return Some(BlockEditOutcome {
             sequence: act.sequence,
             changes: vec![rollback(world, tx, ty, tz)],
+            drops: Vec::new(),
         });
     }
     let cur = world.get(tx, ty, tz);
@@ -644,12 +681,14 @@ pub fn decide_place(
         return Some(BlockEditOutcome {
             sequence: act.sequence,
             changes: vec![BlockChange { x: tx, y: ty, z: tz, old_id: cur, new_id: cur }],
+            drops: Vec::new(),
         });
     }
     let old = world.set(tx, ty, tz, place_id);
     Some(BlockEditOutcome {
         sequence: act.sequence,
         changes: vec![BlockChange { x: tx, y: ty, z: tz, old_id: old, new_id: place_id }],
+        drops: Vec::new(),
     })
 }
 
@@ -693,6 +732,319 @@ async fn apply_block_outcome(
     let mut ack = Vec::new();
     mc_protocol::write_varint(outcome.sequence, &mut ack);
     write_packet_any(stream, packets::PLAY_BLOCK_CHANGED_ACK_S2C_ID, &ack, opts.threshold).await
+}
+
+// ---------------------------------------------------------------------------
+// P18 掉落物 + 背包（服务端权威，net 线程即时同步；ECS 无写通道，见模块文档）。
+//
+// - 生成：decide_dig 的 drops → alloc id → support_top_y 落点 → ItemEntities::spawn
+//   → Spawn(0x01)+SetEntityData(0x65) 发给本连接（视距内才发）。
+// - 下落：play_loop 每 50ms tick 一次（read 超时即 tick，不改变 10s 半开超时语义），
+//   移动过的实体发 Teleport(0x23)；despawn/出视距发 Remove(0x4E)。
+// - 拾取：delay 到期 + 与脚位置 <1.5 → TakeItem(0x7F)+Remove，入库，全量 Content 同步。
+// - 背包：Join 全量 Content；放置成功 consume_held + 单槽 Slot 同步；C2S 0x36 切手持。
+// - ClickContainer(0x12)/CreativeSlot(0x39) 只忽略（Hashed Slot 复杂，留后续）。
+// ---------------------------------------------------------------------------
+
+/// 实体的视距判定（切比雪夫，与 ChunkView 同口径）。
+fn drop_in_view(center: mc_core::ChunkPos, radius: i32, chunk: mc_core::ChunkPos) -> bool {
+    (chunk.0 - center.0).abs() <= radius && (chunk.1 - center.1).abs() <= radius
+}
+
+/// 存档键：稳定用户名（离线 uuid 随机，见 inventory 文档）。
+fn user_tag(profile: &mc_core::PlayerProfile) -> String {
+    profile.username.clone()
+}
+
+async fn send_spawn(
+    stream: &mut TcpStream,
+    opts: &PlayOptions,
+    drops: &DropState,
+    id: i32,
+) -> io::Result<()> {
+    let snap = {
+        let items = drops.items.lock().unwrap_or_else(|p| p.into_inner());
+        items.get(id).map(|e| (e.id, e.uuid, e.pos, e.item_id, e.count))
+    };
+    let Some((id, uuid, (x, y, z), item_id, count)) = snap else { return Ok(()) };
+    let mut body = Vec::new();
+    packets::SpawnItemEntity {
+        entity_id: id,
+        uuid,
+        x,
+        y,
+        z,
+        vel: packets::LpVec3::zero(),
+        pitch: 0,
+        yaw: 0,
+        head_yaw: 0,
+    }
+    .encode_body(&mut body);
+    write_packet_any(stream, packets::PLAY_SPAWN_ENTITY_S2C_ID, &body, opts.threshold).await?;
+    let mut body = Vec::new();
+    packets::ItemEntityData {
+        entity_id: id,
+        slot: packets::Slot { count, item_id },
+    }
+    .encode_body(&mut body);
+    write_packet_any(stream, packets::PLAY_SET_ENTITY_DATA_S2C_ID, &body, opts.threshold).await?;
+    drops.mark_known(opts.conn_id, id);
+    Ok(())
+}
+
+async fn send_data(
+    stream: &mut TcpStream,
+    opts: &PlayOptions,
+    drops: &DropState,
+    id: i32,
+) -> io::Result<()> {
+    let snap = {
+        let items = drops.items.lock().unwrap_or_else(|p| p.into_inner());
+        items.get(id).map(|e| (e.id, e.item_id, e.count))
+    };
+    let Some((id, item_id, count)) = snap else { return Ok(()) };
+    let mut body = Vec::new();
+    packets::ItemEntityData {
+        entity_id: id,
+        slot: packets::Slot { count, item_id },
+    }
+    .encode_body(&mut body);
+    write_packet_any(stream, packets::PLAY_SET_ENTITY_DATA_S2C_ID, &body, opts.threshold).await
+}
+
+async fn send_teleport(
+    stream: &mut TcpStream,
+    opts: &PlayOptions,
+    id: i32,
+    pos: (f64, f64, f64),
+    on_ground: bool,
+) -> io::Result<()> {
+    let mut body = Vec::new();
+    packets::TeleportEntitySync {
+        entity_id: id,
+        x: pos.0,
+        y: pos.1,
+        z: pos.2,
+        yaw: 0.0,
+        pitch: 0.0,
+        on_ground,
+    }
+    .encode_body(&mut body);
+    write_packet_any(stream, packets::PLAY_TELEPORT_ENTITY_S2C_ID, &body, opts.threshold).await
+}
+
+async fn send_remove(
+    stream: &mut TcpStream,
+    opts: &PlayOptions,
+    drops: &DropState,
+    ids: &[i32],
+) -> io::Result<()> {
+    if ids.is_empty() {
+        return Ok(());
+    }
+    let mut body = Vec::new();
+    packets::RemoveEntities { ids: ids.to_vec() }.encode_body(&mut body);
+    write_packet_any(stream, packets::PLAY_REMOVE_ENTITIES_S2C_ID, &body, opts.threshold).await?;
+    for id in ids {
+        drops.unmark_known(opts.conn_id, *id);
+    }
+    Ok(())
+}
+
+/// 全量背包同步（Join/拾取后）。
+async fn send_full_inventory(
+    stream: &mut TcpStream,
+    opts: &PlayOptions,
+    drops: &DropState,
+) -> io::Result<()> {
+    let (slots, state) = drops
+        .with_inventory(opts.conn_id, |inv| (inv.to_protocol_slots(), inv.next_state()))
+        .unwrap_or_else(|| (vec![packets::Slot::empty(); packets::PLAYER_INVENTORY_SLOT_COUNT], 1));
+    let mut body = Vec::new();
+    packets::SetContainerContent {
+        window_id: packets::PLAYER_INVENTORY_WINDOW_ID,
+        state_id: state,
+        slots,
+        carried: packets::Slot::empty(),
+    }
+    .encode_body(&mut body);
+    write_packet_any(stream, packets::PLAY_SET_CONTAINER_CONTENT_S2C_ID, &body, opts.threshold)
+        .await
+}
+
+/// 单槽同步（放置消耗后）。
+async fn send_held_slot(
+    stream: &mut TcpStream,
+    opts: &PlayOptions,
+    drops: &DropState,
+) -> io::Result<()> {
+    let Some((idx, slot, state)) = drops.with_inventory(opts.conn_id, |inv| {
+        let idx = inv.selected_slot_index();
+        (idx, inv.protocol_slot(idx), inv.next_state())
+    }) else {
+        return Ok(());
+    };
+    let mut body = Vec::new();
+    packets::SetContainerSlot {
+        window_id: packets::PLAYER_INVENTORY_WINDOW_ID,
+        state_id: state,
+        slot: idx as i16,
+        data: slot,
+    }
+    .encode_body(&mut body);
+    write_packet_any(stream, packets::PLAY_SET_CONTAINER_SLOT_S2C_ID, &body, opts.threshold).await
+}
+
+/// 挖掘掉落生成：每种 drop 一个实体（同位合并由 ItemEntities 处理）。
+async fn spawn_drops(
+    stream: &mut TcpStream,
+    opts: &PlayOptions,
+    drops: &DropState,
+    world: &MutableWorld,
+    outcome: &BlockEditOutcome,
+    view: &ChunkView,
+) -> io::Result<()> {
+    if outcome.drops.is_empty() || outcome.changes.is_empty() {
+        return Ok(());
+    }
+    let (bx, by, bz) = {
+        let c = &outcome.changes[0];
+        (c.x, c.y, c.z)
+    };
+    for d in &outcome.drops {
+        let id = drops.alloc_id();
+        let rest = world.support_top_y(bx, bz) as f64;
+        let touched = {
+            let mut items = drops.items.lock().unwrap_or_else(|p| p.into_inner());
+            match items.spawn(
+                id,
+                d.item_id,
+                d.count,
+                bx as f64 + 0.5,
+                by as f64 + 0.5,
+                bz as f64 + 0.5,
+                rest,
+            ) {
+                Ok(t) => t,
+                Err(e) => {
+                    debug!("drop spawn failed id={id} ({e})");
+                    continue;
+                }
+            }
+        };
+        for tid in touched {
+            let in_view_now = {
+                let items = drops.items.lock().unwrap_or_else(|p| p.into_inner());
+                items.get(tid).map(|e| drop_in_view(view.center(), view.radius(), e.chunk))
+            };
+            let Some(in_view_now) = in_view_now else { continue };
+            if !in_view_now {
+                continue;
+            }
+            if tid == id {
+                send_spawn(stream, opts, drops, tid).await?;
+            } else if drops.is_known(opts.conn_id, tid) {
+                send_data(stream, opts, drops, tid).await?;
+            } else {
+                send_spawn(stream, opts, drops, tid).await?;
+            }
+        }
+    }
+    Ok(())
+}
+
+/// 每 50ms tick：下落同步 + despawn + 拾取 + 入库同步。
+async fn tick_drops(
+    stream: &mut TcpStream,
+    opts: &PlayOptions,
+    drops: &DropState,
+    conn_user: &str,
+    last_pos: (f64, f64, f64),
+    view: &ChunkView,
+) -> io::Result<()> {
+    let (moved, dead) = {
+        let mut items = drops.items.lock().unwrap_or_else(|p| p.into_inner());
+        items.tick()
+    };
+    // 移动同步：视距内发 Teleport（未见过则补发 Spawn）；known 但已出视距发 Remove。
+    for id in moved {
+        let snap = {
+            let items = drops.items.lock().unwrap_or_else(|p| p.into_inner());
+            items.get(id).map(|e| (e.pos, e.on_ground, e.chunk))
+        };
+        let Some((pos, on_ground, chunk)) = snap else { continue };
+        if drop_in_view(view.center(), view.radius(), chunk) {
+            if !drops.is_known(opts.conn_id, id) {
+                send_spawn(stream, opts, drops, id).await?;
+            } else {
+                send_teleport(stream, opts, id, pos, on_ground).await?;
+            }
+        } else if drops.is_known(opts.conn_id, id) {
+            send_remove(stream, opts, drops, &[id]).await?;
+        }
+    }
+    // despawn：known 的发 Remove。
+    {
+        let gone: Vec<i32> = dead.into_iter().filter(|id| drops.is_known(opts.conn_id, *id)).collect();
+        send_remove(stream, opts, drops, &gone).await?;
+    }
+    // 拾取：delay 到期 + 距离 <1.5 → TakeItem+Remove，入库，全量同步 + 刷盘。
+    let picked: Vec<(i32, i32, i32)> = {
+        let mut items = drops.items.lock().unwrap_or_else(|p| p.into_inner());
+        let ids = items.pickable(last_pos);
+        let mut out = Vec::new();
+        for id in ids {
+            if let Some(e) = items.remove(id) {
+                out.push((id, e.item_id, e.count));
+            }
+        }
+        out
+    };
+    if picked.is_empty() {
+        return Ok(());
+    }
+    for (id, _, count) in &picked {
+        let mut body = Vec::new();
+        packets::TakeItemEntity { collected_id: *id, collector_id: PLAYER_ENTITY_ID, count: *count }
+            .encode_body(&mut body);
+        write_packet_any(stream, packets::PLAY_PICKUP_ITEM_S2C_ID, &body, opts.threshold).await?;
+    }
+    let gone: Vec<i32> = picked.iter().map(|(id, _, _)| *id).collect();
+    send_remove(stream, opts, drops, &gone).await?;
+    for (_, item_id, count) in picked {
+        drops.with_inventory(opts.conn_id, |inv| {
+            inv.add_item(item_id, count);
+        });
+    }
+    send_full_inventory(stream, opts, drops).await?;
+    drops.save_inventory(opts.conn_id, conn_user);
+    Ok(())
+}
+
+/// 视距变化时补/卸实体：出视距的发 Remove，进视距的补发 Spawn。
+async fn sync_view_entities(
+    stream: &mut TcpStream,
+    opts: &PlayOptions,
+    drops: &DropState,
+    view: &ChunkView,
+) -> io::Result<()> {
+    let snap: Vec<(i32, mc_core::ChunkPos)> = {
+        let items = drops.items.lock().unwrap_or_else(|p| p.into_inner());
+        items.ids().iter().filter_map(|id| items.get(*id).map(|e| (*id, e.chunk))).collect()
+    };
+    let mut gone = Vec::new();
+    for (id, chunk) in &snap {
+        if !drop_in_view(view.center(), view.radius(), *chunk) && drops.is_known(opts.conn_id, *id) {
+            gone.push(*id);
+        }
+    }
+    send_remove(stream, opts, drops, &gone).await?;
+    for (id, chunk) in &snap {
+        if drop_in_view(view.center(), view.radius(), *chunk) && !drops.is_known(opts.conn_id, *id) {
+            send_spawn(stream, opts, drops, *id).await?;
+        }
+    }
+    Ok(())
 }
 
 /// 玩家跨区块：SetCenterChunk → 卸载越界区块 → 一批补发缺失区块（batch_size = add.len）。
@@ -758,8 +1110,26 @@ async fn play_loop(
     // 客户端在 Play 里每 tick 都发 0x0D，read_packet 不会超时；必须按时间主动发 KeepAlive，
     // 否则客户端 30s 收不到 0x2D 会 “连接超时” 断开（2026-11-23 真机实测）。
     let mut last_keepalive = Instant::now();
+    let conn_user = user_tag(profile);
     loop {
-        let next = read_packet_any(stream, threshold).await;
+        // P18 掉落 tick：50ms 读超时即跑一次物理/拾取（不改变 10s 半开超时语义）。
+        let next = match tokio::time::timeout(
+            Duration::from_millis(50),
+            read_packet_any(stream, threshold),
+        )
+        .await
+        {
+            Err(_) => {
+                if let (Some(ds), Some(_)) = (&opts.drops, mutable) {
+                    if let Err(e) = tick_drops(stream, opts, ds, &conn_user, last_pos, &view).await {
+                        debug!("play uuid={} drop tick failed ({e}), closing", profile.uuid);
+                        break;
+                    }
+                }
+                continue;
+            }
+            Ok(r) => r,
+        };
         if last_keepalive.elapsed() >= Duration::from_secs(15) {
             seq += 1;
             let mut body = Vec::new();
@@ -802,12 +1172,24 @@ async fn play_loop(
                                     debug!("play uuid={} view move failed ({e}), closing", profile.uuid);
                                     break;
                                 }
+                                if let Some(ds) = &opts.drops {
+                                    if let Err(e) = sync_view_entities(stream, opts, ds, &view).await {
+                                        debug!("play uuid={} view entity sync failed ({e}), closing", profile.uuid);
+                                        break;
+                                    }
+                                }
                             }
                             packets::C2SMovement::PosRot(p) => {
                                 last_pos = (p.x, p.y, p.z);
                                 if let Err(e) = maybe_move_view(stream, profile, opts, &mut view, world, p.x, p.z, cache, mutable).await {
                                     debug!("play uuid={} view move failed ({e}), closing", profile.uuid);
                                     break;
+                                }
+                                if let Some(ds) = &opts.drops {
+                                    if let Err(e) = sync_view_entities(stream, opts, ds, &view).await {
+                                        debug!("play uuid={} view entity sync failed ({e}), closing", profile.uuid);
+                                        break;
+                                    }
                                 }
                             }
                             _ => {}
@@ -822,6 +1204,7 @@ async fn play_loop(
             }
             Ok((id, payload)) if id == packets::PLAY_PLAYER_ACTION_C2S_ID => {
                 // P17 挖掘：服务端权威判定 + 即时落子 + BlockUpdate/Ack 回包。
+                // P18：成功掉落同步生成物品实体（视距内 Spawn+Data）。
                 match packets::PlayerAction::decode_body(&payload) {
                     Ok((act, _)) => {
                         if let Some(outcome) = decide_dig(
@@ -831,12 +1214,20 @@ async fn play_loop(
                             view.radius(),
                             &act,
                         ) {
-                            if let Some(_world) = mutable {
+                            if let Some(world) = mutable {
                                 if let Err(e) =
                                     apply_block_outcome(stream, addr, profile, opts, cache, &outcome).await
                                 {
                                     debug!("play uuid={} block outcome failed ({e}), closing", profile.uuid);
                                     break;
+                                }
+                                if let Some(ds) = &opts.drops {
+                                    if let Err(e) =
+                                        spawn_drops(stream, opts, ds, world, &outcome, &view).await
+                                    {
+                                        debug!("play uuid={} drop spawn failed ({e}), closing", profile.uuid);
+                                        break;
+                                    }
                                 }
                             }
                         }
@@ -846,22 +1237,47 @@ async fn play_loop(
             }
             Ok((id, payload)) if id == packets::PLAY_USE_ITEM_ON_C2S_ID => {
                 // P17 放置：目标 = 被点方块 + face 偏移；非法回滚重发。
+                // P18：手持映射决定材料（未知/空手回退石头），成功后扣 1 + 单槽同步。
                 match packets::UseItemOn::decode_body(&payload) {
                     Ok((act, _)) => {
+                        let place_id = opts
+                            .drops
+                            .as_ref()
+                            .and_then(|ds| ds.with_inventory(opts.conn_id, |inv| inv.held()).flatten())
+                            .and_then(|(item_id, _)| mc_world::block_for_item(item_id))
+                            .unwrap_or(mc_world::DEFAULT_PLACE_BLOCK_ID);
                         if let Some(outcome) = decide_place(
                             mutable,
                             eye_of(last_pos),
                             view.center(),
                             view.radius(),
                             &act,
-                            mc_world::DEFAULT_PLACE_BLOCK_ID,
+                            place_id,
                         ) {
                             if let Some(_world) = mutable {
+                                let placed = outcome
+                                    .changes
+                                    .iter()
+                                    .any(|c| c.new_id == place_id && c.old_id != c.new_id);
                                 if let Err(e) =
                                     apply_block_outcome(stream, addr, profile, opts, cache, &outcome).await
                                 {
                                     debug!("play uuid={} block outcome failed ({e}), closing", profile.uuid);
                                     break;
+                                }
+                                if placed {
+                                    if let Some(ds) = &opts.drops {
+                                        let consumed = ds.with_inventory(opts.conn_id, |inv| {
+                                            inv.consume_held()
+                                        });
+                                        if consumed.flatten().is_some() {
+                                            if let Err(e) = send_held_slot(stream, opts, ds).await {
+                                                debug!("play uuid={} held sync failed ({e}), closing", profile.uuid);
+                                                break;
+                                            }
+                                            ds.save_inventory(opts.conn_id, &conn_user);
+                                        }
+                                    }
                                 }
                             }
                         }
@@ -885,11 +1301,24 @@ async fn play_loop(
                     Err(e) => debug!("play uuid={} bad use_item: {e}", profile.uuid),
                 }
             }
+            Ok((id, payload)) if id == packets::PLAY_SET_HELD_ITEM_C2S_ID => {
+                // P18 切手持：Short BE 0..=8 → 背包 selected；越界/截断只忽略不断线。
+                match packets::decode_set_held_item_c2s(&payload) {
+                    Ok((slot, _)) => {
+                        if let Some(ds) = &opts.drops {
+                            ds.with_inventory(opts.conn_id, |inv| inv.set_selected(slot));
+                            debug!("play uuid={} held slot={slot}", profile.uuid);
+                        }
+                    }
+                    Err(e) => debug!("play uuid={} bad set_held_item: {e}", profile.uuid),
+                }
+            }
             Ok((id, _)) if id == packets::PLAY_PUNCH_C2S_ID
-                || id == packets::PLAY_SET_HELD_ITEM_C2S_ID
+                || id == packets::PLAY_CLICK_CONTAINER_C2S_ID
                 || id == packets::PLAY_SET_CREATIVE_SLOT_C2S_ID =>
             {
-                // 挥拳/切手持/创造背包点选：P17 无状态影响，只忽略不断线。
+                // 挥拳/容器点击/创造背包点选：P18 只忽略不断线（ClickContainer 的
+                // Hashed Slot 复杂，整理功能留后续；不断线已由单测覆盖）。
                 debug!("play uuid={} c2s id={id:#04x} ignored (no state change)", profile.uuid);
             }
             Ok((id, payload)) => {
@@ -1151,7 +1580,40 @@ mod tests {
             );
             assert_eq!(world.get(x, y, z), 0, "decide must apply the edit");
             assert_eq!(world.dirty_len(), 1);
+            // P18：挖草带出 dirt 掉落（item 55×1）。
+            assert_eq!(
+                out.drops,
+                vec![mc_world::Drop { item_id: mc_world::drops::ITEM_DIRT, count: 1 }]
+            );
         }
+    }
+
+    #[test]
+    fn dig_drops_follow_block_and_rollback_has_none() {
+        let (world, feet, center) = dig_fixture();
+        let eye = eye_of(feet);
+        // 回滚（挖空气）无掉落。
+        let (x, y, z) = grass_top();
+        world.set(x, y, z, 0);
+        let air_out = decide_dig(
+            Some(&world),
+            eye,
+            center,
+            2,
+            &packets::PlayerAction { status: 2, x, y, z, face: 1, sequence: 1 },
+        )
+        .unwrap();
+        assert!(air_out.drops.is_empty(), "rollback must not drop");
+        // cancel 只 ack，无掉落。
+        let cancel = decide_dig(
+            Some(&world),
+            eye,
+            center,
+            2,
+            &packets::PlayerAction { status: 1, x, y, z, face: 0, sequence: 8 },
+        )
+        .unwrap();
+        assert!(cancel.drops.is_empty());
     }
 
     #[test]

@@ -3,6 +3,7 @@
 pub mod chunk_cache;
 pub mod chunk_view;
 pub mod config;
+pub mod drop_state;
 pub mod framing;
 pub mod handshake_route;
 pub mod login_route;
@@ -18,6 +19,7 @@ pub use chunk_view::{
     MIN_VIEW_RADIUS, PLAY_VIEW_CHUNK_COUNT, PLAY_VIEW_RADIUS,
 };
 pub use config::{NetConfig, STATUS_MAX_PLAYERS, STATUS_MOTD};
+pub use drop_state::{DropState, FIRST_DROP_ENTITY_ID, PLAYER_ENTITY_ID, STARTER_STONE_COUNT};
 pub use framing::{MAX_PACKET_LEN, READ_TIMEOUT};
 pub use login_route::{
     enter_play, enter_play_with_events, enter_play_with_options, handle_login_with_options,

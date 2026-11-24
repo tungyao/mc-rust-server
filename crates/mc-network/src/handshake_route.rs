@@ -46,6 +46,7 @@ pub async fn handle_connection(
                 events: config.play_events.clone(),
                 chunk_cache: config.chunk_cache.clone(),
                 mutable_world: config.mutable_world.clone(),
+                drops: config.drops.clone(),
             };
             handle_login_with_options(stream, addr, &tx, opts).await?;
         }

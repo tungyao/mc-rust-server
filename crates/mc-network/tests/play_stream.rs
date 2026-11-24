@@ -529,3 +529,167 @@ async fn dig_and_place_roundtrip_with_blockupdate_ack_and_persistence() {
     assert_eq!(back.override_count(), 1);
     let _ = std::fs::remove_dir_all(&dir);
 }
+
+/// P18 端到端：Join 背包同步 → 挖草掉 dirt 实体 → 走近拾取 → 背包同步 →
+/// 切手持 → 放石头扣 1 → 断线存档重读一致。
+#[tokio::test]
+async fn dig_spawns_pickable_drop_and_inventory_syncs() {
+    use mc_network::DropState;
+    use mc_world::PlayerInventory;
+    let dir = std::env::temp_dir().join(format!("mc-p18-e2e-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    let (tx, rx) = crossbeam_channel::unbounded::<PlayEvent>();
+    let mutable = Arc::new(MutableWorld::new(DEFAULT_SEED));
+    let cache = Arc::new(ChunkCache::new(DEFAULT_SEED, 64).with_mutable(Arc::clone(&mutable)));
+    let drops = Arc::new(DropState::new(dir.clone(), DEFAULT_SEED));
+    let config = NetConfig::new(100, "drops".into(), Arc::new(AtomicUsize::new(0)))
+        .with_play_events(tx)
+        .with_view_distance(2)
+        .with_chunk_cache(cache)
+        .with_mutable_world(Arc::clone(&mutable))
+        .with_drops(Arc::clone(&drops));
+    let addr = spawn_server(config).await;
+    let mut s = login_and_join(addr, "Dropper", 2).await;
+
+    // Join 背包：全量 Content，46 槽，hotbar 槽 36 = 64 石头开局。
+    let (id, payload) = read_frame_timeout(&mut s, Duration::from_secs(5)).await.unwrap();
+    assert_eq!(id, packets::PLAY_SET_CONTAINER_CONTENT_S2C_ID, "join must sync inventory");
+    let (content, _) = packets::SetContainerContent::decode_body(&payload).unwrap();
+    assert_eq!(content.window_id, 0);
+    assert_eq!(content.slots.len(), 46);
+    assert_eq!(content.slots[36], packets::Slot { count: 64, item_id: 1 });
+
+    let spawn = WorldGen::new(DEFAULT_SEED).spawn_pos();
+    let (fx, fy, fz) = (spawn.0 as f64 + 0.5, spawn.1 as f64, spawn.2 as f64 + 0.5);
+    let (gx, gy, gz) = (spawn.0, spawn.1 - 1, spawn.2);
+    assert_eq!(mutable.get(gx, gy, gz), 9);
+    send_pos_y(&mut s, fx, fy, fz).await;
+    match next_event(&rx).await {
+        PlayEvent::Movement { .. } => {}
+        other => panic!("expected movement event, got {other:?}"),
+    }
+
+    // 挖草：BlockUpdate(air) + Ack + Spawn(掉落物) + Data(dirt×1)。
+    let mut body = Vec::new();
+    packets::PlayerAction { status: 2, x: gx, y: gy, z: gz, face: 1, sequence: 11 }
+        .encode_body(&mut body);
+    mc_network::framing::write_packet(&mut s, packets::PLAY_PLAYER_ACTION_C2S_ID, &body)
+        .await
+        .unwrap();
+    let (id, payload) = read_frame_timeout(&mut s, Duration::from_secs(5)).await.unwrap();
+    assert_eq!(id, packets::PLAY_BLOCK_UPDATE_S2C_ID);
+    assert_eq!(packets::BlockUpdate::decode_body(&payload).unwrap().0.block_id, 0);
+    let (id, payload) = read_frame_timeout(&mut s, Duration::from_secs(5)).await.unwrap();
+    assert_eq!(id, packets::PLAY_BLOCK_CHANGED_ACK_S2C_ID);
+    assert_eq!(read_varint(&payload).unwrap().0, 11);
+    let (id, payload) = read_frame_timeout(&mut s, Duration::from_secs(5)).await.unwrap();
+    assert_eq!(id, packets::PLAY_SPAWN_ENTITY_S2C_ID, "dig must spawn a drop entity");
+    let (spawned, _) = packets::SpawnItemEntity::decode_body(&payload).unwrap();
+    let drop_id = spawned.entity_id;
+    assert!(drop_id >= 1000, "drop ids must not collide with the player entity");
+    let (id, payload) = read_frame_timeout(&mut s, Duration::from_secs(5)).await.unwrap();
+    assert_eq!(id, packets::PLAY_SET_ENTITY_DATA_S2C_ID);
+    let (data, _) = packets::ItemEntityData::decode_body(&payload).unwrap();
+    assert_eq!(data.entity_id, drop_id);
+    assert_eq!(data.slot, packets::Slot { count: 1, item_id: 55 }, "grass must drop dirt");
+    match next_event(&rx).await {
+        PlayEvent::BlockEdit { old_id: 9, new_id: 0, .. } => {}
+        other => panic!("expected block edit event, got {other:?}"),
+    }
+
+    // 拾取：站在掉落物上（<1.5 格），delay 10 ticks 后 TakeItem + Remove + 全量 Content。
+    // 下落同步 Teleport(0x23) 会穿插，先跳过。
+    let mut saw_take = false;
+    let mut saw_remove = false;
+    let mut saw_content = false;
+    for _ in 0..60 {
+        let (id, payload) = read_frame_timeout(&mut s, Duration::from_secs(5)).await.unwrap();
+        match id {
+            packets::PLAY_TELEPORT_ENTITY_S2C_ID => continue,
+            packets::PLAY_PICKUP_ITEM_S2C_ID => {
+                let (t, _) = packets::TakeItemEntity::decode_body(&payload).unwrap();
+                assert_eq!((t.collected_id, t.collector_id), (drop_id, 1));
+                saw_take = true;
+            }
+            packets::PLAY_REMOVE_ENTITIES_S2C_ID => {
+                let (r, _) = packets::RemoveEntities::decode_body(&payload).unwrap();
+                assert!(r.ids.contains(&drop_id));
+                saw_remove = true;
+            }
+            packets::PLAY_SET_CONTAINER_CONTENT_S2C_ID => {
+                let (c, _) = packets::SetContainerContent::decode_body(&payload).unwrap();
+                assert_eq!(c.slots.len(), 46);
+                let dirt: i32 = c.slots.iter().filter(|s| **s == packets::Slot { count: 1, item_id: 55 }).count() as i32;
+                assert_eq!(dirt, 1, "picked dirt must appear exactly once, got {c:?}");
+                saw_content = true;
+            }
+            other => panic!("unexpected packet {other:#04x} while waiting for pickup"),
+        }
+        if saw_take && saw_remove && saw_content {
+            break;
+        }
+    }
+    assert!(saw_take && saw_remove && saw_content, "pickup animation + remove + inventory sync");
+
+    // 切手持到槽 1（空）再切回槽 0：不断线（无回包，只验证连接存活）。
+    for slot in [1i16, 0i16] {
+        let body = [(slot >> 8) as u8, slot as u8];
+        mc_network::framing::write_packet(&mut s, packets::PLAY_SET_HELD_ITEM_C2S_ID, &body)
+            .await
+            .unwrap();
+    }
+
+    // 放石头：手持槽 0 有 64 石头 → 映射 stone(1) → 扣 1 + 单槽同步 63。
+    let mut body = Vec::new();
+    packets::UseItemOn {
+        hand: 0,
+        x: gx,
+        y: gy - 1,
+        z: gz,
+        face: 1,
+        cursor_x: 0.5,
+        cursor_y: 1.0,
+        cursor_z: 0.5,
+        inside_block: false,
+        world_border_hit: false,
+        sequence: 12,
+    }
+    .encode_body(&mut body);
+    mc_network::framing::write_packet(&mut s, packets::PLAY_USE_ITEM_ON_C2S_ID, &body)
+        .await
+        .unwrap();
+    let (id, payload) = read_frame_timeout(&mut s, Duration::from_secs(5)).await.unwrap();
+    assert_eq!(id, packets::PLAY_BLOCK_UPDATE_S2C_ID);
+    assert_eq!(packets::BlockUpdate::decode_body(&payload).unwrap().0.block_id, 1);
+    let (id, payload) = read_frame_timeout(&mut s, Duration::from_secs(5)).await.unwrap();
+    assert_eq!(id, packets::PLAY_BLOCK_CHANGED_ACK_S2C_ID);
+    assert_eq!(read_varint(&payload).unwrap().0, 12);
+    let (id, payload) = read_frame_timeout(&mut s, Duration::from_secs(5)).await.unwrap();
+    assert_eq!(id, packets::PLAY_SET_CONTAINER_SLOT_S2C_ID, "place must sync the held slot");
+    let (slot_pkt, _) = packets::SetContainerSlot::decode_body(&payload).unwrap();
+    assert_eq!(slot_pkt.slot, 36);
+    assert_eq!(slot_pkt.data, packets::Slot { count: 63, item_id: 1 });
+    match next_event(&rx).await {
+        PlayEvent::BlockEdit { old_id: 0, new_id: 1, .. } => {}
+        other => panic!("expected block edit event, got {other:?}"),
+    }
+
+    // 断线 → Disconnect；背包存档重读：63 石头 + 1 泥土。
+    drop(s);
+    match next_event(&rx).await {
+        PlayEvent::Disconnect { .. } => {}
+        other => panic!("expected disconnect event, got {other:?}"),
+    }
+    // net 线程断线刷盘是异步的：轮询等文件出现（键为用户名，见 inventory 文档）。
+    for _ in 0..100 {
+        if PlayerInventory::save_path(&dir, "Dropper", DEFAULT_SEED).exists() {
+            break;
+        }
+        std::thread::sleep(Duration::from_millis(50));
+    }
+    let (back, is_new) = PlayerInventory::load_from_dir(&dir, "Dropper", DEFAULT_SEED).unwrap();
+    assert!(!is_new, "reconnect must load the saved backpack");
+    assert_eq!(back.get(36), Some((1, 63)), "placed stone must be consumed");
+    assert_eq!(back.get(9), Some((55, 1)), "picked dirt must persist");
+    let _ = std::fs::remove_dir_all(&dir);
+}

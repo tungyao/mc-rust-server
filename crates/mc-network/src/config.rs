@@ -1,6 +1,7 @@
 //! config: NetConfig + 常量，只兼容26.3/777
 use super::chunk_cache::ChunkCache;
 use super::chunk_view::clamp_view_radius;
+use super::drop_state::DropState;
 use super::play_events::PlayEvent;
 use crossbeam_channel::Sender;
 use mc_world::MutableWorld;
@@ -31,6 +32,8 @@ pub struct NetConfig {
     pub chunk_cache: Option<Arc<ChunkCache>>,
     /// 服务端权威可变世界（P17 挖掘/放置）；None 时忽略方块交互包（旧行为）。
     pub mutable_world: Option<Arc<MutableWorld>>,
+    /// 掉落物实体 + 背包共享状态（P18）；None 时挖/放不掉落不同步（旧行为）。
+    pub drops: Option<Arc<DropState>>,
 }
 
 impl Default for NetConfig {
@@ -45,6 +48,7 @@ impl Default for NetConfig {
             play_events: None,
             chunk_cache: None,
             mutable_world: None,
+            drops: None,
         }
     }
 }
@@ -63,6 +67,7 @@ impl NetConfig {
             play_events: None,
             chunk_cache: None,
             mutable_world: None,
+            drops: None,
         }
     }
 
@@ -107,6 +112,11 @@ impl NetConfig {
 
     pub fn with_mutable_world(mut self, world: Arc<MutableWorld>) -> Self {
         self.mutable_world = Some(world);
+        self
+    }
+
+    pub fn with_drops(mut self, drops: Arc<DropState>) -> Self {
+        self.drops = Some(drops);
         self
     }
 }
