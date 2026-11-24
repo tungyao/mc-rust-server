@@ -1,9 +1,14 @@
 //! mc-world: Chunk 存储 + 生成 + 存档，不依赖网络
 //! 对标 FerrumC world + SteelMC parity 思路
 pub mod load;
+pub mod mutable;
 pub mod save;
 pub mod worldgen;
 
+pub use mutable::{
+    MutableWorld, DEFAULT_PLACE_BLOCK_ID, EYE_HEIGHT, MAX_REACH, PLACEABLE_BLOCK_IDS,
+    WORLD_TOP_Y, chunk_of_block, is_placeable, is_replaceable,
+};
 pub use worldgen::{
     GeneratedChunk, WorldGen, DEFAULT_SEED, MAX_SURFACE_Y, MIN_SURFACE_Y, SEA_LEVEL,
 };
