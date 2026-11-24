@@ -1,19 +1,17 @@
 # 交接文档：Rust 自研 MC 服务器（只兼容 Java 26.3 / protocol 777 / data 5023）
 
-> 日期：2026-11-23；分支 `main`；本轮 P16（基线 `ceec052`；P15 `7f44b20`/`0df9b40`；P14 `1e47e69`）
+> 日期：2026-11-24；分支 `main`；本轮 P16.1（基线 `b83a096`；P16 `2d8c89d`/`4b4cb08`/`b83a096`；P15 `7f44b20`/`0df9b40`）
 > 目标：原版 26.3 客户端能完成 Handshake → Login → Configuration → Play，并渲染本服自己生成的世界。
 
 ## 1. 一句话现状
 
-**原版 26.3 客户端已经能进 Play，并渲染由 `server.toml` seed 驱动的、带水/沙岸/树/洞穴/矿/biome 的丘陵世界；P16 起初始 441 块用 rayon 并行生成+编码，真机首连 496–558ms、缓存命中重连 72ms**。P16 之后：
+**原版 26.3 客户端已经能进 Play，并渲染由 `server.toml` seed 驱动的、带水/沙岸/树/洞穴/矿/biome 的丘陵世界；P16.1 删除了 ECS 里冗余的区块“编码自检”，Join 附近不再有 tick lag、每次登录只剩 1 条 `ready to join`**。P16.1 之后：
 
-- 世界不再只有高度轮廓：`WorldGen` 新增水（water=89，海平面 63）、沙岸（h≤65 顶层 4 格沙）、oak 树（log/leaves）、地下 3D 洞穴与煤/铁矿、每 chunk 单一 biome（ocean/beach/forest/plains）；出生点半径 16 内平滑抬升到干燥草地（≥66），默认 seed 出生 y=73 不变。
-- 区块编码写真实 `block_count`（含水，非 air）与 `fluid_count`（该 section water 数）；`MOTION_BLOCKING` 改用新增 `motion_heights`（水面/树干/树叶都算），`heights` 仍表示草/沙地形顶。
-- `ChunkCache` 新增 `bodies()` 并行批量编码（内部逐个 `body()` 语义不变）；真机首连 **496–558ms**（P15 764ms），同进程重连 **72ms**，`compression_threshold=256` + radius 10 全压缩 **1916ms**；客户端无 `Timed out while waiting for the client to load chunks`、无 `DecoderException`。
-- 真机截图确认水面为正常蓝色（非黑块/空洞）、岸边沙、树冠/树干连续且不悬空；跨区块 `view move ... add=21 remove=21` 后水/沙/树仍连续。
+- `mc-server/src/play.rs::login_join_system` 不再把 `(2r+1)^2` 块压入 `pending_chunks`、不再每 tick `WorldGen::generate` + 编码 ChunkData + 逐块 `info!`；只排空登录队列、用 `clamp_view_radius`/`view_chunk_count` 记录 `last_view_radius`/`last_view_chunks` 诊断，并每个登录打 1 条 `ready to join`。真实 Join/Chunk 仍由 net 线程 `enter_play` + `ChunkCache` 完成。
+- 真机默认 seed：`ready to join` **1 条**、`chunk data (...)` 脚手架 **0 条**、`tick lag` **0 条**；`play join chunks sent ... count=441 ... elapsed_ms=442`；`compression_threshold=256` 下 441 块 **1709ms**，同样 0 条 tick lag。
+- 客户端无 `Timed out while waiting for the client to load chunks`、无 `DecoderException`，`on_ground=true`；跨区块 `view move ... add=21 remove=21` 正常，断线 `online=0`。
 
-P15 的能力保持：`view_distance` 真正生效（2..=10，默认 10 → 441 块），初始 Join 一批发送 `(2r+1)^2` 块，跨区块单轴 `add=21 remove=21`；共享 `ChunkCache` 缓存已编码包体（FIFO 1024）；accept 分配单调 `conn_id`，Disconnect 在下一 tick 即时清理，同地址快速重连只保留一个新实体，online 只减一次。P14 能力保持：seed 真正驱动地形，逐列高度/高度图/天空光，默认 seed 出生 y=73。
-
+P16 的能力保持：世界有水（water=89，海平面 63）、沙岸、oak 树、地下洞穴/煤铁、每 chunk 单一 biome（ocean/beach/forest/plains）；出生点半径 16 内平滑抬升到干燥草地（≥66），默认 seed 出生 y=73 不变；初始 441 块用 `ChunkCache::bodies` rayon 并行生成+编码，缓存命中重连 72ms。
 
 P13 的能力保持：`compression_threshold` 配置化（默认 -1，256 已真机）、C2S 移动经 `PlayEvent` 进 ECS、跨区块动态补/卸区块、0x26 packed ChunkPos 修正。
 
@@ -69,7 +67,7 @@ $natives = 'C:\Users\qwe\AppData\Local\Temp\mc263natives'
 
 客户端日志成功标志：`Connecting to 127.0.0.1, 25565` 后**没有** `Timed out while waiting for the client to load chunks`、没有 `DecoderException`，直接进入世界。服务端日志成功标志：`enter_play ... view_radius=10 view_chunks=441` → `play join chunks sent ... count=441 ... elapsed_ms=...` → `play join sent ... view_sent=441` → `play keepalive echo` → `play move ... forwarded_to_ecs=true` → 跨区块时 `play view move ... radius=10 add=21 remove=21 sent_total=441`；断开时同一 tick 内 `disconnect ... conn_id=N` → `despawn player conn_id=N` → `player removal complete removed=1 online=0`。
 
-## 3. 当前实现（P16 之后）
+## 3. 当前实现（P16.1 之后）
 
 ### 视距（P15）
 
@@ -77,7 +75,16 @@ $natives = 'C:\Users\qwe\AppData\Local\Temp\mc263natives'
 - `ChunkView::new(center, radius)` + `radius()`；`plan` 用实例 radius 调 `mc_world::view_chunks`，不再用固定常量。`PLAY_VIEW_RADIUS=4` / `PLAY_VIEW_CHUNK_COUNT=81` 只保留为旧入口默认值。
 - 透传：`ServerConfig.view_distance` → `NetConfig.with_view_distance` → `handshake_route` 构造 `PlayOptions { threshold, seed, view_radius, conn_id, events, chunk_cache }` → `handle_login_with_options` → `enter_play_with_options` → `ChunkView`。旧入口 `handle_login` / `handle_login_configured` / `enter_play` / `enter_play_with_events` 保留，默认 radius=4、无缓存，委托到新实现。
 - `LoginPlay.view_distance` 与 `simulation_distance` 都等于实际有效半径，`seed` 同步为 `WorldGen.seed`；初始批 `debug_assert` 按 radius 计算，不再写死 81。
-- ECS `mc-server/src/play.rs` 的编码自检/日志使用 `cfg.effective_view_distance()`，`pending_chunks` 入队 `(2r+1)^2` 块；`CHUNKS_PER_TICK=1` 仍只影响自检，真发送在 net 线程。
+- ECS `mc-server/src/play.rs` 只做登录/视距诊断：`login_join_system` 用 `cfg.view_distance` 的 clamp 值写 `PlayScaffold.last_view_radius` / `last_view_chunks` / `view_center`，每个登录打 1 条 `ready to join`；P16.1 已删除 `pending_chunks`/`sent_chunks`/`CHUNKS_PER_TICK` 与每 tick 的 WorldGen+ChunkData 编码/逐块日志，真发送仍在 net 线程。
+
+### ECS Play 脚手架（P16.1）
+
+- `PlayScaffold` 只保留：`pending_login: Vec<NewConnection>`、`joined`、`keepalive_seq`、`view_center`，以及 P16.1 新增的 `last_view_radius` / `last_view_chunks`（最近一次登录的有效视距与 `(2r+1)^2` 块数；0 表示还没登录）。`spawn_center_chunk()` 保留为测试/诊断入口。
+- `login_join_system`：只在新登录时 drain `pending_login`，用与 net 线程相同的 `mc_network::clamp_view_radius(cfg.view_distance)` + `view_chunk_count(radius)` 计算诊断，设置 `view_center = Some(world.spawn_chunk())`，每个登录打一条 `ready to join #N addr=... conn_id=... seed=... spawn=(...) center=(...) view_radius=R view_chunks=N (join 已由 net 线程 enter_play 真下发; TODO socket→ECS 时改用 per-player 写通道)`。
+- 删除：`CHUNKS_PER_TICK`、`pending_chunks`、`sent_chunks`、每 tick `WorldGen::generate`/`network_bytes`/`heightmaps_bytes`/`light_bytes`/`encode_play_chunk_data_packet` 与逐块 `chunk data (...) sent=... pending=...` info。空队列/重复 tick 不再产生任何区块工作。
+- `keepalive_system` 保持原样（只计数 + 编码自检 + log）。
+- 测试：两个登录 drain、view_distance 2/4/10/11 → 25/81/441/441、空队列诊断全 0、连续 10 tick 不改变 joined/视距诊断、`scaffold_encode_does_not_panic` 单块编码。
+- TODO(socket→ECS)：socket 仍在 net 线程。未来若交给 ECS，必须用 **per-player 写通道 + `ChunkView`** 真发 Join/Chunk/PositionSync；不要恢复 P16.1 删除的全量生成脚手架。
 
 ### 区块缓存（P15）
 
@@ -220,8 +227,15 @@ $natives = 'C:\Users\qwe\AppData\Local\Temp\mc263natives'
   - `logs/p16-water42-view2.png` / `logs/p16-water42-crosschunk.png`：树冠下的池塘与跨 chunk 后的水面/沙岸连续，无断块。
 - **缓存命中重连**：强制关闭客户端后服务端同一 tick `disconnect conn_id=1` → `despawn player conn_id=1` → `player removal complete removed=1 online=0`；重启客户端 `conn_id=2`，`play join chunks sent ... count=441 ... elapsed_ms=72`（共享缓存命中），只有 1 个实体。
 - **压缩 `threshold=256` + radius 10**：seed 42，`play join chunks sent ... count=441 ... elapsed_ms=1916`；客户端正常进世界，移动包 `y=75.0, on_ground=true`，无 `DecoderException`、无区块加载超时。
-- 客户端日志只有离线模式预期的 authlib/Realms 401；服务端在初始 Join 附近有 `tick lag: 73–79ms > 50ms` 的 warn（ECS 每 tick 编码自检 + 并行生成争 CPU），不影响连接。
+- 客户端日志只有离线模式预期的 authlib/Realms 401；P16 时初始 Join 附近有 `tick lag: 73–79ms > 50ms` 的 warn（ECS 每 tick 编码自检 + 并行生成争 CPU），P16.1 已删除该自检（见下）。
 - 真机确认水不是“黑块/空洞”：可见蓝色水面、水面高度统一为 63、沙岸贴合水面；树没有悬空/穿水，跨 chunk 树冠连续。
+
+### P16.1 真机（删除 ECS 区块自检）
+
+- **默认 seed `123456789`、view_distance=10、threshold=-1**：日志中 `ready to join` **1 条**、`chunk data (...)` 脚手架 **0 条**、`tick lag` **0 条**；`play join chunks sent ... count=441 ... elapsed_ms=442`、`play join sent ... view_sent=441`；移动包 `y=73.0, on_ground=true`；客户端无 `Timed out while waiting for the client to load chunks`、无 `DecoderException`。
+- 跨区块：按住 W 从 spawn 向西走到 `x≈359.9`，`play view move ... center=(22,23) radius=10 add=21 remove=21 sent_total=441`，地形/树连续无超时；断线同一 tick `player removal complete removed=1 online=0`。
+- **compression_threshold=256 + radius 10（默认 seed）**：`ready to join` 1 条、脚手架 0 条、`tick lag` 0 条；`play join chunks sent ... count=441 ... elapsed_ms=1709`；客户端正常进世界、`y=73.0, on_ground=true`，断线 `online=0`。
+- 对比 P16：同样 441 块无压缩 496–558ms → 442ms，压缩 1916ms → 1709ms；tick lag 从 73–79ms（压缩曾 315ms）降为 0 条，日志从 441 行/登录降为 1 行/登录。
 
 
 ### 动态区块真机（P13）
@@ -235,13 +249,13 @@ $natives = 'C:\Users\qwe\AppData\Local\Temp\mc263natives'
 
 - `cargo test --workspace`：全部通过（156 个测试）。
 - `cargo check --workspace --tests`：0 error。
-- `scripts/check_budget.sh`（Windows 用 `C:\Program Files\Git\bin\bash.exe`）：通过（src ≤2000 行软约束；最大 `mc-network/src/login_route.rs` 约 732 行）。
+- `scripts/check_budget.sh`（Windows 用 `C:\Program Files\Git\bin\bash.exe`）：通过（src ≤2000 行软约束；最大 `mc-network/src/login_route.rs` 约 736 行）。
 
 ## 5. 已知限制 / 下一步
 
-1. **socket 仍未进 ECS**：Play 的 Join/Chunk/动态区块实际仍由 net 线程发送；`PlayScaffold.pending_chunks` 只做编码自检/日志。P13/P15 已把移动/KeepAlive/Disconnect 事件送进 ECS，但 socket 所有权/写通道的拆分会影响当前已验证链路，故保留 `TODO(P13/socket→ECS)`（`mc-server/src/play.rs`、`systems.rs`）。
+1. **socket 仍未进 ECS**：Play 的 Join/Chunk/动态区块实际仍由 net 线程发送；P16.1 起 ECS `PlayScaffold` 只记录登录/视距诊断（`last_view_radius`/`last_view_chunks`/`view_center`），不再生成或编码区块。P13/P15 已把移动/KeepAlive/Disconnect 事件送进 ECS，但 socket 所有权/写通道的拆分会影响当前已验证链路，故保留 `TODO(socket→ECS)`（`mc-server/src/play.rs`、`systems.rs`）；未来实现时必须用 per-player 写通道 + `ChunkView`，不要恢复已删除的全量生成自检。
 2. **在线数/连接语义**：ECS 玩家实体已有 `PlayerConnId`，Disconnect 在下一 tick 清理，timeout 与 Disconnect 汇入唯一删除点；同 addr 快速重连由 conn_id 区分。仍未按 UUID 去重（同 UUID 多开仍会有多个实体），也未有登录阶段踢掉旧连接的策略。
-3. **初始 441 块仍是单批**：P16 真机 debug 下 496–558ms（无压缩，rayon 并行）、1916ms（threshold=256），未触发 5s 阈值，因此没有拆 64 块 + 50ms。若未来弱机器/更大视距（clamp 上限 10 已封顶）或高延迟网络出现客户端超时，再把 `send_join_sequence` 改为每批 64 块、批间 sleep（每批 BatchStart/Finished 成对，PositionSync 最后）。
+3. **初始 441 块仍是单批**：P16.1 真机 debug 下 442ms（无压缩，rayon 并行）、1709ms（threshold=256），未触发 5s 阈值，因此没有拆 64 块 + 50ms。若未来弱机器/更大视距（clamp 上限 10 已封顶）或高延迟网络出现客户端超时，再把 `send_join_sequence` 改为每批 64 块、批间 sleep（每批 BatchStart/Finished 成对，PositionSync 最后）。
 4. **区块缓存只在本进程内**：`ChunkCache` 是已编码包体的内存 FIFO（默认 1024 块，约 52KB/块 ≈ 53MB 上限），进程重启/换 seed 不保留；没有 Anvil 存档，动态加载/卸载只影响网络发送集合，不落盘。`save/load` 仍是旧的 `Chunk` 占位格式。
 5. **跨区块仍是即时整批**：单轴 `2r+1` 块、斜跨最多 `4r+1` 块一次写完，没有每 tick pending 队列/发送限流；r=10 时单次最多 41 块，真机未出现写阻塞或超时。
 6. **地形/水/树仍是最小实现**：
@@ -284,7 +298,7 @@ crates/mc-server/src/
   config.rs                  ServerConfig.seed/compression_threshold/view_distance + effective_view_distance()
   systems.rs                 NewConnection(addr,conn_id) → ECS 玩家实体（Position::at_spawn，重复 conn_id 幂等）
   movement.rs                PlayEvent 排空 + MovementQueue/Position/KeepAlive + PendingPlayerRemoval 唯一删除点
-  play.rs                    ECS 视距编码自检/日志（cfg 有效视距，socket 未接入）
+  play.rs                    ECS PlayScaffold：登录队列 + `last_view_radius/chunks` 诊断 + KeepAlive 计数（P16.1 无区块生成/编码；socket 未接入）
 docs/packet-map-777.md                 777 包 ID 对照表（权威）
 docs/registries-777.md                 注册表清单
 ```
@@ -299,7 +313,8 @@ bash scripts/check_budget.sh     # Windows 可用 C:\Program Files\Git\bin\bash.
 
 ## 8. Git 状态 / 提交注意
 
-- 当前分支 `main`；P16 代码 `2d8c89d`、文档 `4b4cb08`（基线 `ceec052`）；P15 代码 `7f44b20`、文档 `0df9b40`（基线 `12bdaa4`）；P14 `1e47e69`/`12bdaa4`（基线 `c3bd992`）；P13 `02d31ee`/`0aaf8ed`。
+- 当前分支 `main`；P16.1 代码 `561cc7e`、文档见本轮后续 commit（基线 `b83a096`）；P16 代码 `2d8c89d`、文档 `4b4cb08`/`b83a096`（基线 `ceec052`）；P15 代码 `7f44b20`、文档 `0df9b40`（基线 `12bdaa4`）；P14 `1e47e69`/`12bdaa4`（基线 `c3bd992`）；P13 `02d31ee`/`0aaf8ed`。
+- P16.1 注意：ECS `PlayScaffold` 已不再生成/编码区块；`ready to join` 每次登录 1 条，`chunk data (...)` 脚手架日志和 `tick lag` 已消失。未来 socket→ECS 时用 per-player 写通道 + `ChunkView`，不要恢复全量生成脚手架。
 - P16 注意：`crates/mc-world/src/worldgen.rs` 已拆成 `worldgen/{mod,noise,encode,tests}.rs`；新增 `rayon` 到 `mc-network`（workspace 依赖，`Cargo.lock` 无版本变化）；临时 seed 搜索程序/截图均在 `logs/`/Temp，未提交。
 - 不要提交：`scripts/check_budget.sh` 的纯行尾/文件 mode 变化、`Cargo.lock`（如无依赖变更）、`logs/`、`target/`、临时日志。
 - `HANDOFF.md`、`MEMORY.md` 按仓库习惯更新。
