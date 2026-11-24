@@ -215,6 +215,25 @@ impl MutableWorld {
         BlockPos(base.0, y, base.2)
     }
 
+    /// 支撑面顶 y（掉落物静置高度）：该列最高非空气方块上方 1 格；全空列回落 MIN_Y。
+    /// 单次 `generate_chunk` 扫描（调用方在 spawn 时算一次，tick 内不再查世界）。
+    pub fn support_top_y(&self, x: i32, z: i32) -> i32 {
+        let chunk = self.generate_chunk(chunk_of_block(x, z));
+        let lx = x.rem_euclid(16) as usize;
+        let lz = z.rem_euclid(16) as usize;
+        for y in (MIN_Y..=WORLD_TOP_Y).rev() {
+            let section = ((y - MIN_Y) >> 4) as usize;
+            if section >= chunk.sections.len() {
+                continue;
+            }
+            let local_y = ((y - MIN_Y) & 15) as usize;
+            if chunk.sections[section][local_y * 256 + lz * 16 + lx] != AIR_BLOCK_ID {
+                return y + 1;
+            }
+        }
+        MIN_Y
+    }
+
     /// 存档路径：`dir/overrides-<seed>.dat`（seed 隔离，换 seed 不混用）。
     pub fn save_path(dir: &Path, seed: i64) -> std::path::PathBuf {
         dir.join(format!("overrides-{seed}.dat"))
@@ -530,6 +549,17 @@ mod tests {
         assert_eq!((fixed.0, fixed.2), (base.0, base.2));
         assert_eq!(fixed.1, base.1 + 2);
         assert_eq!(m.get(fixed.0, fixed.1, fixed.2), AIR_BLOCK_ID);
+    }
+
+    #[test]
+    fn support_top_y_tracks_dig_and_place() {
+        let m = MutableWorld::new(DEFAULT_SEED);
+        let (x, _, z) = spawn_top(DEFAULT_SEED);
+        let s = crate::WorldGen::new(DEFAULT_SEED).spawn_pos();
+        // 出生点支撑面 = 出生 y（空气格），挖掉脚下方块后下降 1。
+        assert_eq!(m.support_top_y(x, z), s.1);
+        m.set(x, s.1 - 1, z, AIR_BLOCK_ID);
+        assert_eq!(m.support_top_y(x, z), s.1 - 1);
     }
 
     #[test]
