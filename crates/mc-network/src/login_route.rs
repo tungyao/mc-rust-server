@@ -1111,6 +1111,11 @@ async fn play_loop(
     // 否则客户端 30s 收不到 0x2D 会 “连接超时” 断开（2026-11-23 真机实测）。
     let mut last_keepalive = Instant::now();
     let conn_user = user_tag(profile);
+    // P18 掉落 tick 节拍：按墙钟每 50ms 跑一次物理/拾取。
+    // 注意不能只放在读超时分支——原版客户端每 tick 都发移动包（静止也有 StatusOnly），
+    // 包流不断时 50ms 超时永不触发，tick 会被饿死：pickup_delay 减不下去，
+    // 掉落物看得见但永远捡不起来（P18 回归：busy 连接拾取测试）。
+    let mut last_drop_tick = Instant::now();
     loop {
         // P18 掉落 tick：50ms 读超时即跑一次物理/拾取（不改变 10s 半开超时语义）。
         let next = match tokio::time::timeout(
@@ -1126,6 +1131,7 @@ async fn play_loop(
                         break;
                     }
                 }
+                last_drop_tick = Instant::now();
                 continue;
             }
             Ok(r) => r,
@@ -1344,6 +1350,16 @@ async fn play_loop(
                 debug!("play uuid={} closed ({e})", profile.uuid);
                 break;
             }
+        }
+        // 包流不断时也按 50ms 节拍跑掉落 tick，防止读超时分支饿死。
+        if last_drop_tick.elapsed() >= Duration::from_millis(50) {
+            if let (Some(ds), Some(_)) = (&opts.drops, mutable) {
+                if let Err(e) = tick_drops(stream, opts, ds, &conn_user, last_pos, &view).await {
+                    debug!("play uuid={} drop tick failed ({e}), closing", profile.uuid);
+                    break;
+                }
+            }
+            last_drop_tick = Instant::now();
         }
     }
     Ok(())

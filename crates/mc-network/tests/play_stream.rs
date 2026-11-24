@@ -693,3 +693,134 @@ async fn dig_spawns_pickable_drop_and_inventory_syncs() {
     assert_eq!(back.get(9), Some((55, 1)), "picked dirt must persist");
     let _ = std::fs::remove_dir_all(&dir);
 }
+
+/// P18 回归：忙连接（持续发移动包，模拟原版客户端每 tick 发包）下拾取仍能发生。
+/// 旧实现把掉落 tick 只放在 50ms 读超时分支，包流不断时超时永不触发，
+/// pickup_delay 减不下去，掉落物永远捡不起来。本用例在修之前必超时失败。
+#[tokio::test]
+async fn drop_pickup_works_on_busy_connection() {
+    use mc_network::DropState;
+    let dir = std::env::temp_dir().join(format!("mc-p18-busy-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    let (tx, rx) = crossbeam_channel::unbounded::<PlayEvent>();
+    let mutable = Arc::new(MutableWorld::new(DEFAULT_SEED));
+    let cache = Arc::new(ChunkCache::new(DEFAULT_SEED, 64).with_mutable(Arc::clone(&mutable)));
+    let drops = Arc::new(DropState::new(dir.clone(), DEFAULT_SEED));
+    let config = NetConfig::new(100, "drops-busy".into(), Arc::new(AtomicUsize::new(0)))
+        .with_play_events(tx)
+        .with_view_distance(2)
+        .with_chunk_cache(cache)
+        .with_mutable_world(Arc::clone(&mutable))
+        .with_drops(Arc::clone(&drops));
+    let addr = spawn_server(config).await;
+    let mut s = login_and_join(addr, "Busy", 2).await;
+
+    // Join 背包同步先消费掉（不断线，只读第一帧 Content 的存在性）。
+    let (id, _) = read_frame_timeout(&mut s, Duration::from_secs(5)).await.unwrap();
+    assert_eq!(id, packets::PLAY_SET_CONTAINER_CONTENT_S2C_ID);
+
+    let spawn = WorldGen::new(DEFAULT_SEED).spawn_pos();
+    let (fx, fy, fz) = (spawn.0 as f64 + 0.5, spawn.1 as f64, spawn.2 as f64 + 0.5);
+    let (gx, gy, gz) = (spawn.0, spawn.1 - 1, spawn.2);
+
+    // 挖草显式站位后开挖。
+    send_pos_y(&mut s, fx, fy, fz).await;
+    let mut body = Vec::new();
+    packets::PlayerAction { status: 2, x: gx, y: gy, z: gz, face: 1, sequence: 11 }
+        .encode_body(&mut body);
+    mc_network::framing::write_packet(&mut s, packets::PLAY_PLAYER_ACTION_C2S_ID, &body)
+        .await
+        .unwrap();
+    // BlockUpdate + Ack + Spawn + Data，先消费掉。
+    for _ in 0..4 {
+        let (id, _) = read_frame_timeout(&mut s, Duration::from_secs(5)).await.unwrap();
+        assert!(
+            id == packets::PLAY_BLOCK_UPDATE_S2C_ID
+                || id == packets::PLAY_BLOCK_CHANGED_ACK_S2C_ID
+                || id == packets::PLAY_SPAWN_ENTITY_S2C_ID
+                || id == packets::PLAY_SET_ENTITY_DATA_S2C_ID,
+            "unexpected packet {id:#04x} before pickup phase"
+        );
+    }
+
+    // 忙碌阶段：独立写任务每 10ms 发一个移动包（读超时 50ms 永不触发，
+    // 模拟原版客户端每 tick 发包），10s 内必须看到 TakeItem + Remove + Content，
+    // 否则掉落 tick 被饿死。读写必须拆分到两个 half，否则读阻塞会拖慢发送节拍。
+    let (mut rh, mut wh) = s.into_split();
+    let stop = Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let writer = {
+        let stop = Arc::clone(&stop);
+        tokio::spawn(async move {
+            use std::sync::atomic::Ordering;
+            use tokio::io::AsyncWriteExt;
+            while !stop.load(Ordering::Relaxed) {
+                let mut body = Vec::new();
+                packets::MovePlayerPos { x: fx, y: fy, z: fz, on_ground: true, horizontal_collision: false }
+                    .encode_body(&mut body);
+                let mut framed = Vec::new();
+                packets::encode_packet(packets::PLAY_MOVE_POS_C2S_ID, &body, &mut framed);
+                if wh.write_all(&framed).await.is_err() {
+                    break;
+                }
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        })
+    };
+    async fn read_half_frame(rh: &mut tokio::net::tcp::OwnedReadHalf) -> std::io::Result<(i32, Vec<u8>)> {
+        use tokio::io::AsyncReadExt;
+        let mut num = 0i32;
+        let mut shift = 0u32;
+        for _ in 0..5 {
+            let mut b = [0u8; 1];
+            rh.read_exact(&mut b).await?;
+            num |= ((b[0] & 0x7F) as i32) << shift;
+            if b[0] & 0x80 == 0 {
+                break;
+            }
+            shift += 7;
+        }
+        assert!(num >= 0, "negative length {num}");
+        let mut buf = vec![0u8; num as usize];
+        rh.read_exact(&mut buf).await?;
+        let (id, n) = read_varint(&buf).expect("packet id");
+        Ok((id, buf[n..].to_vec()))
+    }
+    let deadline = std::time::Instant::now() + Duration::from_secs(10);
+    let (mut saw_take, mut saw_remove, mut saw_content) = (false, false, false);
+    while std::time::Instant::now() < deadline {
+        let frame = tokio::time::timeout(Duration::from_millis(500), read_half_frame(&mut rh))
+            .await
+            .map_err(|_| std::io::Error::new(std::io::ErrorKind::TimedOut, "test read timeout"));
+        let (id, payload) = match frame {
+            Err(_) => continue,
+            Ok(Ok(r)) => r,
+            Ok(Err(e)) => panic!("read failed on busy connection: {e}"),
+        };
+        match id {
+            packets::PLAY_TELEPORT_ENTITY_S2C_ID | packets::PLAY_KEEPALIVE_S2C_ID => continue,
+            packets::PLAY_PICKUP_ITEM_S2C_ID => {
+                let (t, _) = packets::TakeItemEntity::decode_body(&payload).unwrap();
+                assert_eq!(t.collector_id, 1);
+                saw_take = true;
+            }
+            packets::PLAY_REMOVE_ENTITIES_S2C_ID => {
+                saw_remove = true;
+            }
+            packets::PLAY_SET_CONTAINER_CONTENT_S2C_ID => {
+                let (c, _) = packets::SetContainerContent::decode_body(&payload).unwrap();
+                assert!(c.slots.iter().any(|sl| *sl == packets::Slot { count: 1, item_id: 55 }));
+                saw_content = true;
+            }
+            other => panic!("unexpected packet {other:#04x} on busy connection"),
+        }
+        if saw_take && saw_remove && saw_content {
+            break;
+        }
+    }
+    stop.store(true, std::sync::atomic::Ordering::Relaxed);
+    let _ = writer.await;
+    assert!(saw_take && saw_remove && saw_content, "pickup must happen on a busy connection");
+    drop(rh);
+    drop(rx);
+    let _ = std::fs::remove_dir_all(&dir);
+}
