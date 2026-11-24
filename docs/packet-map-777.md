@@ -84,3 +84,21 @@
 - 本文件只做对照，不改任何 `.rs`；`cargo check/test` 未跑（按任务要求不跑，但未动代码故不破坏）。
 
 > 勘误（P10）：Update Tags CB 在777是 **0x0E**（0x0D是feature_flags，26.1残留）。见config.rs常量注释三方证据。
+
+## 6. Play 挖掘/放置（P17 新增，均已按 777 核对）
+
+> 来源：本页 Play 包表（clientbound `block_update` 8/`block_changed_ack` 4/`section_blocks_update` 86；
+> serverbound `player_action` 41/`use_item_on` 66/`use_item` 67/`punch` 46/`set_carried_item` 54/`set_creative_mode_slot` 57）。
+> 三方证据：26.1 `protocol.json` 对应项（`block_update` CB 0x07、`player_action` SB 0x28、
+> `use_item_on` SB 0x41、`use_item` SB 0x42）+1 漂移恰好对上 777，互相印证。
+
+| 方向 | 包 | 777 ID | 线格式（本服实现） |
+|---|---|---|---|
+| C2S | Player Action（挖/取消/完成） | `0x29` | Status VarInt + Position + Face Byte + Sequence VarInt；status 0=开始/2=完成/1=取消/3–7=丢弃等（无世界影响） |
+| C2S | Use Item On（放置） | `0x42` | Hand VarInt + Position + Face VarInt + 3×Float + 2×Bool + Sequence VarInt |
+| C2S | Use Item（空手使用） | `0x43` | Hand VarInt + Sequence VarInt + Yaw/Pitch Float（只 ack） |
+| C2S | Punch（挥拳） | `0x2E` | 空包体，只忽略 |
+| S2C | Block Update（单方块） | `0x08` | Position + blockstate VarInt（全局 palette ID） |
+| S2C | Acknowledge Block Change | `0x04` | Sequence VarInt（确认客户端预测；拒绝时先发 BlockUpdate 回滚） |
+| S2C | Update Section Blocks | `0x56` | P17 未用（单方块用 0x08 已足够；跨 section 批量留待多人/大编辑） |
+| C2S | Set Held Item / Set Creative Mode Slot | `0x36` / `0x39` | P17 暂不解析，只忽略（Slot 的 data component 需注册表驱动解码，见 HANDOFF §5） |
