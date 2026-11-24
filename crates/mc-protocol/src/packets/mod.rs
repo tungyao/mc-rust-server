@@ -13,6 +13,7 @@ pub mod vanilla_config_777;
 // 这里用 #[path] 接进来，保持 `packets::nbt` / `packets::NbtTag` 路径不变。
 #[path = "../nbt.rs"]
 pub mod nbt;
+pub mod play_block;
 pub mod play_chunk;
 pub mod play_login;
 pub mod play_sync;
@@ -23,6 +24,7 @@ pub use config::*;
 pub use handshake::*;
 pub use login::*;
 pub use nbt::*;
+pub use play_block::*;
 pub use play_chunk::*;
 pub use play_login::*;
 pub use play_sync::*;
