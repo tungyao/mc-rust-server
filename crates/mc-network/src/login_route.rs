@@ -857,15 +857,19 @@ async fn send_full_inventory(
     opts: &PlayOptions,
     drops: &DropState,
 ) -> io::Result<()> {
-    let (slots, state) = drops
-        .with_inventory(opts.conn_id, |inv| (inv.to_protocol_slots(), inv.next_state()))
-        .unwrap_or_else(|| (vec![packets::Slot::empty(); packets::PLAYER_INVENTORY_SLOT_COUNT], 1));
+    let (slots, carried, state) = drops
+        .with_inventory(opts.conn_id, |inv| {
+            (inv.to_protocol_slots(), inv.cursor_slot(), inv.next_state())
+        })
+        .unwrap_or_else(|| {
+            (vec![packets::Slot::empty(); packets::PLAYER_INVENTORY_SLOT_COUNT], packets::Slot::empty(), 1)
+        });
     let mut body = Vec::new();
     packets::SetContainerContent {
         window_id: packets::PLAYER_INVENTORY_WINDOW_ID,
         state_id: state,
         slots,
-        carried: packets::Slot::empty(),
+        carried,
     }
     .encode_body(&mut body);
     write_packet_any(stream, packets::PLAY_SET_CONTAINER_CONTENT_S2C_ID, &body, opts.threshold)
@@ -1320,12 +1324,37 @@ async fn play_loop(
                 }
             }
             Ok((id, _)) if id == packets::PLAY_PUNCH_C2S_ID
-                || id == packets::PLAY_CLICK_CONTAINER_C2S_ID
                 || id == packets::PLAY_SET_CREATIVE_SLOT_C2S_ID =>
             {
-                // 挥拳/容器点击/创造背包点选：P18 只忽略不断线（ClickContainer 的
-                // Hashed Slot 复杂，整理功能留后续；不断线已由单测覆盖）。
+                // 挥拳/创造背包点选：P18 只忽略不断线（Slot 的 data component 需注册表驱动解码，
+                // 误解析会错位整条 TCP 流），只忽略不断线已由单测覆盖。
                 debug!("play uuid={} c2s id={id:#04x} ignored (no state change)", profile.uuid);
+            }
+            Ok((id, payload)) if id == packets::PLAY_CLICK_CONTAINER_C2S_ID => {
+                // P18.1 集装箱点击：服务端权威应用（拿起/放下/交换/Shift 搬运/数字键交换），
+                // 之后必发全量同步——客户端预测与服务端不一致时回滚，永远不分叉。
+                match packets::decode_container_click(&payload) {
+                    Ok((click, _)) => {
+                        if click.container_id != packets::PLAYER_INVENTORY_WINDOW_ID {
+                            debug!(
+                                "play uuid={} click non-player window {} ignored",
+                                profile.uuid, click.container_id
+                            );
+                        } else if let Some(ds) = &opts.drops {
+                            ds.with_inventory(opts.conn_id, |inv| {
+                                inv.apply_click(click.slot, click.button, click.click_type)
+                            });
+                        }
+                        if let Some(ds) = &opts.drops {
+                            if let Err(e) = send_full_inventory(stream, opts, ds).await {
+                                debug!("play uuid={} click sync failed ({e}), closing", profile.uuid);
+                                break;
+                            }
+                            ds.save_inventory(opts.conn_id, &conn_user);
+                        }
+                    }
+                    Err(e) => debug!("play uuid={} bad container click: {e}", profile.uuid),
+                }
             }
             Ok((id, payload)) => {
                 debug!("play uuid={} c2s id={id:#04x} len={} (ignored)", profile.uuid, payload.len());

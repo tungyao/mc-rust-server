@@ -84,9 +84,10 @@ impl DropState {
         (filled, held)
     }
 
-    /// 断线时刷盘 + 释放连接状态（known/背包内存）。
+    /// 断线时刷盘 + 释放连接状态（known/背包内存；手持栈先收回背包再存）。
     pub fn unload_inventory(&self, conn_id: u64, user_tag: &str) {
-        if let Some(inv) = self.lock_invs().remove(&conn_id) {
+        if let Some(mut inv) = self.lock_invs().remove(&conn_id) {
+            inv.stow_cursor();
             let _ = inv.save_to_dir(&self.save_dir, user_tag, self.seed);
         }
         self.lock_known().remove(&conn_id);

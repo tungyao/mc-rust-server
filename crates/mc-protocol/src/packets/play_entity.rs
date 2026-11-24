@@ -9,7 +9,8 @@
 //! - S2C `take_item_entity` 0x7F：PickupItem 拾取动画（collector=LoginPlay entity_id=1）
 //! - S2C `container_set_content` 0x12 / `container_set_slot` 0x14：背包同步（window 0）
 //! - C2S `set_carried_item` 0x36：SetHeldItem（**Short** 0..=8，与 S2C 0x6B VarInt 不同）
-//! - C2S `container_click` 0x12：ClickContainer（Hashed Slot 复杂，本轮只忽略不断线，见 §7）
+//! - C2S `container_click` 0x12：ClickContainer（PICKUP/SWAP/QUICK_MOVE 已实现；
+//!   changedSlots/carried 按 jar 实测线格式跳过、不做 hash 校验，见 §7）
 //!
 //! P18 范围：掉落看得见（Spawn+Metadata）、下落同步（0x23 Teleport）、拾取动画（0x7F
 //! 可选但实现）、背包同步（Content/Slot）。窗口整理（ClickContainer 解析）留后续。
@@ -628,6 +629,114 @@ pub fn decode_set_held_item_c2s(buf: &[u8]) -> Result<(u8, usize), ProtocolError
     Ok((v as u8, n))
 }
 
+// ---------------------------------------------------------------------------
+// C2S Container Click（0x12）：只解析 container/state/slot/button/click_type，
+// changedSlots + carriedItem 按 jar 实测 777 线格式跳过（不校验 hash）：
+// container VarInt + state VarInt + slot ShortBE + button Byte + clickType VarInt(0..=6)
+// + changedSlots(VarInt 条数 + [ShortBE 槽 + hashed 栈]*) + carried(hashed 栈)；
+// hashed 栈 = Bool(1B) + [VarInt 物品 + VarInt 数量 + patchmap[
+//   added(VarInt 条数 + [VarInt 组件 + I32BE hash]*) + removed(VarInt 条数 + VarInt 组件*)]]。
+// 计数设上限防恶意包撑内存；clickType>6 拒绝（777 只有 0..=6）。
+// ---------------------------------------------------------------------------
+
+/// C2S 点击类型（ContainerInput ordinal，jar 实测 PICKUP=0..PICKUP_ALL=6）。
+pub const CLICK_PICKUP: u8 = 0;
+/// Shift+点击整栈搬运。
+pub const CLICK_QUICK_MOVE: u8 = 1;
+/// 数字键：点击槽 <-> 快捷栏 button 槽交换。
+pub const CLICK_SWAP: u8 = 2;
+
+/// C2S ContainerClick（0x12）解析结果（changedSlots/carried 已跳过不返回）。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ContainerClick {
+    pub container_id: i32,
+    pub state_id: i32,
+    pub slot: i16,
+    pub button: i8,
+    pub click_type: u8,
+}
+
+fn skip_varint(buf: &[u8], off: &mut usize) -> Result<(), ProtocolError> {
+    let (_, n) = read_varint(&buf[*off..])?;
+    *off += n;
+    Ok(())
+}
+
+fn skip_bytes(buf: &[u8], off: &mut usize, n: usize) -> Result<(), ProtocolError> {
+    if buf.len() < *off + n {
+        return Err(ProtocolError::UnexpectedEof);
+    }
+    *off += n;
+    Ok(())
+}
+
+/// 跳过一个 HashedPatchMap：added(条数 + [组件 VarInt + I32 hash]*) + removed(条数 + 组件 VarInt*)。
+fn skip_patchmap(buf: &[u8], off: &mut usize) -> Result<(), ProtocolError> {
+    let (added, n) = read_varint(&buf[*off..])?;
+    if !(0..=256).contains(&added) {
+        return Err(ProtocolError::UnexpectedEof);
+    }
+    *off += n;
+    for _ in 0..added {
+        skip_varint(buf, off)?;
+        skip_bytes(buf, off, 4)?;
+    }
+    let (removed, n) = read_varint(&buf[*off..])?;
+    if !(0..=256).contains(&removed) {
+        return Err(ProtocolError::UnexpectedEof);
+    }
+    *off += n;
+    for _ in 0..removed {
+        skip_varint(buf, off)?;
+    }
+    Ok(())
+}
+
+/// 跳过一个 HashedStack：Bool(1B) + [物品 VarInt + 数量 VarInt + patchmap]。
+fn skip_hashed_stack(buf: &[u8], off: &mut usize) -> Result<(), ProtocolError> {
+    let (present, n) = read_bool(&buf[*off..])?;
+    *off += n;
+    if !present {
+        return Ok(());
+    }
+    skip_varint(buf, off)?;
+    skip_varint(buf, off)?;
+    skip_patchmap(buf, off)
+}
+
+/// 解析 C2S ContainerClick（0x12），changedSlots/carried 只跳过。
+pub fn decode_container_click(buf: &[u8]) -> Result<(ContainerClick, usize), ProtocolError> {
+    let mut off = 0;
+    let (container_id, n) = read_varint(&buf[off..])?;
+    off += n;
+    let (state_id, n) = read_varint(&buf[off..])?;
+    off += n;
+    let (slot, n) = read_short_be(&buf[off..])?;
+    off += n;
+    if buf.len() <= off {
+        return Err(ProtocolError::UnexpectedEof);
+    }
+    let button = buf[off] as i8;
+    off += 1;
+    let (click_type, n) = read_varint(&buf[off..])?;
+    off += n;
+    if !(0..=6).contains(&click_type) {
+        return Err(ProtocolError::UnexpectedEof);
+    }
+    let (changed, n) = read_varint(&buf[off..])?;
+    if !(0..=64).contains(&changed) {
+        return Err(ProtocolError::UnexpectedEof);
+    }
+    off += n;
+    for _ in 0..changed {
+        let (_, n) = read_short_be(&buf[off..])?;
+        off += n;
+        skip_hashed_stack(buf, &mut off)?;
+    }
+    skip_hashed_stack(buf, &mut off)?;
+    Ok((ContainerClick { container_id, state_id, slot, button, click_type: click_type as u8 }, off))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -858,6 +967,60 @@ mod tests {
         let (_, n) = read_varint(&pkt2).unwrap();
         let (id, _) = decode_packet_id(&pkt2[n..]).unwrap();
         assert_eq!(id, PLAY_SET_CONTAINER_SLOT_S2C_ID);
+    }
+
+    #[test]
+    fn container_click_decode_and_skip() {
+        use super::{CLICK_PICKUP, CLICK_SWAP};
+        // container=0 varint, state=3 varint, slot=37 short, button=0, type=PICKUP,
+        // changedSlots=1 [(slot=37 short, hashed present + item varint + count varint + 空 patchmap)],
+        // carried=空(0x00)。changed/carried 只跳过，返回头字段。
+        let mut b = Vec::new();
+        write_varint(0, &mut b);
+        write_varint(3, &mut b);
+        b.extend_from_slice(&37i16.to_be_bytes());
+        b.push(0);
+        write_varint(CLICK_PICKUP as i32, &mut b);
+        write_varint(1, &mut b);
+        b.extend_from_slice(&37i16.to_be_bytes());
+        write_bool(true, &mut b);
+        write_varint(55, &mut b);
+        write_varint(1, &mut b);
+        write_varint(0, &mut b);
+        write_varint(0, &mut b);
+        write_bool(false, &mut b);
+        let (got, used) = decode_container_click(&b).unwrap();
+        assert_eq!(used, b.len());
+        assert_eq!(
+            got,
+            ContainerClick { container_id: 0, state_id: 3, slot: 37, button: 0, click_type: CLICK_PICKUP }
+        );
+        // SWAP 头字段同样解析。
+        let mut c = Vec::new();
+        write_varint(0, &mut c);
+        write_varint(4, &mut c);
+        c.extend_from_slice(&9i16.to_be_bytes());
+        c.push(2);
+        write_varint(CLICK_SWAP as i32, &mut c);
+        write_varint(0, &mut c);
+        write_bool(false, &mut c);
+        let (got2, used2) = decode_container_click(&c).unwrap();
+        assert_eq!(used2, c.len());
+        assert_eq!(got2.button, 2);
+        assert_eq!(got2.click_type, CLICK_SWAP);
+        // 非法：clickType 越界 / 截断 / changedSlots 过大。
+        let mut bad = c.clone();
+        bad[5] = 7;
+        assert!(decode_container_click(&bad).is_err());
+        assert!(decode_container_click(&b[..b.len() - 1]).is_err());
+        let mut many = Vec::new();
+        write_varint(0, &mut many);
+        write_varint(0, &mut many);
+        many.extend_from_slice(&0i16.to_be_bytes());
+        many.push(0);
+        write_varint(0, &mut many);
+        write_varint(99, &mut many);
+        assert!(decode_container_click(&many).is_err());
     }
 
     #[test]

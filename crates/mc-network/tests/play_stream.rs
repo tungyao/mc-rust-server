@@ -690,7 +690,7 @@ async fn dig_spawns_pickable_drop_and_inventory_syncs() {
     let (back, is_new) = PlayerInventory::load_from_dir(&dir, "Dropper", DEFAULT_SEED).unwrap();
     assert!(!is_new, "reconnect must load the saved backpack");
     assert_eq!(back.get(36), Some((1, 63)), "placed stone must be consumed");
-    assert_eq!(back.get(9), Some((55, 1)), "picked dirt must persist");
+    assert_eq!(back.get(37), Some((55, 1)), "picked dirt must persist in hotbar");
     let _ = std::fs::remove_dir_all(&dir);
 }
 
@@ -821,6 +821,106 @@ async fn drop_pickup_works_on_busy_connection() {
     let _ = writer.await;
     assert!(saw_take && saw_remove && saw_content, "pickup must happen on a busy connection");
     drop(rh);
+    drop(rx);
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// P18.1 端到端：拾取进快捷栏 → 拖拽换槽（ContainerClick）→ 切手持 → 放出对应方块。
+/// 回归“拖了但服务端没收到、放出隔壁石头”的分叉 bug。
+#[tokio::test]
+async fn drag_then_place_uses_held_block() {
+    use mc_network::DropState;
+    fn click_frame(container: i32, state: i32, slot: i16, button: u8, ty: u8) -> Vec<u8> {
+        let mut b = Vec::new();
+        mc_protocol::write_varint(container, &mut b);
+        mc_protocol::write_varint(state, &mut b);
+        b.extend_from_slice(&slot.to_be_bytes());
+        b.push(button);
+        mc_protocol::write_varint(ty as i32, &mut b);
+        mc_protocol::write_varint(0, &mut b);
+        b.push(0);
+        b
+    }
+    let dir = std::env::temp_dir().join(format!("mc-p18-drag-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    let (tx, rx) = crossbeam_channel::unbounded::<PlayEvent>();
+    let mutable = Arc::new(MutableWorld::new(DEFAULT_SEED));
+    let cache = Arc::new(ChunkCache::new(DEFAULT_SEED, 64).with_mutable(Arc::clone(&mutable)));
+    let drops = Arc::new(DropState::new(dir.clone(), DEFAULT_SEED));
+    let config = NetConfig::new(100, "drag".into(), Arc::new(AtomicUsize::new(0)))
+        .with_play_events(tx)
+        .with_view_distance(2)
+        .with_chunk_cache(cache)
+        .with_mutable_world(Arc::clone(&mutable))
+        .with_drops(Arc::clone(&drops));
+    let addr = spawn_server(config).await;
+    let mut s = login_and_join(addr, "Dragger", 2).await;
+    let (id, _) = read_frame_timeout(&mut s, Duration::from_secs(5)).await.unwrap();
+    assert_eq!(id, packets::PLAY_SET_CONTAINER_CONTENT_S2C_ID);
+
+    let spawn = WorldGen::new(DEFAULT_SEED).spawn_pos();
+    let (fx, fy, fz) = (spawn.0 as f64 + 0.5, spawn.1 as f64, spawn.2 as f64 + 0.5);
+    let (gx, gy, gz) = (spawn.0, spawn.1 - 1, spawn.2);
+    send_pos_y(&mut s, fx, fy, fz).await;
+    // 挖草出土，站着等拾取（快捷栏优先 → 槽 37）。
+    let mut body = Vec::new();
+    packets::PlayerAction { status: 2, x: gx, y: gy, z: gz, face: 1, sequence: 11 }
+        .encode_body(&mut body);
+    mc_network::framing::write_packet(&mut s, packets::PLAY_PLAYER_ACTION_C2S_ID, &body)
+        .await
+        .unwrap();
+    let mut saw_dirt_content = false;
+    for _ in 0..60 {
+        let (id, payload) = read_frame_timeout(&mut s, Duration::from_secs(5)).await.unwrap();
+        if id == packets::PLAY_SET_CONTAINER_CONTENT_S2C_ID {
+            let (c, _) = packets::SetContainerContent::decode_body(&payload).unwrap();
+            if c.slots.get(37) == Some(&packets::Slot { count: 1, item_id: 55 }) {
+                saw_dirt_content = true;
+                break;
+            }
+        }
+    }
+    assert!(saw_dirt_content, "picked dirt must land in hotbar slot 37");
+
+    // 拖拽：左键拿起 37 号槽 → 左键放到 40 号槽（每次点击服务端都全量同步）。
+    for (slot, button) in [(37i16, 0u8), (40i16, 0u8)] {
+        let frame = click_frame(0, 1, slot, button, 0);
+        mc_network::framing::write_packet(&mut s, packets::PLAY_CLICK_CONTAINER_C2S_ID, &frame)
+            .await
+            .unwrap();
+        let (id, payload) = read_frame_timeout(&mut s, Duration::from_secs(5)).await.unwrap();
+        assert_eq!(id, packets::PLAY_SET_CONTAINER_CONTENT_S2C_ID, "click must full-sync");
+        let (c, _) = packets::SetContainerContent::decode_body(&payload).unwrap();
+        if slot == 37 {
+            assert_eq!(c.carried, packets::Slot { count: 1, item_id: 55 }, "pickup must lift to cursor");
+            assert_eq!(c.slots[37], packets::Slot::empty());
+        } else {
+            assert_eq!(c.slots[40], packets::Slot { count: 1, item_id: 55 }, "drop must land in 40");
+            assert_eq!(c.carried, packets::Slot::empty());
+        }
+    }
+
+    // 切手持到 4（槽 40）→ 放：必须落 dirt(10) 而不是石头。
+    let body = [0u8, 4u8];
+    mc_network::framing::write_packet(&mut s, packets::PLAY_SET_HELD_ITEM_C2S_ID, &body)
+        .await
+        .unwrap();
+    let mut ubody = Vec::new();
+    packets::UseItemOn {
+        hand: 0, x: gx, y: gy - 1, z: gz, face: 1,
+        cursor_x: 0.5, cursor_y: 1.0, cursor_z: 0.5,
+        inside_block: false, world_border_hit: false, sequence: 12,
+    }
+    .encode_body(&mut ubody);
+    mc_network::framing::write_packet(&mut s, packets::PLAY_USE_ITEM_ON_C2S_ID, &ubody)
+        .await
+        .unwrap();
+    let (id, payload) = read_frame_timeout(&mut s, Duration::from_secs(5)).await.unwrap();
+    assert_eq!(id, packets::PLAY_BLOCK_UPDATE_S2C_ID);
+    assert_eq!(
+        packets::BlockUpdate::decode_body(&payload).unwrap().0.block_id, 10,
+        "held dirt must place dirt, not fallback stone"
+    );
     drop(rx);
     let _ = std::fs::remove_dir_all(&dir);
 }

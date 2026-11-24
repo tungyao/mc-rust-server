@@ -125,7 +125,7 @@
 | S2C | Set Container Content（背包全量，window 0=46 槽） | `0x12` | VarInt window(0) + VarInt state + Prefixed Array Slot + Slot carried(空) |
 | S2C | Set Container Slot（背包单槽） | `0x14` | VarInt window(0) + VarInt state + Short slot + Slot |
 | C2S | Set Held Item（切手持） | `0x36` | Short BE 0..=8（越界/截断忽略不断线） |
-| C2S | Click Container / Set Creative Mode Slot | `0x12` / `0x39` | P18 只忽略不断线（Hashed Slot/data component 复杂，整理留后续） |
+| C2S | Click Container / Set Creative Mode Slot | `0x12` / `0x39` | P18.1 起 `0x12` 解析头字段并服务端权威应用（PICKUP 拿起/放下/合并/交换、SHIFT 整搬、数字键交换；changed/carried 按 jar 线格式跳过不校验，点后必全量同步回滚分叉）；`0x39` 仍忽略 |
 
 Slot 线格式（普通物品）：count VarInt（0=空，后无字段）；否则 item_id VarInt +
 add数 VarInt(0) + remove数 VarInt(0)。带 component 的解码报错（避免错位整条流）。
