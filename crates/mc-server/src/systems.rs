@@ -20,6 +20,7 @@ pub fn tick_system(mut counter: ResMut<TickCounter>) {
 /// 移动/心跳/断线事件按 conn_id 找到实体，`PlayerAddr` 只用于日志。
 /// 在线数只在这里 `fetch_add` 一次；`Disconnect`/timeout 由 `player_removal_system`
 /// 的唯一删除点 `fetch_sub` 一次。
+/// 出生点优先用共享可变世界（含 override 的抬升修正），无 SharedWorld（单测）时回退基底。
 pub fn handle_new_connections(
     mut commands: Commands,
     cfg: Res<ServerConfig>,
@@ -27,6 +28,7 @@ pub fn handle_new_connections(
     online: Res<PlayersOnline>,
     existing: Query<&PlayerConnId>,
     mut play: ResMut<PlayScaffold>,
+    world: Option<Res<crate::persist::SharedWorld>>,
 ) {
     // 同 tick 内重复 conn_id 也幂等：query 里已有 + 本 tick 新 spawn 的都记入 seen。
     let mut seen: HashSet<u64> = existing.iter().map(|c| c.0).collect();
@@ -39,7 +41,10 @@ pub fn handle_new_connections(
             continue;
         }
         let n = online.0.fetch_add(1, Ordering::SeqCst) + 1;
-        let pos = Position::at_spawn(cfg.seed);
+        let pos = world
+            .as_ref()
+            .map(|w| Position::from_block(w.0.spawn_pos()))
+            .unwrap_or_else(|| Position::at_spawn(cfg.seed));
         let ent = commands
             .spawn((
                 PlayerAddr(conn.addr),

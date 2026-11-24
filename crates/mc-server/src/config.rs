@@ -11,6 +11,8 @@ pub const DEFAULT_SEED: i64 = mc_world::DEFAULT_SEED;
 /// 默认压缩阈值：-1 = 禁用（原行为，不发 SetCompression，全链路明文帧）。
 /// >=0 = Login Success 前发 SetCompression(threshold)，Login/Configuration/Play 后续包全走压缩帧。
 pub const DEFAULT_COMPRESSION_THRESHOLD: i32 = -1;
+/// 默认存档目录：可变世界 override 落盘位置（`overrides-<seed>.dat`）。
+pub const DEFAULT_WORLD_DIR: &str = "world";
 
 #[derive(Debug, Clone, Resource, Serialize, Deserialize)]
 #[serde(default)]
@@ -22,6 +24,8 @@ pub struct ServerConfig {
     pub seed: i64,
     /// 压缩阈值（字节）：-1 禁用；>=0 启用。旧 server.toml 缺该键时按默认 -1 补齐。
     pub compression_threshold: i32,
+    /// 存档目录：P17 override 落盘位置；旧 toml 缺键时按默认 `world` 补齐。
+    pub world_dir: String,
 }
 
 impl Default for ServerConfig {
@@ -33,6 +37,7 @@ impl Default for ServerConfig {
             view_distance: DEFAULT_VIEW_DISTANCE,
             seed: DEFAULT_SEED,
             compression_threshold: DEFAULT_COMPRESSION_THRESHOLD,
+            world_dir: DEFAULT_WORLD_DIR.to_string(),
         }
     }
 }
@@ -97,6 +102,7 @@ mod tests {
         assert_eq!(cfg.view_distance, DEFAULT_VIEW_DISTANCE);
         assert_eq!(cfg.seed, DEFAULT_SEED);
         assert_eq!(cfg.compression_threshold, DEFAULT_COMPRESSION_THRESHOLD, "compression stays disabled by default");
+        assert_eq!(cfg.world_dir, DEFAULT_WORLD_DIR);
         // 文件已落盘，且内容可再解析
         let text = std::fs::read_to_string(&p).unwrap();
         assert!(text.contains("view_distance"));
@@ -118,6 +124,7 @@ mod tests {
         .unwrap();
         let cfg = ServerConfig::load_or_create(&p).unwrap();
         assert_eq!(cfg.compression_threshold, -1, "old toml must keep old plain-frame behavior");
+        assert_eq!(cfg.world_dir, DEFAULT_WORLD_DIR, "old toml saves to default world dir");
         assert_eq!(cfg.max_players, 7);
         let _ = std::fs::remove_file(&p);
     }
@@ -144,6 +151,7 @@ mod tests {
             view_distance: 12,
             seed: 987654321,
             compression_threshold: 256,
+            world_dir: "world-test".into(),
         };
         std::fs::write(&p, toml::to_string_pretty(&cfg).unwrap()).unwrap();
         let back = ServerConfig::load_or_create(&p).unwrap();
@@ -152,6 +160,7 @@ mod tests {
         assert_eq!(back.view_distance, 12);
         assert_eq!(back.seed, 987654321);
         assert_eq!(back.compression_threshold, 256);
+        assert_eq!(back.world_dir, "world-test");
         let _ = std::fs::remove_file(&p);
     }
 

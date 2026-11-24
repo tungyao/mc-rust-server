@@ -34,6 +34,11 @@ impl Position {
     /// 按世界 seed 计算出生位置：x/z 固定 369/381，y = 地表上方 1 格。
     pub fn at_spawn(seed: i64) -> Self {
         let s = mc_world::WorldGen::new(seed).spawn_pos();
+        Self::from_block(s)
+    }
+
+    /// 方块坐标 → 站立位置（中心 +0.5，y 为方块上方）。
+    pub fn from_block(s: mc_core::BlockPos) -> Self {
         Self {
             x: s.0 as f64 + 0.5,
             y: s.1 as f64,
@@ -187,6 +192,12 @@ pub fn movement_ingest_system(
                     info!("disconnect addr={addr} conn_id={conn_id} (entity not visible yet, queue retry)");
                 }
                 pending.push(conn_id);
+            }
+            mc_network::PlayEvent::BlockEdit { addr, conn_id, x, y, z, old_id, new_id } => {
+                // P17：落子与回包已在 net 线程完成（权威判定见 login_route），ECS 只记日志。
+                debug!(
+                    "block edit addr={addr} conn_id={conn_id} pos=({x},{y},{z}) {old_id}->{new_id}"
+                );
             }
         }
     }
