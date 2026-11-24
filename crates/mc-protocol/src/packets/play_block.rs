@@ -24,6 +24,8 @@ pub const PLAY_USE_ITEM_ON_C2S_ID: i32 = 0x42;
 pub const PLAY_USE_ITEM_C2S_ID: i32 = 0x43;
 /// C2S Punch（挥拳动画）包 ID（777 SB `0x2E`）：空包体，只忽略。
 pub const PLAY_PUNCH_C2S_ID: i32 = 0x2E;
+/// C2S Click Container：`container_click`（Hashed Slot 复杂，本轮只忽略不断线，见模块文档）。
+pub const PLAY_CLICK_CONTAINER_C2S_ID: i32 = 0x12;
 /// C2S Set Held Item（切换手持槽位）包 ID（777 SB `0x36`）：P17 暂不解析，只忽略。
 pub const PLAY_SET_HELD_ITEM_C2S_ID: i32 = 0x36;
 /// C2S Set Creative Mode Slot（创造模式点物品）包 ID（777 SB `0x39`）：P17 暂不解析，只忽略。

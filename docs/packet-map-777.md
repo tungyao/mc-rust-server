@@ -101,4 +101,46 @@
 | S2C | Block Update（单方块） | `0x08` | Position + blockstate VarInt（全局 palette ID） |
 | S2C | Acknowledge Block Change | `0x04` | Sequence VarInt（确认客户端预测；拒绝时先发 BlockUpdate 回滚） |
 | S2C | Update Section Blocks | `0x56` | P17 未用（单方块用 0x08 已足够；跨 section 批量留待多人/大编辑） |
-| C2S | Set Held Item / Set Creative Mode Slot | `0x36` / `0x39` | P17 暂不解析，只忽略（Slot 的 data component 需注册表驱动解码，见 HANDOFF §5） |
+| C2S | Set Held Item / Set Creative Mode Slot | `0x36` / `0x39` | P17 暂不解析；P18 起 `0x36` 按 Short 解析切手持（见 §7），`0x39` 仍忽略（Slot 的 data component 需注册表驱动解码，见 HANDOFF §5） |
+
+## 7. Play 掉落物/背包（P18 新增，均已按 777 核对）
+
+> 来源：本页 Play 包表（clientbound `add_entity` 1/`set_entity_data` 101/`remove_entities` 78/
+> `entity_position_sync` 35/`move_entity_pos` 54/`take_item_entity` 127/
+> `container_set_content` 18/`container_set_slot` 20；serverbound `set_carried_item` 54/
+> `container_click` 18）。
+> 注：`0x36` 在 S2C 是 `move_entity_pos`（Update Entity Position），在 C2S 是
+> `set_carried_item`（Set Held Item）——方向不同，包体完全不同，不要混。
+> C2S SetHeld 是 **Short BE**（0..=8），S2C 同名 `set_held_slot`（0x6B）是 VarInt。
+> `0x12` 同理：S2C=`container_set_content`，C2S=`container_click`。
+
+| 方向 | 包 | 777 ID | 线格式（本服实现） |
+|---|---|---|---|
+| S2C | Spawn Entity（掉落物，type=`minecraft:item`=72） | `0x01` | VarInt entity_id + UUID(16B) + VarInt type(72) + 3×Double + LpVec3 + 3×Angle + VarInt data(0) |
+| S2C | Set Entity Data（物品栈元数据） | `0x65` | VarInt entity_id + [0x08 + VarInt 7 + Slot] + 0xFF |
+| S2C | Remove Entities（despawn/拾取） | `0x4E` | Prefixed Array VarInt |
+| S2C | Teleport Entity（`entity_position_sync`，线性路径） | `0x23` | VarInt id + VarInt path(0) + 3×Double + Float yaw + Float pitch + Bool on_ground |
+| S2C | Update Entity Position（`move_entity_pos`，step=0） | `0x36` | VarInt id + VarInt props(bit0 on_ground，高位 step 数=0) + 3×Short（差量×4096） |
+| S2C | Pickup Item（拾取动画） | `0x7F` | 3×VarInt（collected/collector=LoginPlay entity_id 1/count） |
+| S2C | Set Container Content（背包全量，window 0=46 槽） | `0x12` | VarInt window(0) + VarInt state + Prefixed Array Slot + Slot carried(空) |
+| S2C | Set Container Slot（背包单槽） | `0x14` | VarInt window(0) + VarInt state + Short slot + Slot |
+| C2S | Set Held Item（切手持） | `0x36` | Short BE 0..=8（越界/截断忽略不断线） |
+| C2S | Click Container / Set Creative Mode Slot | `0x12` / `0x39` | P18 只忽略不断线（Hashed Slot/data component 复杂，整理留后续） |
+
+Slot 线格式（普通物品）：count VarInt（0=空，后无字段）；否则 item_id VarInt +
+add数 VarInt(0) + remove数 VarInt(0)。带 component 的解码报错（避免错位整条流）。
+LpVec3 见 Data types#LpVec3（零向量编 1 字节 0x00；wiki (1,0,-1) 等样本向量有单测断言）。
+Entity metadata：index u8(8) + type VarInt(7=Slot) + Slot + 0xFF（Item 实体的物品栏）。
+`minecraft:item` 在 EntityType 注册表 = **72**；物品 ID（26.3 客户端 jar
+`BuiltInRegistries.ITEM` 实测，`C:\Users\qwe\AppData\Local\Temp\ItemIds.java`，未提交）：
+
+| 物品 | item ID | 物品 | item ID |
+|---|---|---|---|
+| stone | 1 | dirt | 55 |
+| cobblestone | 62 | oak_sapling | 77 |
+| sand | 88 | oak_log | 163 |
+| oak_leaves | 215 | coal | 1010 |
+| stick | 1060 | raw_iron | 1017 |
+
+entity：`minecraft:item`=72，`minecraft:experience_orb`=50，`minecraft:player`=159；
+ITEM 注册表共 1658 项，ENTITY_TYPE 共 161 项。
