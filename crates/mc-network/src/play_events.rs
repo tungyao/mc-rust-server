@@ -16,6 +16,9 @@ pub enum PlayEvent {
     /// 连接结束（正常 EOF/读错误/写失败/KeepAlive 超时/Join 序列失败），只发一次。
     /// ECS 按 `conn_id` 找到实体后立即 despawn；与 15s timeout 去重，online 只减一次。
     Disconnect { addr: SocketAddr, conn_id: u64 },
+    /// P17 方块编辑（已由 net 线程做服务端权威判定并落子 + 回包）：
+    /// ECS 只做日志/未来多人同步钩子；存档脏标记已在 `MutableWorld::set` 内记录。
+    BlockEdit { addr: SocketAddr, conn_id: u64, x: i32, y: i32, z: i32, old_id: u16, new_id: u16 },
 }
 
 #[cfg(test)]

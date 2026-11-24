@@ -7,19 +7,29 @@
 //! P16 起 `bodies()` 用 rayon 并行生成/编码一批缺失区块（Join 441 块的主路径）。
 use mc_core::ChunkPos;
 use mc_protocol::packets;
-use mc_world::WorldGen;
+use mc_world::{MutableWorld, WorldGen};
 use std::collections::{HashMap, VecDeque};
 use std::sync::{Arc, Mutex};
+use tracing::warn;
 
 /// 默认容量：1024 块，足以覆盖 radius=10 视距（441）+ 跨区块移动余量。
 pub const DEFAULT_CHUNK_CACHE_CAPACITY: usize = 1024;
 
 /// 编码一个 chunk 的 ChunkData 包体（不含 packet id / 外层长度）。
+/// 纯基底路径（无 override 时用；与 [`encode_chunk_data_body_mutable`] 同编码）.
 pub fn encode_chunk_data_body(world: &WorldGen, pos: ChunkPos) -> Vec<u8> {
-    let chunk = world.generate(pos);
+    encode_generated(&world.generate(pos))
+}
+
+/// 编码一个带 override 的 chunk（P17 挖掘/放置后重发用）。
+pub fn encode_chunk_data_body_mutable(world: &MutableWorld, pos: ChunkPos) -> Vec<u8> {
+    encode_generated(&world.generate_chunk(pos))
+}
+
+fn encode_generated(chunk: &mc_world::GeneratedChunk) -> Vec<u8> {
     let chunk_data = packets::PlayChunkData {
-        chunk_x: pos.0,
-        chunk_z: pos.1,
+        chunk_x: chunk.pos.0,
+        chunk_z: chunk.pos.1,
         heightmaps_nbt: chunk.heightmaps_bytes(),
         section_bytes: chunk.network_bytes(),
         light_bytes: chunk.light_bytes(),
@@ -35,7 +45,7 @@ pub struct ChunkCacheStats {
     pub misses: u64,
 }
 
-#[derive(Debug)]
+#[derive(Debug, Default)]
 struct CacheInner {
     map: HashMap<ChunkPos, Arc<Vec<u8>>>,
     /// FIFO：命中不移动，只有新插入才 push_back；淘汰从队首跳过已不存在的项。
@@ -55,24 +65,34 @@ impl CacheInner {
 }
 
 /// 线程安全（`Mutex`）的 ChunkData 包体缓存，可被多连接共享（`Arc<ChunkCache>`）。
+///
+/// P17：可选绑定 [`MutableWorld`]；绑定后编码走 `generate_chunk`（基底 + override），
+/// 方块编辑后调 [`ChunkCache::invalidate`] 丢弃对应 chunk，下次发送即含新方块。
 #[derive(Debug)]
 pub struct ChunkCache {
     seed: i64,
     capacity: usize,
+    mutable: Option<Arc<MutableWorld>>,
     inner: Mutex<CacheInner>,
 }
 
 impl ChunkCache {
     pub fn new(seed: i64, capacity: usize) -> Self {
-        Self {
-            seed,
-            capacity,
-            inner: Mutex::new(CacheInner {
-                map: HashMap::new(),
-                order: VecDeque::new(),
-                stats: ChunkCacheStats::default(),
-            }),
+        Self { seed, capacity, mutable: None, inner: Mutex::new(CacheInner::default()) }
+    }
+
+    /// 绑定可变世界（P17 挖掘/放置后重编用）；seed 不一致时 warn（仍绑定，
+    /// 但编码用 MutableWorld 自己的 seed，调用方应保证两者一致）。
+    pub fn with_mutable(mut self, mutable: Arc<MutableWorld>) -> Self {
+        if mutable.seed() != self.seed {
+            warn!(
+                "chunk cache seed {} != mutable world seed {}, encoding follows the mutable world",
+                self.seed,
+                mutable.seed()
+            );
         }
+        self.mutable = Some(mutable);
+        self
     }
 
     pub fn seed(&self) -> i64 {
@@ -102,6 +122,7 @@ impl ChunkCache {
     }
 
     /// 取包体：命中直接返回同一 `Arc`；未命中则用本 cache 的 seed 生成并插入。
+    /// 绑定 MutableWorld 后走基底 + override（含玩家编辑）。
     /// 生成在锁外完成，避免长时间阻塞其他连接。
     pub fn body(&self, pos: ChunkPos) -> Arc<Vec<u8>> {
         {
@@ -111,7 +132,10 @@ impl ChunkCache {
                 return hit;
             }
         }
-        let body = Arc::new(encode_chunk_data_body(&WorldGen::new(self.seed), pos));
+        let body = match &self.mutable {
+            Some(m) => Arc::new(encode_chunk_data_body_mutable(m, pos)),
+            None => Arc::new(encode_chunk_data_body(&WorldGen::new(self.seed), pos)),
+        };
         let mut inner = self.lock();
         // 生成期间可能有其他线程先插入同一区块：复用已有字节，保持确定性。
         if let Some(existing) = inner.map.get(&pos).cloned() {
@@ -126,6 +150,12 @@ impl ChunkCache {
         inner.map.insert(pos, Arc::clone(&body));
         inner.evict_to_capacity(self.capacity);
         body
+    }
+
+    /// P17：方块编辑后使该 chunk 缓存失效（返回是否命中旧条目）。
+    /// 下次发送时按当前 override 重编；FIFO 队列里的陈旧位置由淘汰时顺带清理。
+    pub fn invalidate(&self, pos: ChunkPos) -> bool {
+        self.lock().map.remove(&pos).is_some()
     }
 
     /// 批量取包体（Join/跨区块一批）：顺序与 `positions` 一致，未命中项用 rayon
@@ -226,6 +256,32 @@ mod tests {
         assert!(!body.is_empty());
         assert_eq!(cache.len(), 0);
         assert_eq!(cache.capacity(), 0);
+    }
+
+    #[test]
+    fn invalidate_drops_chunk_and_rebuilds_with_override() {
+        use mc_world::MutableWorld;
+        let mutable = Arc::new(MutableWorld::new(DEFAULT_SEED));
+        let cache = ChunkCache::new(DEFAULT_SEED, 8).with_mutable(Arc::clone(&mutable));
+        let pos = position(23, 23);
+        let before = cache.body(pos);
+        assert!(cache.contains(pos));
+        // 未编辑时与纯基底逐字节一致（override 为空无污染）。
+        assert_eq!(
+            before.as_slice(),
+            encode_chunk_data_body(&WorldGen::new(DEFAULT_SEED), pos).as_slice()
+        );
+        // 在出生 chunk 挖一格：失效后重编必须含空气。
+        let s = WorldGen::new(DEFAULT_SEED).spawn_pos();
+        mutable.set(s.0, s.1 - 1, s.2, mc_world::AIR_BLOCK_ID);
+        assert!(cache.invalidate(pos), "edited chunk must have a cached entry");
+        assert!(!cache.contains(pos));
+        let after = cache.body(pos);
+        assert_ne!(before.as_slice(), after.as_slice(), "rebuilt body must contain the edit");
+        let (chunk, _) = packets::PlayChunkData::decode_body(&after).unwrap();
+        assert_eq!((chunk.chunk_x, chunk.chunk_z), (23, 23));
+        // 未命中失效返回 false，不 panic。
+        assert!(!cache.invalidate(position(99, -99)));
     }
 
     #[test]

@@ -3,6 +3,7 @@ use super::chunk_cache::ChunkCache;
 use super::chunk_view::clamp_view_radius;
 use super::play_events::PlayEvent;
 use crossbeam_channel::Sender;
+use mc_world::MutableWorld;
 use std::sync::{Arc, atomic::AtomicUsize};
 
 /// Status 回包默认配置；`NetConfig::default()` 的回退值。
@@ -28,6 +29,8 @@ pub struct NetConfig {
     pub play_events: Option<Sender<PlayEvent>>,
     /// 多连接共享的已编码 ChunkData 包体缓存；None 时每块直接 WorldGen 生成。
     pub chunk_cache: Option<Arc<ChunkCache>>,
+    /// 服务端权威可变世界（P17 挖掘/放置）；None 时忽略方块交互包（旧行为）。
+    pub mutable_world: Option<Arc<MutableWorld>>,
 }
 
 impl Default for NetConfig {
@@ -41,6 +44,7 @@ impl Default for NetConfig {
             compression_threshold: DEFAULT_COMPRESSION_THRESHOLD,
             play_events: None,
             chunk_cache: None,
+            mutable_world: None,
         }
     }
 }
@@ -58,6 +62,7 @@ impl NetConfig {
             compression_threshold: DEFAULT_COMPRESSION_THRESHOLD,
             play_events: None,
             chunk_cache: None,
+            mutable_world: None,
         }
     }
 
@@ -99,6 +104,11 @@ impl NetConfig {
         self.chunk_cache = Some(cache);
         self
     }
+
+    pub fn with_mutable_world(mut self, world: Arc<MutableWorld>) -> Self {
+        self.mutable_world = Some(world);
+        self
+    }
 }
 
 #[cfg(test)]
@@ -113,6 +123,7 @@ mod tests {
         assert_eq!(cfg.compression_threshold, DEFAULT_COMPRESSION_THRESHOLD);
         assert!(cfg.play_events.is_none());
         assert!(cfg.chunk_cache.is_none());
+        assert!(cfg.mutable_world.is_none());
         assert_eq!(cfg.max_players, 42);
     }
 

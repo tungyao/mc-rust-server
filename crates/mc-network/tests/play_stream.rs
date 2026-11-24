@@ -3,10 +3,10 @@
 //! 2) 玩家跨区块时 net 线程发 SetCenterChunk + 卸载边界列 + 补发边界列，
 //!    ChunkBatchStart/Finished 成对且 batch_size 正确，不重复发送；
 //! 3) view_distance 真正驱动初始块数 / LoginPlay 字段 / 跨区块 add-remove 数量。
-use mc_network::{NetConfig, PlayEvent, serve};
+use mc_network::{ChunkCache, NetConfig, PlayEvent, serve};
 use mc_protocol::packets::{self, Handshake, HandshakeNextState, HANDSHAKE_PACKET_ID};
 use mc_protocol::read_varint;
-use mc_world::{WorldGen, DEFAULT_SEED};
+use mc_world::{MutableWorld, WorldGen, DEFAULT_SEED};
 use std::sync::Arc;
 use std::sync::atomic::AtomicUsize;
 use std::time::Duration;
@@ -424,4 +424,108 @@ async fn crossing_chunk_streams_exact_add_unload_batch_without_duplicates() {
     let (id, payload) = read_frame_timeout(&mut s, Duration::from_secs(5)).await.unwrap();
     assert_eq!(id, packets::PLAY_CHUNK_BATCH_FINISHED_ID);
     assert_eq!(read_varint(&payload).unwrap().0, 9);
+}
+
+async fn send_pos_y(stream: &mut TcpStream, x: f64, y: f64, z: f64) {
+    let mut body = Vec::new();
+    packets::MovePlayerPos { x, y, z, on_ground: true, horizontal_collision: false }
+        .encode_body(&mut body);
+    mc_network::framing::write_packet(stream, packets::PLAY_MOVE_POS_C2S_ID, &body).await.unwrap();
+}
+
+/// P17 端到端：挖出生点脚下草方块 → 放石头 → BlockUpdate+Ack 回包 → 事件 → 落盘重读一致。
+#[tokio::test]
+async fn dig_and_place_roundtrip_with_blockupdate_ack_and_persistence() {
+    let (tx, rx) = crossbeam_channel::unbounded::<PlayEvent>();
+    let mutable = Arc::new(MutableWorld::new(DEFAULT_SEED));
+    let cache = Arc::new(ChunkCache::new(DEFAULT_SEED, 64).with_mutable(Arc::clone(&mutable)));
+    let config = NetConfig::new(100, "edit".into(), Arc::new(AtomicUsize::new(0)))
+        .with_play_events(tx)
+        .with_view_distance(2)
+        .with_chunk_cache(cache)
+        .with_mutable_world(Arc::clone(&mutable));
+    let addr = spawn_server(config).await;
+    let mut s = login_and_join(addr, "Editor", 2).await;
+
+    // 出生点脚下是草方块（3×3 干燥平台保证）。
+    let spawn = WorldGen::new(DEFAULT_SEED).spawn_pos();
+    let (fx, fy, fz) = (spawn.0 as f64 + 0.5, spawn.1 as f64, spawn.2 as f64 + 0.5);
+    let (gx, gy, gz) = (spawn.0, spawn.1 - 1, spawn.2);
+    assert_eq!(mutable.get(gx, gy, gz), 9, "spawn footing must be grass_block(9)");
+    // 先同步服务端 last_pos（判定距离用它），消费掉移动事件。
+    send_pos_y(&mut s, fx, fy, fz).await;
+    match next_event(&rx).await {
+        PlayEvent::Movement { .. } => {}
+        other => panic!("expected movement event, got {other:?}"),
+    }
+
+    // 挖：Player Action finish digging，seq=11 → BlockUpdate(air) + Ack(11)。
+    let mut body = Vec::new();
+    packets::PlayerAction { status: 2, x: gx, y: gy, z: gz, face: 1, sequence: 11 }
+        .encode_body(&mut body);
+    mc_network::framing::write_packet(&mut s, packets::PLAY_PLAYER_ACTION_C2S_ID, &body)
+        .await
+        .unwrap();
+    let (id, payload) = read_frame_timeout(&mut s, Duration::from_secs(5)).await.unwrap();
+    assert_eq!(id, packets::PLAY_BLOCK_UPDATE_S2C_ID, "dig must push BlockUpdate first");
+    let (u, _) = packets::BlockUpdate::decode_body(&payload).unwrap();
+    assert_eq!((u.x, u.y, u.z, u.block_id), (gx, gy, gz, 0), "dug block must become air(0)");
+    let (id, payload) = read_frame_timeout(&mut s, Duration::from_secs(5)).await.unwrap();
+    assert_eq!(id, packets::PLAY_BLOCK_CHANGED_ACK_S2C_ID, "dig must be acked");
+    assert_eq!(read_varint(&payload).unwrap().0, 11);
+    assert_eq!(mutable.get(gx, gy, gz), 0, "server world must record air");
+    match next_event(&rx).await {
+        PlayEvent::BlockEdit { x, y, z, old_id, new_id, .. } => {
+            assert_eq!((x, y, z, old_id, new_id), (gx, gy, gz, 9, 0));
+        }
+        other => panic!("expected block edit event, got {other:?}"),
+    }
+
+    // 放：点下方泥土顶面，seq=12 → BlockUpdate(stone) + Ack(12)。
+    let mut body = Vec::new();
+    packets::UseItemOn {
+        hand: 0,
+        x: gx,
+        y: gy - 1,
+        z: gz,
+        face: 1,
+        cursor_x: 0.5,
+        cursor_y: 1.0,
+        cursor_z: 0.5,
+        inside_block: false,
+        world_border_hit: false,
+        sequence: 12,
+    }
+    .encode_body(&mut body);
+    mc_network::framing::write_packet(&mut s, packets::PLAY_USE_ITEM_ON_C2S_ID, &body)
+        .await
+        .unwrap();
+    let (id, payload) = read_frame_timeout(&mut s, Duration::from_secs(5)).await.unwrap();
+    assert_eq!(id, packets::PLAY_BLOCK_UPDATE_S2C_ID, "place must push BlockUpdate first");
+    let (u, _) = packets::BlockUpdate::decode_body(&payload).unwrap();
+    assert_eq!((u.x, u.y, u.z, u.block_id), (gx, gy, gz, 1), "placed block must be stone(1)");
+    let (id, payload) = read_frame_timeout(&mut s, Duration::from_secs(5)).await.unwrap();
+    assert_eq!(id, packets::PLAY_BLOCK_CHANGED_ACK_S2C_ID, "place must be acked");
+    assert_eq!(read_varint(&payload).unwrap().0, 12);
+    assert_eq!(mutable.get(gx, gy, gz), 1, "server world must record stone");
+    match next_event(&rx).await {
+        PlayEvent::BlockEdit { x, y, z, old_id, new_id, .. } => {
+            assert_eq!((x, y, z, old_id, new_id), (gx, gy, gz, 0, 1));
+        }
+        other => panic!("expected block edit event, got {other:?}"),
+    }
+
+    // 断线 → Disconnect 事件；落盘重读：石头仍在（重启不丢）。
+    drop(s);
+    match next_event(&rx).await {
+        PlayEvent::Disconnect { .. } => {}
+        other => panic!("expected disconnect event, got {other:?}"),
+    }
+    let dir = std::env::temp_dir().join(format!("mc-p17-e2e-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    assert_eq!(mutable.save_to_dir(&dir).unwrap(), 1, "dig+place on one column = 1 override");
+    let back = MutableWorld::load_from_dir(&dir, DEFAULT_SEED).unwrap();
+    assert_eq!(back.get(gx, gy, gz), 1, "placed stone must survive save/load");
+    assert_eq!(back.override_count(), 1);
+    let _ = std::fs::remove_dir_all(&dir);
 }

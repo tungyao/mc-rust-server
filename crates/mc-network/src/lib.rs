@@ -9,7 +9,10 @@ pub mod login_route;
 pub mod play_events;
 pub mod status_route;
 
-pub use chunk_cache::{encode_chunk_data_body, ChunkCache, ChunkCacheStats, DEFAULT_CHUNK_CACHE_CAPACITY};
+pub use chunk_cache::{
+    encode_chunk_data_body, encode_chunk_data_body_mutable, ChunkCache, ChunkCacheStats,
+    DEFAULT_CHUNK_CACHE_CAPACITY,
+};
 pub use chunk_view::{
     clamp_view_radius, view_chunk_count, ChunkView, ChunkViewUpdate, MAX_VIEW_RADIUS,
     MIN_VIEW_RADIUS, PLAY_VIEW_CHUNK_COUNT, PLAY_VIEW_RADIUS,

@@ -3,13 +3,13 @@
 //! 同时 net 线程自身按玩家跨区块动态补发有效视距区块并卸载越界区块。
 //! 视距来自 `ServerConfig.view_distance`（`clamp_view_radius` 限制 2..=10），
 //! 区块包体优先走共享 `ChunkCache`；连接结束在所有退出路径恰好投递一次 Disconnect。
-use super::chunk_cache::{encode_chunk_data_body, ChunkCache};
+use super::chunk_cache::{encode_chunk_data_body, encode_chunk_data_body_mutable, ChunkCache};
 use super::chunk_view::{clamp_view_radius, view_chunk_count, ChunkView, PLAY_VIEW_RADIUS};
 use super::framing::{read_packet, read_packet_framed, to_io_invalid, write_packet, write_packet_framed};
 use super::play_events::PlayEvent;
 use crossbeam_channel::Sender;
 use mc_protocol::packets;
-use mc_world::{WorldGen, DEFAULT_SEED};
+use mc_world::{MutableWorld, WorldGen, DEFAULT_SEED};
 use std::net::SocketAddr;
 use std::sync::Arc;
 use tokio::net::TcpStream;
@@ -37,6 +37,8 @@ pub struct PlayOptions {
     pub events: Option<Sender<PlayEvent>>,
     /// 共享区块包体缓存；seed 不匹配时会被忽略并 warn。
     pub chunk_cache: Option<Arc<ChunkCache>>,
+    /// 服务端权威可变世界（P17 挖掘/放置）；None 时方块交互包只忽略不断线。
+    pub mutable_world: Option<Arc<MutableWorld>>,
 }
 
 impl PlayOptions {
@@ -48,6 +50,7 @@ impl PlayOptions {
             conn_id: crate::next_conn_id(),
             events: None,
             chunk_cache: None,
+            mutable_world: None,
         }
     }
 
@@ -68,6 +71,11 @@ impl PlayOptions {
 
     pub fn with_chunk_cache(mut self, cache: Arc<ChunkCache>) -> Self {
         self.chunk_cache = Some(cache);
+        self
+    }
+
+    pub fn with_mutable_world(mut self, world: Arc<MutableWorld>) -> Self {
+        self.mutable_world = Some(world);
         self
     }
 }
@@ -337,7 +345,9 @@ async fn enter_play_inner(
     // 出生点与中心区块由 WorldGen 按 seed 计算（x/z 固定 369/381 → chunk 23,23）。
     let center = world.spawn_chunk();
     let mut view = ChunkView::new(center, radius);
-    let keepalive_id = send_join_sequence(stream, profile, opts, &mut view, &world, cache).await?;
+    let mutable = opts.mutable_world.as_deref();
+    let keepalive_id =
+        send_join_sequence(stream, profile, opts, &mut view, &world, cache, mutable).await?;
     info!(
         "play join sent uuid={} name={} conn_id={} keepalive={} view_sent={} view_radius={} seed={} spawn=({},{},{})",
         profile.uuid,
@@ -351,7 +361,7 @@ async fn enter_play_inner(
         spawn.1,
         spawn.2
     );
-    play_loop(stream, addr, profile, opts, keepalive_id, view, &world, cache).await
+    play_loop(stream, addr, profile, opts, keepalive_id, view, &world, cache, mutable).await
 }
 
 /// 压缩感知写包：threshold>=0 走压缩帧，否则普通帧。
@@ -364,14 +374,19 @@ async fn write_packet_any(stream: &mut TcpStream, packet_id: i32, payload: &[u8]
 }
 
 /// 单块 ChunkData 包体：优先共享缓存（已编码 Vec<u8>），无缓存时直接生成+编码。
+/// 缓存未绑定 MutableWorld 但 PlayOptions 带了可变世界时，走 override 路径单块生成。
 fn play_chunk_body(
     world: &WorldGen,
     pos: mc_core::ChunkPos,
     cache: Option<&ChunkCache>,
+    mutable: Option<&MutableWorld>,
 ) -> Arc<Vec<u8>> {
     match cache {
         Some(cache) => cache.body(pos),
-        None => Arc::new(encode_chunk_data_body(world, pos)),
+        None => match mutable {
+            Some(m) => Arc::new(encode_chunk_data_body_mutable(m, pos)),
+            None => Arc::new(encode_chunk_data_body(world, pos)),
+        },
     }
 }
 
@@ -385,13 +400,14 @@ async fn send_chunk_batch(
     add: &[mc_core::ChunkPos],
     threshold: i32,
     cache: Option<&ChunkCache>,
+    mutable: Option<&MutableWorld>,
 ) -> io::Result<()> {
     if add.is_empty() {
         return Ok(());
     }
     let bodies: Vec<Arc<Vec<u8>>> = match cache {
         Some(cache) => cache.bodies(add),
-        None => add.iter().map(|&pos| play_chunk_body(world, pos, None)).collect(),
+        None => add.iter().map(|&pos| play_chunk_body(world, pos, None, mutable)).collect(),
     };
     write_packet_any(stream, packets::PLAY_CHUNK_BATCH_START_ID, &[], threshold).await?;
     for body in &bodies {
@@ -419,6 +435,7 @@ async fn send_join_sequence(
     view: &mut ChunkView,
     world: &WorldGen,
     cache: Option<&ChunkCache>,
+    mutable: Option<&MutableWorld>,
 ) -> io::Result<i64> {
     let threshold = opts.threshold;
     let radius = view.radius();
@@ -450,7 +467,7 @@ async fn send_join_sequence(
     let update = view.plan(center);
     debug_assert_eq!(update.add.len(), view_chunk_count(radius));
     let started = Instant::now();
-    send_chunk_batch(stream, world, &update.add, threshold, cache).await?;
+    send_chunk_batch(stream, world, &update.add, threshold, cache, mutable).await?;
     info!(
         "play join chunks sent uuid={} name={} conn_id={} count={} view_radius={} elapsed_ms={}",
         profile.uuid,
@@ -493,6 +510,191 @@ fn emit_play_event(events: &Option<Sender<PlayEvent>>, ev: PlayEvent) {
     }
 }
 
+// ---------------------------------------------------------------------------
+// P17 方块编辑（服务端权威，net 线程即时判定 + 回包）。
+//
+// 约束：socket 所有权在 net 线程，ECS 没有写通道，因此权威判定必须和 socket
+// 写在同一线程完成（判定规则仍是服务端规则：距离/越界/可挖/可放，客户端预测
+// 只做参考，非法一律回滚重发）。ECS 通过 `MutableWorld` 共享看到同一份世界，
+// 并负责定时/断线/退出刷盘（见 mc-server persist）。
+// ---------------------------------------------------------------------------
+
+/// 单方块变更：`new_id == old_id` 表示回滚重发（未落子）。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct BlockChange {
+    pub x: i32,
+    pub y: i32,
+    pub z: i32,
+    pub old_id: u16,
+    pub new_id: u16,
+}
+
+/// 权威判定结果：ack 序列号 + 要下发的 BlockUpdate 列表（空 = 只 ack）。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct BlockEditOutcome {
+    pub sequence: i32,
+    pub changes: Vec<BlockChange>,
+}
+
+fn eye_of(pos: (f64, f64, f64)) -> (f64, f64, f64) {
+    (pos.0, pos.1 + mc_world::EYE_HEIGHT, pos.2)
+}
+
+fn eye_block_dist(eye: (f64, f64, f64), x: i32, y: i32, z: i32) -> f64 {
+    let dx = eye.0 - (x as f64 + 0.5);
+    let dy = eye.1 - (y as f64 + 0.5);
+    let dz = eye.2 - (z as f64 + 0.5);
+    (dx * dx + dy * dy + dz * dz).sqrt()
+}
+
+/// 目标 chunk 是否在玩家视距内（切比雪夫）。
+fn in_view(center: mc_core::ChunkPos, radius: i32, x: i32, z: i32) -> bool {
+    let c = mc_world::chunk_of_block(x, z);
+    (c.0 - center.0).abs() <= radius && (c.1 - center.1).abs() <= radius
+}
+
+fn rollback(world: &MutableWorld, x: i32, y: i32, z: i32) -> BlockChange {
+    let cur = world.get(x, y, z);
+    BlockChange { x, y, z, old_id: cur, new_id: cur }
+}
+
+/// 挖掘权威判定（Player Action 0x29）。
+/// - status 0/2（开始/完成）：创造风格即时破坏；非法（越界/超距/空气/水）回滚。
+/// - status 1（取消）：只 ack。- status 3..=7（丢弃/吃食/换手）：无世界影响，直接忽略。
+/// - `world` 为 None（旧入口/单测无世界）：忽略不断线。
+/// 判定内已落子（`set`），调用方负责：缓存失效 + 发 BlockUpdate/Ack + 投递事件。
+pub fn decide_dig(
+    world: Option<&MutableWorld>,
+    eye: (f64, f64, f64),
+    center: mc_core::ChunkPos,
+    radius: i32,
+    act: &packets::PlayerAction,
+) -> Option<BlockEditOutcome> {
+    let world = world?;
+    match act.status {
+        packets::PLAYER_ACTION_START_DIG | packets::PLAYER_ACTION_FINISH_DIG => {
+            let (x, y, z) = (act.x, act.y, act.z);
+            let bad_range = !(mc_world::MIN_Y..=mc_world::WORLD_TOP_Y).contains(&y);
+            if bad_range
+                || !in_view(center, radius, x, z)
+                || eye_block_dist(eye, x, y, z) > mc_world::MAX_REACH
+            {
+                return Some(BlockEditOutcome {
+                    sequence: act.sequence,
+                    changes: vec![rollback(world, x, y, z)],
+                });
+            }
+            let cur = world.get(x, y, z);
+            if cur == mc_world::AIR_BLOCK_ID || cur == mc_world::WATER_BLOCK_ID {
+                return Some(BlockEditOutcome {
+                    sequence: act.sequence,
+                    changes: vec![BlockChange { x, y, z, old_id: cur, new_id: cur }],
+                });
+            }
+            let old = world.set(x, y, z, mc_world::AIR_BLOCK_ID);
+            Some(BlockEditOutcome {
+                sequence: act.sequence,
+                changes: vec![BlockChange { x, y, z, old_id: old, new_id: mc_world::AIR_BLOCK_ID }],
+            })
+        }
+        packets::PLAYER_ACTION_CANCEL_DIG => {
+            Some(BlockEditOutcome { sequence: act.sequence, changes: Vec::new() })
+        }
+        _ => None,
+    }
+}
+
+/// 放置权威判定（Use Item On 0x42）：目标 = 被点方块 + face 偏移。
+/// 要求：被点方块是实心（非空气/水）、目标可替换（空气/水）、y/视距/距离合法；
+/// 否则回滚重发目标现状。`place_id` 由服务端选择（P17 固定默认材料）。
+pub fn decide_place(
+    world: Option<&MutableWorld>,
+    eye: (f64, f64, f64),
+    center: mc_core::ChunkPos,
+    radius: i32,
+    act: &packets::UseItemOn,
+    place_id: u16,
+) -> Option<BlockEditOutcome> {
+    let world = world?;
+    let face = i8::try_from(act.face).ok().and_then(packets::face_offset);
+    let Some((dx, dy, dz)) = face else {
+        return Some(BlockEditOutcome { sequence: act.sequence, changes: Vec::new() });
+    };
+    let (tx, ty, tz) = (act.x + dx, act.y + dy, act.z + dz);
+    if !(mc_world::MIN_Y..=mc_world::WORLD_TOP_Y).contains(&act.y)
+        || !(mc_world::MIN_Y..=mc_world::WORLD_TOP_Y).contains(&ty)
+        || !in_view(center, radius, tx, tz)
+        || eye_block_dist(eye, act.x, act.y, act.z) > mc_world::MAX_REACH
+        || !mc_world::is_placeable(place_id)
+    {
+        return Some(BlockEditOutcome {
+            sequence: act.sequence,
+            changes: vec![rollback(world, tx, ty, tz)],
+        });
+    }
+    let clicked = world.get(act.x, act.y, act.z);
+    if clicked == mc_world::AIR_BLOCK_ID || clicked == mc_world::WATER_BLOCK_ID {
+        return Some(BlockEditOutcome {
+            sequence: act.sequence,
+            changes: vec![rollback(world, tx, ty, tz)],
+        });
+    }
+    let cur = world.get(tx, ty, tz);
+    if !mc_world::is_replaceable(cur) {
+        return Some(BlockEditOutcome {
+            sequence: act.sequence,
+            changes: vec![BlockChange { x: tx, y: ty, z: tz, old_id: cur, new_id: cur }],
+        });
+    }
+    let old = world.set(tx, ty, tz, place_id);
+    Some(BlockEditOutcome {
+        sequence: act.sequence,
+        changes: vec![BlockChange { x: tx, y: ty, z: tz, old_id: old, new_id: place_id }],
+    })
+}
+
+/// 落子后动作：缓存失效 → 发 BlockUpdate → 发 Ack → 投递 BlockEdit 事件。
+async fn apply_block_outcome(
+    stream: &mut TcpStream,
+    addr: SocketAddr,
+    profile: &mc_core::PlayerProfile,
+    opts: &PlayOptions,
+    cache: Option<&ChunkCache>,
+    outcome: &BlockEditOutcome,
+) -> io::Result<()> {
+    for c in &outcome.changes {
+        if let Some(cache) = cache {
+            cache.invalidate(mc_world::chunk_of_block(c.x, c.z));
+        }
+        if c.new_id != c.old_id {
+            info!(
+                "play block edit uuid={} name={} conn_id={} pos=({},{},{}) {}->{} seq={}",
+                profile.uuid, profile.username, opts.conn_id, c.x, c.y, c.z, c.old_id, c.new_id,
+                outcome.sequence
+            );
+        }
+        let mut body = Vec::new();
+        packets::BlockUpdate { x: c.x, y: c.y, z: c.z, block_id: c.new_id as i32 }
+            .encode_body(&mut body);
+        write_packet_any(stream, packets::PLAY_BLOCK_UPDATE_S2C_ID, &body, opts.threshold).await?;
+        emit_play_event(
+            &opts.events,
+            PlayEvent::BlockEdit {
+                addr,
+                conn_id: opts.conn_id,
+                x: c.x,
+                y: c.y,
+                z: c.z,
+                old_id: c.old_id,
+                new_id: c.new_id,
+            },
+        );
+    }
+    let mut ack = Vec::new();
+    mc_protocol::write_varint(outcome.sequence, &mut ack);
+    write_packet_any(stream, packets::PLAY_BLOCK_CHANGED_ACK_S2C_ID, &ack, opts.threshold).await
+}
+
 /// 玩家跨区块：SetCenterChunk → 卸载越界区块 → 一批补发缺失区块（batch_size = add.len）。
 /// 单轴跨区块 add/remove = 2r+1（r=10 → 21），斜跨最多 4r+1（41）；不引入额外阻塞限流。
 async fn maybe_move_view(
@@ -504,6 +706,7 @@ async fn maybe_move_view(
     x: f64,
     z: f64,
     cache: Option<&ChunkCache>,
+    mutable: Option<&MutableWorld>,
 ) -> io::Result<()> {
     let Some(center) = ChunkView::chunk_of_block(x, z) else {
         return Ok(());
@@ -517,7 +720,7 @@ async fn maybe_move_view(
     write_packet_any(stream, packets::PLAY_SET_CENTER_CHUNK_ID, &body, threshold).await?;
     let update = view.plan(center);
     send_unload_chunks(stream, &update.remove, threshold).await?;
-    send_chunk_batch(stream, world, &update.add, threshold, cache).await?;
+    send_chunk_batch(stream, world, &update.add, threshold, cache, mutable).await?;
     info!(
         "play view move uuid={} name={} conn_id={} center=({},{}) radius={} add={} remove={} sent_total={}",
         profile.uuid,
@@ -542,11 +745,16 @@ async fn play_loop(
     mut view: ChunkView,
     world: &WorldGen,
     cache: Option<&ChunkCache>,
+    mutable: Option<&MutableWorld>,
 ) -> io::Result<()> {
     let threshold = opts.threshold;
     // net 线程的 last_seen 只认 KeepAlive 回显（移动包不刷新，避免客户端只发移动不回心跳）；
     // ECS 侧的 PlayerKeepAlive.last_seen 另由 movement_ingest_system 按移动包刷新，用于离线清理。
     let mut last_seen = Instant::now();
+    // P17 方块判定用的玩家位置（C2S 移动包直接更新；初始为出生点）。
+    // 与 ECS Position 同源（同一批移动包），net 线程先看到，判定距离用它足够。
+    let spawn = world.spawn_pos();
+    let mut last_pos = (spawn.0 as f64 + 0.5, spawn.1 as f64, spawn.2 as f64 + 0.5);
     // 客户端在 Play 里每 tick 都发 0x0D，read_packet 不会超时；必须按时间主动发 KeepAlive，
     // 否则客户端 30s 收不到 0x2D 会 “连接超时” 断开（2026-11-23 真机实测）。
     let mut last_keepalive = Instant::now();
@@ -587,16 +795,22 @@ async fn play_loop(
                             "play move uuid={} name={} id={:#04x} m={:?} forwarded_to_ecs={}",
                             profile.uuid, profile.username, id, m, opts.events.is_some()
                         );
-                        let pos = match m {
-                            packets::C2SMovement::Pos(p) => Some((p.x, p.z)),
-                            packets::C2SMovement::PosRot(p) => Some((p.x, p.z)),
-                            _ => None,
-                        };
-                        if let Some((x, z)) = pos {
-                            if let Err(e) = maybe_move_view(stream, profile, opts, &mut view, world, x, z, cache).await {
-                                debug!("play uuid={} view move failed ({e}), closing", profile.uuid);
-                                break;
+                        match m {
+                            packets::C2SMovement::Pos(p) => {
+                                last_pos = (p.x, p.y, p.z);
+                                if let Err(e) = maybe_move_view(stream, profile, opts, &mut view, world, p.x, p.z, cache, mutable).await {
+                                    debug!("play uuid={} view move failed ({e}), closing", profile.uuid);
+                                    break;
+                                }
                             }
+                            packets::C2SMovement::PosRot(p) => {
+                                last_pos = (p.x, p.y, p.z);
+                                if let Err(e) = maybe_move_view(stream, profile, opts, &mut view, world, p.x, p.z, cache, mutable).await {
+                                    debug!("play uuid={} view move failed ({e}), closing", profile.uuid);
+                                    break;
+                                }
+                            }
+                            _ => {}
                         }
                         emit_play_event(
                             &opts.events,
@@ -605,6 +819,78 @@ async fn play_loop(
                     }
                     Err(e) => debug!("play uuid={} bad movement id={id:#04x}: {e}", profile.uuid),
                 }
+            }
+            Ok((id, payload)) if id == packets::PLAY_PLAYER_ACTION_C2S_ID => {
+                // P17 挖掘：服务端权威判定 + 即时落子 + BlockUpdate/Ack 回包。
+                match packets::PlayerAction::decode_body(&payload) {
+                    Ok((act, _)) => {
+                        if let Some(outcome) = decide_dig(
+                            mutable,
+                            eye_of(last_pos),
+                            view.center(),
+                            view.radius(),
+                            &act,
+                        ) {
+                            if let Some(_world) = mutable {
+                                if let Err(e) =
+                                    apply_block_outcome(stream, addr, profile, opts, cache, &outcome).await
+                                {
+                                    debug!("play uuid={} block outcome failed ({e}), closing", profile.uuid);
+                                    break;
+                                }
+                            }
+                        }
+                    }
+                    Err(e) => debug!("play uuid={} bad player_action: {e}", profile.uuid),
+                }
+            }
+            Ok((id, payload)) if id == packets::PLAY_USE_ITEM_ON_C2S_ID => {
+                // P17 放置：目标 = 被点方块 + face 偏移；非法回滚重发。
+                match packets::UseItemOn::decode_body(&payload) {
+                    Ok((act, _)) => {
+                        if let Some(outcome) = decide_place(
+                            mutable,
+                            eye_of(last_pos),
+                            view.center(),
+                            view.radius(),
+                            &act,
+                            mc_world::DEFAULT_PLACE_BLOCK_ID,
+                        ) {
+                            if let Some(_world) = mutable {
+                                if let Err(e) =
+                                    apply_block_outcome(stream, addr, profile, opts, cache, &outcome).await
+                                {
+                                    debug!("play uuid={} block outcome failed ({e}), closing", profile.uuid);
+                                    break;
+                                }
+                            }
+                        }
+                    }
+                    Err(e) => debug!("play uuid={} bad use_item_on: {e}", profile.uuid),
+                }
+            }
+            Ok((id, payload)) if id == packets::PLAY_USE_ITEM_C2S_ID => {
+                // 空手使用：无世界影响，只 ack 序列号让客户端预测对齐。
+                match packets::UseItem::decode_body(&payload) {
+                    Ok((act, _)) => {
+                        let mut ack = Vec::new();
+                        mc_protocol::write_varint(act.sequence, &mut ack);
+                        if let Err(e) =
+                            write_packet_any(stream, packets::PLAY_BLOCK_CHANGED_ACK_S2C_ID, &ack, threshold).await
+                        {
+                            debug!("play uuid={} use_item ack failed ({e}), closing", profile.uuid);
+                            break;
+                        }
+                    }
+                    Err(e) => debug!("play uuid={} bad use_item: {e}", profile.uuid),
+                }
+            }
+            Ok((id, _)) if id == packets::PLAY_PUNCH_C2S_ID
+                || id == packets::PLAY_SET_HELD_ITEM_C2S_ID
+                || id == packets::PLAY_SET_CREATIVE_SLOT_C2S_ID =>
+            {
+                // 挥拳/切手持/创造背包点选：P17 无状态影响，只忽略不断线。
+                debug!("play uuid={} c2s id={id:#04x} ignored (no state change)", profile.uuid);
             }
             Ok((id, payload)) => {
                 debug!("play uuid={} c2s id={id:#04x} len={} (ignored)", profile.uuid, payload.len());
@@ -836,5 +1122,209 @@ mod tests {
             other => panic!("expected Disconnect, got {other:?}"),
         }
         server.await.unwrap();
+    }
+
+    /// P17 判定单测共用夹具：默认 seed 出生点 (369,h,381)，脚站在地表草上方。
+    fn dig_fixture() -> (MutableWorld, (f64, f64, f64), mc_core::ChunkPos) {
+        let world = MutableWorld::new(DEFAULT_SEED);
+        let s = WorldGen::new(DEFAULT_SEED).spawn_pos();
+        let feet = (s.0 as f64 + 0.5, s.1 as f64, s.2 as f64 + 0.5);
+        (world, feet, mc_core::ChunkPos(s.0.div_euclid(16), s.2.div_euclid(16)))
+    }
+
+    fn grass_top() -> (i32, i32, i32) {
+        let s = WorldGen::new(DEFAULT_SEED).spawn_pos();
+        (s.0, s.1 - 1, s.2)
+    }
+
+    #[test]
+    fn dig_start_breaks_grass_and_finish_breaks_too() {
+        for status in [packets::PLAYER_ACTION_START_DIG, packets::PLAYER_ACTION_FINISH_DIG] {
+            let (world, feet, center) = dig_fixture();
+            let (x, y, z) = grass_top();
+            let act = packets::PlayerAction { status, x, y, z, face: 1, sequence: 5 };
+            let out = decide_dig(Some(&world), eye_of(feet), center, 2, &act).unwrap();
+            assert_eq!(out.sequence, 5);
+            assert_eq!(
+                out.changes,
+                vec![BlockChange { x, y, z, old_id: mc_world::GRASS_BLOCK_ID, new_id: 0 }]
+            );
+            assert_eq!(world.get(x, y, z), 0, "decide must apply the edit");
+            assert_eq!(world.dirty_len(), 1);
+        }
+    }
+
+    #[test]
+    fn dig_rejects_air_water_far_out_of_view_and_bad_y() {
+        let (world, feet, center) = dig_fixture();
+        let (x, y, z) = grass_top();
+        let eye = eye_of(feet);
+        // 挖空气：回滚重发空气，不落子。
+        world.set(x, y, z, 0);
+        let air_out = decide_dig(
+            Some(&world),
+            eye,
+            center,
+            2,
+            &packets::PlayerAction { status: 2, x, y, z, face: 1, sequence: 1 },
+        )
+        .unwrap();
+        assert_eq!(air_out.changes.len(), 1);
+        assert_eq!(air_out.changes[0].new_id, 0);
+        assert_eq!(world.override_count(), 1, "rollback must not add entries");
+        // 超距（出生点 100 格外）：回滚，世界不变。
+        let far = decide_dig(
+            Some(&world),
+            eye,
+            center,
+            2,
+            &packets::PlayerAction { status: 2, x: x + 100, y, z, face: 1, sequence: 2 },
+        )
+        .unwrap();
+        assert_eq!(far.changes[0].old_id, far.changes[0].new_id);
+        assert_eq!(world.override_count(), 1);
+        // 出视距（视距 2，目标 chunk 差 10）：回滚。
+        let oov = decide_dig(
+            Some(&world),
+            eye,
+            center,
+            2,
+            &packets::PlayerAction { status: 0, x: x + 160, y, z, face: 1, sequence: 3 },
+        )
+        .unwrap();
+        assert_eq!(oov.changes[0].old_id, oov.changes[0].new_id);
+        // y 越界：回滚为空气。
+        let bad_y = decide_dig(
+            Some(&world),
+            eye,
+            center,
+            2,
+            &packets::PlayerAction { status: 0, x, y: 400, z, face: 1, sequence: 4 },
+        )
+        .unwrap();
+        assert_eq!(bad_y.changes[0].new_id, 0);
+    }
+
+    #[test]
+    fn dig_cancel_acks_drop_statuses_and_missing_world_ignored() {
+        let (world, feet, center) = dig_fixture();
+        let (x, y, z) = grass_top();
+        let eye = eye_of(feet);
+        let cancel = decide_dig(
+            Some(&world),
+            eye,
+            center,
+            2,
+            &packets::PlayerAction { status: 1, x, y, z, face: 0, sequence: 8 },
+        )
+        .unwrap();
+        assert!(cancel.changes.is_empty(), "cancel must only ack");
+        assert_eq!(cancel.sequence, 8);
+        // 丢弃/吃食/换手：无世界影响，直接忽略（不 ack，避免误确认旧序列）。
+        for status in [3, 4, 5, 6, 7, 99] {
+            assert!(
+                decide_dig(
+                    Some(&world),
+                    eye,
+                    center,
+                    2,
+                    &packets::PlayerAction { status, x, y, z, face: 0, sequence: 0 },
+                )
+                .is_none(),
+                "status={status} must be ignored"
+            );
+        }
+        // 无世界（旧入口）：不断线，只忽略。
+        assert!(
+            decide_dig(
+                None,
+                eye,
+                center,
+                2,
+                &packets::PlayerAction { status: 2, x, y, z, face: 1, sequence: 1 },
+            )
+            .is_none()
+        );
+    }
+
+    #[test]
+    fn place_on_dirt_top_succeeds_and_occupied_rolls_back() {
+        let (world, feet, center) = dig_fixture();
+        let (x, y, z) = grass_top();
+        let eye = eye_of(feet);
+        // 先挖掉草，露出泥土。
+        world.set(x, y, z, 0);
+        // 点泥土顶面放石头。
+        let act = packets::UseItemOn {
+            hand: 0,
+            x,
+            y: y - 1,
+            z,
+            face: 1,
+            cursor_x: 0.5,
+            cursor_y: 1.0,
+            cursor_z: 0.5,
+            inside_block: false,
+            world_border_hit: false,
+            sequence: 12,
+        };
+        let out = decide_place(Some(&world), eye, center, 2, &act, mc_world::STONE_BLOCK_ID).unwrap();
+        assert_eq!(out.sequence, 12);
+        assert_eq!(
+            out.changes,
+            vec![BlockChange { x, y, z, old_id: 0, new_id: mc_world::STONE_BLOCK_ID }]
+        );
+        assert_eq!(world.get(x, y, z), mc_world::STONE_BLOCK_ID);
+        // 同一位置再放：目标已被占据 → 回滚重发石头，不新增条目。
+        let before = world.override_count();
+        let again =
+            decide_place(Some(&world), eye, center, 2, &act, mc_world::STONE_BLOCK_ID).unwrap();
+        assert_eq!(again.changes[0].old_id, mc_world::STONE_BLOCK_ID);
+        assert_eq!(again.changes[0].new_id, mc_world::STONE_BLOCK_ID);
+        assert_eq!(world.override_count(), before);
+    }
+
+    #[test]
+    fn place_rejects_air_click_bad_face_and_out_of_reach() {
+        let (world, feet, center) = dig_fixture();
+        let (x, y, z) = grass_top();
+        let eye = eye_of(feet);
+        let base = |face| packets::UseItemOn {
+            hand: 0,
+            x,
+            y,
+            z,
+            face,
+            cursor_x: 0.5,
+            cursor_y: 0.5,
+            cursor_z: 0.5,
+            inside_block: false,
+            world_border_hit: false,
+            sequence: 20,
+        };
+        // 点空气放：回滚（目标现状重发）。先把被点方块挖空。
+        world.set(x, y, z, 0);
+        let against_air = decide_place(
+            Some(&world),
+            eye,
+            center,
+            2,
+            &packets::UseItemOn { y: y + 5, sequence: 21, ..base(1) },
+            mc_world::STONE_BLOCK_ID,
+        )
+        .unwrap();
+        assert_eq!(against_air.changes[0].old_id, against_air.changes[0].new_id);
+        let _ = against_air;
+        // 非法 face：只 ack。
+        let bad_face =
+            decide_place(Some(&world), eye, center, 2, &base(9), mc_world::STONE_BLOCK_ID).unwrap();
+        assert!(bad_face.changes.is_empty());
+        // 超距眼睛 100 格：回滚。
+        let far_eye = (eye.0 + 100.0, eye.1, eye.2);
+        let far = decide_place(Some(&world), far_eye, center, 2, &base(1), mc_world::STONE_BLOCK_ID)
+            .unwrap();
+        assert_eq!(far.changes[0].old_id, far.changes[0].new_id);
+        // 无世界：忽略。
+        assert!(decide_place(None, eye, center, 2, &base(1), mc_world::STONE_BLOCK_ID).is_none());
     }
 }
