@@ -488,7 +488,7 @@ bash scripts/check_budget.sh     # Windows 可用 C:\Program Files\Git\bin\bash.
 
 ## 8. Git 状态 / 提交注意
 
-- 当前分支 `main`；P18 代码（待填）/基线 `7a0dca7`；P17 代码 `c5c57af`/`db8f666`/`1fc0a45`/`4de7bbe`、文档 `3744455`/`7a0dca7`（基线 `97c241b`）；P16.1 代码 `561cc7e`、文档 `fc91291`；P16 代码 `2d8c89d`、文档 `4b4cb08`/`b83a096`（基线 `ceec052`）；P15 代码 `7f44b20`、文档 `0df9b40`（基线 `12bdaa4`）；P14 `1e47e69`/`12bdaa4`（基线 `c3bd992`）；P13 `02d31ee`/`0aaf8ed`。
+- 当前分支 `main`；P18 代码 `cf821df`（协议）/`9109cd9`（掉落表+实体+背包）/`34af0cd`（net 接线+e2e）、文档 `f693d73`（基线 `7a0dca7`）；P17 代码 `c5c57af`/`db8f666`/`1fc0a45`/`4de7bbe`、文档 `3744455`/`7a0dca7`（基线 `97c241b`）；P16.1 代码 `561cc7e`、文档 `fc91291`；P16 代码 `2d8c89d`、文档 `4b4cb08`/`b83a096`（基线 `ceec052`）；P15 代码 `7f44b20`、文档 `0df9b40`（基线 `12bdaa4`）；P14 `1e47e69`/`12bdaa4`（基线 `c3bd992`）；P13 `02d31ee`/`0aaf8ed`。
 - P18 注意：`DropState` 进 `NetConfig`/`PlayOptions`（`handshake_route` 透传）；`decide_*` 仍在 net 线程（ECS 无写通道，实体/背包同步同理，见 §5.1）；50ms tick 是读超时驱动，不改变 10s 半开语义；背包键用用户名（离线 uuid 随机，见 §5.10）；临时 Java 实测工具/冒烟 ps1/测试世界只放 Temp、不提交；冒烟服 `C:\Users\qwe\AppData\Local\Temp\p18smoke` 不在仓库。
 - P17 注意：`autosave_system` 必须排在 `player_removal_system` 之前（断线登记靠 `PendingPlayerRemoval` 非空触发，唯一删除点会 drain 它）；`decide_*` 在 net 线程做判定是刻意设计（ECS 无写通道），见 §5.1；脚本客户端 `live_edit.py` 只放 Temp、不提交。
 - P16.1 注意：ECS `PlayScaffold` 已不再生成/编码区块；`ready to join` 每次登录 1 条，`chunk data (...)` 脚手架日志和 `tick lag` 已消失。未来 socket→ECS 时用 per-player 写通道 + `ChunkView`，不要恢复全量生成脚手架。
