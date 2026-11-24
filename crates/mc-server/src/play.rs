@@ -1,25 +1,21 @@
-//! Play 脚手架：Login 队列 → "ready to join" + 初始视距编码自检 + KeepAlive 计数
-//! 包 ID 取 `packets::PLAY_*` 现有常量，已按P4A对照表核对777。
-//! 真下发仍由 net 线程 `enter_play` 负责；ECS 侧已接收移动/KeepAlive 事件（P13），
-//! 但 socket 句柄尚未进 ECS（见 TODO socket→ECS）。P5b 视距队列仅保留编码自检/日志。
+//! Play 脚手架：Login 队列 → "ready to join" 诊断 + KeepAlive 计数。
+//! 包 ID 取 `packets::PLAY_*` 现有常量，已按 P4A 对照表核对 777。
+//! 真 Join/Chunk/动态视距仍由 net 线程 `enter_play` + 共享 `ChunkCache` 完成；
+//! ECS 只维护登录/视距诊断，不再生成或编码任何区块（P16.1 删除 P5b 编码自检）。
+//! TODO(socket→ECS)：socket 句柄仍在 net 线程。未来若把 socket 交给 ECS，
+//! 应使用 **per-player 写通道 + `mc_network::ChunkView`** 真发 Join/Chunk/PositionSync，
+//! 不要把本轮删掉的“每 tick 全量生成/编码 1 块”脚手架恢复回来。
 use bevy_ecs::prelude::*;
-use std::collections::VecDeque;
 use tracing::info;
 
 use crate::config::ServerConfig;
 use crate::TickCounter;
 
-/// 每 tick 最多下发块数（仅 ECS 编码自检；net 线程真发送不受此限流）。
-pub const CHUNKS_PER_TICK: usize = 1;
-
-/// Play 脚手架状态：net 线程交来的登录排队，P3 接真实 Player 实体。
+/// Play 脚手架状态：net 线程交来的登录排队 + 最近一次登录的视距诊断。
 /// P13：`systems::handle_new_connections` 已为每个登录 spawn
 /// `PlayerAddr/PlayerConnId/Position/PlayerKeepAlive`，`PlayEvent` 经 channel 进 ECS。
-/// TODO(P13/socket→ECS)：socket 句柄仍留在 net 线程（真下发走 `enter_play`）。
-/// 若要把 socket 交给 ECS，需要：1) `NewConnection` 信封扩展携带 `PlayerProfile` +
-/// tokio 写通道（或 socket 所有权）；2) net 线程只保留读循环/超时；3) 本队列升级为
-/// `Vec<PlayerProfile>`，`login_join_system` 通过写通道真发 Join/Chunk/PositionSync。
-/// 该拆分会影响当前已验证可进 Play 的链路，本轮保持现状并保留 TODO。
+/// P16.1：删除 `pending_chunks`/`sent_chunks`/`CHUNKS_PER_TICK` 与每 tick 的
+/// WorldGen+ChunkData 编码/日志；真实发送早已在 net 线程完成，这段代码只浪费 CPU/日志。
 #[derive(Resource, Default, Debug)]
 pub struct PlayScaffold {
     /// channel 收到的 NewConnection 按到达顺序排队（addr + conn_id）。
@@ -28,16 +24,17 @@ pub struct PlayScaffold {
     pub joined: u64,
     /// KeepAlive 自增序号（S2C payload）。
     pub keepalive_seq: i64,
-    /// 视距待发队列（P5b）：`login_join_system` 按 spawn 中心有效视距入队
-    /// `(2r+1)^2` 块，每 tick 只 pop 1 块做编码自检。共享队列脚手架；P5c 按 Player 实体拆分。
-    pub pending_chunks: VecDeque<mc_core::ChunkPos>,
-    /// 已组包（log 占位）的 ChunkData 数量。
-    pub sent_chunks: u64,
-    /// 当前视距中心（spawn 区块）；多玩家同中心时去重参考，P5c 改 per-player。
+    /// 当前视距中心（spawn 区块）；多玩家同中心时去重参考，未来按 Player 拆分。
     pub view_center: Option<mc_core::ChunkPos>,
+    /// 最近一次登录使用的有效视距半径（clamp 2..=10）；0 表示还没有登录。
+    pub last_view_radius: i32,
+    /// 最近一次登录的 `(2r+1)^2` 块数；0 表示还没有登录。
+    pub last_view_chunks: usize,
 }
 
 /// 出生点所在区块（视距中心）：x/z 固定 369/381 → chunk `(23,23)`，y 由 WorldGen 决定。
+/// 保留为测试/诊断入口；`login_join_system` 用 `WorldGen::spawn_chunk()` 取得同一值。
+#[allow(dead_code)]
 pub fn spawn_center_chunk() -> mc_core::ChunkPos {
     mc_core::ChunkPos(
         mc_world::SPAWN_BLOCK_X.div_euclid(16),
@@ -45,81 +42,42 @@ pub fn spawn_center_chunk() -> mc_core::ChunkPos {
     )
 }
 
-/// Login 成功队列排空 + 初始视距入队 + 每 tick 限流 1 块（仅编码/log 自检）。
+/// Login 成功队列排空 + 单条 "ready to join" 诊断日志。
 /// 调用链（main.rs）：`handle_new_connections`（收 NewConnection + spawn ECS 实体）
 /// → `movement_ingest_system`（PlayEvent）→ 本系统 → `movement_system`。
-/// 包 ID 已按P4A对照表核对777。
-/// TODO(P13/socket→ECS)：socket 句柄交接进 ECS 后，在此真写 Join Game / Set Center Chunk /
-/// Chunk Data / Player Position Sync；视距队列按 Player 实体拆分，本处共享队列仅脚手架。
+/// 与 net 线程使用同一个 `clamp_view_radius` / `view_chunk_count`，只记录有效视距，
+/// 不调用 `WorldGen::generate`、不编码 ChunkData、不逐块打 info。
+/// TODO(socket→ECS)：未来 socket 进 ECS 后，在此用 per-player 写通道 + `ChunkView`
+/// 真发 Join/Chunk/PositionSync；不要恢复全量生成脚手架。
 pub fn login_join_system(cfg: Res<ServerConfig>, mut play: ResMut<PlayScaffold>) {
+    if play.pending_login.is_empty() {
+        return;
+    }
     // 与 net 线程 / ECS 使用同一个 ServerConfig.seed 和同一套有效视距 clamp。
     let world = mc_world::WorldGen::new(cfg.seed);
-    // 1) 新登录：逐个触发一次 Join 下发（当前为 log，socket 真发包在 net 线程已做），
-    //    并按 spawn 中心有效视距触发初始视距（radius=10 → 441 块入队）。
-    if !play.pending_login.is_empty() {
-        let radius = mc_network::clamp_view_radius(cfg.view_distance);
-        let chunk_count = mc_network::view_chunk_count(radius);
-        let batch = std::mem::take(&mut play.pending_login);
-        for conn in batch {
-            play.joined += 1;
-            let center = world.spawn_chunk();
-            // SetCenter 编码自检（log 占位，真写待 socket 进 ECS）。
-            let mut center_buf = Vec::new();
-            mc_protocol::packets::encode_set_center_chunk_packet(
-                &mc_protocol::packets::SetCenterChunk {
-                    chunk_x: center.0,
-                    chunk_z: center.1,
-                },
-                &mut center_buf,
-            );
-            // 初始视距：spawn 中心 + cfg.view_distance 的 clamp 值（中心优先排序）。
-            let view = mc_world::view_chunks(center, radius);
-            debug_assert_eq!(view.len(), chunk_count);
-            play.view_center = Some(center);
-            play.pending_chunks.extend(view);
-            let spawn = world.spawn_pos();
-            info!(
-                "ready to join #{} addr={} conn_id={} seed={} spawn=({},{},{}) center=({},{}) view_radius={} view_chunks={} view_enqueued={} center_bytes={} (join已由net线程enter_play真下发; TODO socket句柄进ECS后在此真写 Join 0x32 + Chunk 0x2E + Position Sync 0x49)",
-                play.joined,
-                conn.addr,
-                conn.conn_id,
-                cfg.seed,
-                spawn.0,
-                spawn.1,
-                spawn.2,
-                center.0,
-                center.1,
-                radius,
-                chunk_count,
-                play.pending_chunks.len(),
-                center_buf.len()
-            );
-        }
-    }
-    // 2) 限流下发：每 tick 只发 1 块（防 tick lag），用 WorldGen 真实区块组 ChunkData。
-    for _ in 0..CHUNKS_PER_TICK {
-        let Some(pos) = play.pending_chunks.pop_front() else {
-            break;
-        };
-        let chunk = world.generate(pos);
-        let section_bytes = chunk.network_bytes();
-        let data = mc_protocol::packets::PlayChunkData {
-            chunk_x: pos.0,
-            chunk_z: pos.1,
-            heightmaps_nbt: chunk.heightmaps_bytes(),
-            section_bytes,
-            light_bytes: chunk.light_bytes(),
-        };
-        let mut buf = Vec::new();
-        mc_protocol::packets::encode_play_chunk_data_packet(&data, &mut buf);
-        play.sent_chunks += 1;
+    let radius = mc_network::clamp_view_radius(cfg.view_distance);
+    let chunk_count = mc_network::view_chunk_count(radius);
+    let center = world.spawn_chunk();
+    let spawn = world.spawn_pos();
+    play.view_center = Some(center);
+    play.last_view_radius = radius;
+    play.last_view_chunks = chunk_count;
+    let batch = std::mem::take(&mut play.pending_login);
+    for conn in batch {
+        play.joined += 1;
         info!(
-            "chunk data ({},{}) bytes={} sent={} pending={} (TODO: 接socket真写, ChunkData 0x2E 已按P4A对照表核对777)",
-            pos.0,
-            pos.1,
-            buf.len(),
-            play.sent_chunks,
-            play.pending_chunks.len()
+            "ready to join #{} addr={} conn_id={} seed={} spawn=({},{},{}) center=({},{}) view_radius={} view_chunks={} (join 已由 net 线程 enter_play 真下发; TODO socket→ECS 时改用 per-player 写通道)",
+            play.joined,
+            conn.addr,
+            conn.conn_id,
+            cfg.seed,
+            spawn.0,
+            spawn.1,
+            spawn.2,
+            center.0,
+            center.1,
+            radius,
+            chunk_count
         );
     }
 }
@@ -147,116 +105,114 @@ pub fn keepalive_system(tick: Res<TickCounter>, mut play: ResMut<PlayScaffold>) 
 mod tests {
     use super::*;
 
-    #[test]
-    fn pending_login_is_a_real_queue() {
-        // 真实队列：两个不同 conn_id 入队 → 一次 drain 触发两次 join，不丢身份。
-        let play = PlayScaffold {
-            pending_login: vec![
-                mc_network::NewConnection { addr: "127.0.0.1:10001".parse().unwrap(), conn_id: 1 },
-                mc_network::NewConnection { addr: "127.0.0.1:10002".parse().unwrap(), conn_id: 2 },
-            ],
+    fn scaffold_with(conns: &[(u16, u64)]) -> PlayScaffold {
+        PlayScaffold {
+            pending_login: conns
+                .iter()
+                .map(|&(port, conn_id)| mc_network::NewConnection {
+                    addr: format!("127.0.0.1:{port}").parse().unwrap(),
+                    conn_id,
+                })
+                .collect(),
             ..Default::default()
-        };
-        let mut world = World::new();
-        world.insert_resource(ServerConfig { view_distance: 2, ..Default::default() });
-        world.insert_resource(play);
+        }
+    }
+
+    fn schedule() -> Schedule {
         let mut sched = Schedule::default();
         sched.add_systems(login_join_system);
-        sched.run(&mut world);
-        let play = world.get_resource::<PlayScaffold>().unwrap();
-        let per_player = mc_network::view_chunk_count(2);
-        // 2 个 join 入队 2*25=50 块，本 tick 限流只发 1 块
-        assert_eq!(play.joined, 2);
-        assert!(play.pending_login.is_empty());
-        assert_eq!(play.sent_chunks, 1);
-        assert_eq!(play.pending_chunks.len(), 2 * per_player - 1);
-        // 空队列再跑一次：joined 不变，但限流继续发 1 块
-        sched.run(&mut world);
-        let play = world.get_resource::<PlayScaffold>().unwrap();
-        assert_eq!(play.joined, 2);
-        assert_eq!(play.sent_chunks, 2);
-        assert_eq!(play.pending_chunks.len(), 2 * per_player - 2);
+        sched
     }
 
     #[test]
-    fn view_distance_drives_ecs_pending_count() {
-        for (view_distance, expected) in [(2, 25), (4, 81), (10, 441), (11, 441)] {
-            let play = PlayScaffold {
-                pending_login: vec![mc_network::NewConnection {
-                    addr: "127.0.0.1:21001".parse().unwrap(),
-                    conn_id: 3,
-                }],
-                ..Default::default()
-            };
+    fn pending_login_is_a_real_queue() {
+        // 真实队列：两个不同 conn_id 入队 → 一次 drain 触发两次 join，不丢身份。
+        let mut world = World::new();
+        world.insert_resource(ServerConfig { view_distance: 2, ..Default::default() });
+        world.insert_resource(scaffold_with(&[(10001, 1), (10002, 2)]));
+        let mut sched = schedule();
+        sched.run(&mut world);
+        let play = world.get_resource::<PlayScaffold>().unwrap();
+        assert_eq!(play.joined, 2);
+        assert!(play.pending_login.is_empty());
+        assert_eq!(play.view_center, Some(spawn_center_chunk()));
+        assert_eq!(play.last_view_radius, 2);
+        assert_eq!(play.last_view_chunks, 25);
+        assert_eq!(play.last_view_chunks, mc_network::view_chunk_count(2));
+    }
+
+    #[test]
+    fn view_distance_drives_ecs_view_diagnostics() {
+        for (view_distance, radius, chunks) in
+            [(2, 2, 25), (4, 4, 81), (10, 10, 441), (11, 10, 441)]
+        {
             let mut world = World::new();
             world.insert_resource(ServerConfig { view_distance, ..Default::default() });
-            world.insert_resource(play);
-            let mut sched = Schedule::default();
-            sched.add_systems(login_join_system);
+            world.insert_resource(scaffold_with(&[(21001, 3)]));
+            let mut sched = schedule();
             sched.run(&mut world);
             let play = world.get_resource::<PlayScaffold>().unwrap();
             assert_eq!(play.joined, 1);
             assert_eq!(play.view_center, Some(spawn_center_chunk()));
-            assert_eq!(play.sent_chunks, 1, "self-check limiter still sends one per tick");
+            assert_eq!(play.last_view_radius, radius, "view_distance={view_distance}");
             assert_eq!(
-                play.pending_chunks.len(),
-                expected - 1,
-                "view_distance={view_distance} must enqueue (2r+1)^2 chunks"
+                play.last_view_chunks, chunks,
+                "view_distance={view_distance} must report (2r+1)^2 chunks"
             );
         }
     }
 
     #[test]
-    fn initial_view_is_25_around_spawn_for_radius2_one_per_tick() {
-        // 单玩家 + view_distance=2：spawn 中心 25 块，每 tick 只做 1 块编码自检。
-        let center = spawn_center_chunk();
-        // 跟随固定出生 x/z：369>>4=23, 381>>4=23（负坐标用 div_euclid）。
-        assert_eq!(center, mc_core::ChunkPos(23, 23));
-        let play = PlayScaffold {
-            pending_login: vec![mc_network::NewConnection {
-                addr: "127.0.0.1:20001".parse().unwrap(),
-                conn_id: 4,
-            }],
-            ..Default::default()
-        };
-        let mut world = World::new();
-        world.insert_resource(ServerConfig { view_distance: 2, ..Default::default() });
-        world.insert_resource(play);
-        let mut sched = Schedule::default();
-        sched.add_systems(login_join_system);
-        sched.run(&mut world);
-        let per_player = mc_network::view_chunk_count(2);
-        assert_eq!(per_player, 25);
-        let play = world.get_resource::<PlayScaffold>().unwrap();
-        assert_eq!(play.joined, 1);
-        assert_eq!(play.view_center, Some(center));
-        assert_eq!(play.sent_chunks, 1);
-        assert_eq!(play.pending_chunks.len(), per_player - 1);
-        // 后续 tick 无新登录也继续发，每次恰好 1 块
-        for expect_sent in 2..=5 {
-            sched.run(&mut world);
-            let play = world.get_resource::<PlayScaffold>().unwrap();
-            assert_eq!(play.sent_chunks, expect_sent);
-            assert_eq!(play.pending_chunks.len(), per_player - expect_sent as usize);
-        }
-    }
-
-    #[test]
-    fn empty_queue_sends_nothing() {
+    fn empty_queue_reports_no_join() {
         let mut world = World::new();
         world.insert_resource(ServerConfig::default());
         world.insert_resource(PlayScaffold::default());
-        let mut sched = Schedule::default();
-        sched.add_systems(login_join_system);
+        let mut sched = schedule();
         sched.run(&mut world);
         let play = world.get_resource::<PlayScaffold>().unwrap();
         assert_eq!(play.joined, 0);
-        assert_eq!(play.sent_chunks, 0);
-        assert!(play.pending_chunks.is_empty());
+        assert_eq!(play.view_center, None);
+        assert_eq!(play.last_view_radius, 0);
+        assert_eq!(play.last_view_chunks, 0);
+        assert!(play.pending_login.is_empty());
     }
+
+    #[test]
+    fn repeated_ticks_do_no_chunk_work() {
+        // 登录后连续 10 tick：joined/视距诊断保持不变，ECS 不再生成/编码任何区块。
+        let mut world = World::new();
+        world.insert_resource(ServerConfig { view_distance: 10, ..Default::default() });
+        world.insert_resource(scaffold_with(&[(20001, 4)]));
+        let mut sched = schedule();
+        sched.run(&mut world);
+        let center = spawn_center_chunk();
+        for _ in 0..10 {
+            sched.run(&mut world);
+            let play = world.get_resource::<PlayScaffold>().unwrap();
+            assert_eq!(play.joined, 1);
+            assert_eq!(play.view_center, Some(center));
+            assert_eq!(play.last_view_radius, 10);
+            assert_eq!(play.last_view_chunks, 441);
+            assert!(play.pending_login.is_empty());
+        }
+        // 新登录只增加计数并刷新同一份诊断，不产生其它工作。
+        {
+            let mut play = world.get_resource_mut::<PlayScaffold>().unwrap();
+            play.pending_login.push(mc_network::NewConnection {
+                addr: "127.0.0.1:20002".parse().unwrap(),
+                conn_id: 5,
+            });
+        }
+        sched.run(&mut world);
+        let play = world.get_resource::<PlayScaffold>().unwrap();
+        assert_eq!(play.joined, 2);
+        assert_eq!(play.last_view_radius, 10);
+        assert_eq!(play.last_view_chunks, 441);
+    }
+
     #[test]
     fn scaffold_encode_does_not_panic() {
-        // Join Game + 中心 chunk + 生成区块 + 出生同步 + KeepAlive 全走一遍 encode
+        // Join Game + 中心 chunk + 生成区块 + 出生同步 + KeepAlive 单块编码自检
         let login = mc_protocol::packets::LoginPlay::default();
         let mut buf = Vec::new();
         mc_protocol::packets::encode_login_play_packet(&login, &mut buf);
