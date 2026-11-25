@@ -78,7 +78,7 @@ pub fn drops_for_block(block_id: u16, x: i32, y: i32, z: i32, seed: i64) -> Vec<
     }
 }
 
-/// 手持物品 → 可放置方块映射（放置用；未知物品返回 None，调用方走石头回退）。
+/// 手持物品 → 可放置方块映射（放置用；未知物品返回 None，调用方只 ack 不落子）。
 pub fn block_for_item(item_id: i32) -> Option<u16> {
     match item_id {
         ITEM_STONE => Some(STONE_BLOCK_ID),

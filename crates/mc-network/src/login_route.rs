@@ -1338,7 +1338,7 @@ async fn play_loop(
             }
             Ok((id, payload)) if id == packets::PLAY_USE_ITEM_ON_C2S_ID => {
                 // P17 放置：目标 = 被点方块 + face 偏移；非法回滚重发。
-                // P18：手持映射决定材料（未知/空手回退石头），成功后扣 1 + 单槽同步。
+                // P18：手持映射决定材料；空手/无映射（如种子/圆石）只 ack 不落子，成功后扣 1 + 单槽同步。
                 // 与挖掘同理：判定前强制 flush，避免节流中的旧中心导致合法放置被回滚。
                 if let Err(e) = maybe_flush_view(
                     stream, profile, opts, &mut view, world, cache, mutable, &mut pending_view, true,
@@ -1350,12 +1350,29 @@ async fn play_loop(
                 }
                 match packets::UseItemOn::decode_body(&payload) {
                     Ok((act, _)) => {
-                        let place_id = opts
+                        // 手持映射决定材料；空手/无方块映射（如种子/圆石/煤）原版不放任何方块，
+                        // 只 ack 对齐客户端预测——之前回退放石头是 P17 兼容，已按反馈去掉。
+                        let place_id: Option<u16> = opts
                             .drops
                             .as_ref()
                             .and_then(|ds| ds.with_inventory(opts.conn_id, |inv| inv.held()).flatten())
-                            .and_then(|(item_id, _)| mc_world::block_for_item(item_id))
-                            .unwrap_or(mc_world::DEFAULT_PLACE_BLOCK_ID);
+                            .and_then(|(item_id, _)| mc_world::block_for_item(item_id));
+                        let Some(place_id) = place_id else {
+                            let mut ack = Vec::new();
+                            mc_protocol::write_varint(act.sequence, &mut ack);
+                            if let Err(e) = write_packet_any(
+                                stream,
+                                packets::PLAY_BLOCK_CHANGED_ACK_S2C_ID,
+                                &ack,
+                                threshold,
+                            )
+                            .await
+                            {
+                                debug!("play uuid={} place noop ack failed ({e}), closing", profile.uuid);
+                                break;
+                            }
+                            continue;
+                        };
                         if let Some(outcome) = decide_place(
                             mutable,
                             eye_of(last_pos),

@@ -505,16 +505,24 @@ async fn send_pos_y(stream: &mut TcpStream, x: f64, y: f64, z: f64) {
 /// P17 端到端：挖出生点脚下草方块 → 放石头 → BlockUpdate+Ack 回包 → 事件 → 落盘重读一致。
 #[tokio::test]
 async fn dig_and_place_roundtrip_with_blockupdate_ack_and_persistence() {
+    use mc_network::DropState;
+    let drop_dir = std::env::temp_dir().join(format!("mc-p17-e2e-drops-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&drop_dir);
     let (tx, rx) = crossbeam_channel::unbounded::<PlayEvent>();
     let mutable = Arc::new(MutableWorld::new(DEFAULT_SEED));
     let cache = Arc::new(ChunkCache::new(DEFAULT_SEED, 64).with_mutable(Arc::clone(&mutable)));
+    let drops = Arc::new(DropState::new(drop_dir.clone(), DEFAULT_SEED));
     let config = NetConfig::new(100, "edit".into(), Arc::new(AtomicUsize::new(0)))
         .with_play_events(tx)
         .with_view_distance(2)
         .with_chunk_cache(cache)
-        .with_mutable_world(Arc::clone(&mutable));
+        .with_mutable_world(Arc::clone(&mutable))
+        .with_drops(Arc::clone(&drops));
     let addr = spawn_server(config).await;
     let mut s = login_and_join(addr, "Editor", 2).await;
+    // 有背包时 Join 多发一个全量 Content（burst 末尾），先消费掉。
+    let (id, _) = read_frame_timeout(&mut s, Duration::from_secs(5)).await.unwrap();
+    assert_eq!(id, packets::PLAY_SET_CONTAINER_CONTENT_S2C_ID);
 
     // 出生点脚下是草方块（3×3 干燥平台保证）。
     let spawn = WorldGen::new(DEFAULT_SEED).spawn_pos();
@@ -542,6 +550,12 @@ async fn dig_and_place_roundtrip_with_blockupdate_ack_and_persistence() {
     let (id, payload) = read_frame_timeout(&mut s, Duration::from_secs(5)).await.unwrap();
     assert_eq!(id, packets::PLAY_BLOCK_CHANGED_ACK_S2C_ID, "dig must be acked");
     assert_eq!(read_varint(&payload).unwrap().0, 11);
+    // 挖草必刷 dirt 掉落：Spawn(0x01) + SetEntityData(0x65) 紧跟在 ack 后面，先消费掉，
+    // 否则后面读放置回包会错位。
+    let (id, _) = read_frame_timeout(&mut s, Duration::from_secs(5)).await.unwrap();
+    assert_eq!(id, packets::PLAY_SPAWN_ENTITY_S2C_ID, "dig must spawn drop");
+    let (id, _) = read_frame_timeout(&mut s, Duration::from_secs(5)).await.unwrap();
+    assert_eq!(id, packets::PLAY_SET_ENTITY_DATA_S2C_ID, "drop must carry item data");
     assert_eq!(mutable.get(gx, gy, gz), 0, "server world must record air");
     match next_event(&rx).await {
         PlayEvent::BlockEdit { x, y, z, old_id, new_id, .. } => {
@@ -597,6 +611,7 @@ async fn dig_and_place_roundtrip_with_blockupdate_ack_and_persistence() {
     assert_eq!(back.get(gx, gy, gz), 1, "placed stone must survive save/load");
     assert_eq!(back.override_count(), 1);
     let _ = std::fs::remove_dir_all(&dir);
+    let _ = std::fs::remove_dir_all(&drop_dir);
 }
 
 /// P18 端到端：Join 背包同步 → 挖草掉 dirt 实体 → 走近拾取 → 背包同步 →
@@ -1073,6 +1088,71 @@ async fn drag_then_place_uses_held_block() {
         packets::BlockUpdate::decode_body(&payload).unwrap().0.block_id, 10,
         "held dirt must place dirt, not fallback stone"
     );
+    drop(rx);
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// 回归：空手 / 手持无方块映射物品（如种子）右键不落子，只回 ack。
+/// 之前空手/未知物品回退放石头（P17 兼容），现按原版什么都不干。
+#[tokio::test]
+async fn empty_hand_places_nothing() {
+    use mc_network::DropState;
+    let dir = std::env::temp_dir().join(format!("mc-noplace-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    let (tx, rx) = crossbeam_channel::unbounded::<PlayEvent>();
+    let mutable = Arc::new(MutableWorld::new(DEFAULT_SEED));
+    let cache = Arc::new(ChunkCache::new(DEFAULT_SEED, 64).with_mutable(Arc::clone(&mutable)));
+    let drops = Arc::new(DropState::new(dir.clone(), DEFAULT_SEED));
+    let config = NetConfig::new(100, "noplace".into(), Arc::new(AtomicUsize::new(0)))
+        .with_play_events(tx)
+        .with_view_distance(2)
+        .with_chunk_cache(cache)
+        .with_mutable_world(Arc::clone(&mutable))
+        .with_drops(Arc::clone(&drops));
+    let addr = spawn_server(config).await;
+    let mut s = login_and_join(addr, "NoPlacer", 2).await;
+    let (id, _) = read_frame_timeout(&mut s, Duration::from_secs(5)).await.unwrap();
+    assert_eq!(id, packets::PLAY_SET_CONTAINER_CONTENT_S2C_ID);
+
+    let spawn = WorldGen::new(DEFAULT_SEED).spawn_pos();
+    let (fx, fy, fz) = (spawn.0 as f64 + 0.5, spawn.1 as f64, spawn.2 as f64 + 0.5);
+    let (gx, gy, gz) = (spawn.0, spawn.1 - 1, spawn.2);
+    send_pos_y(&mut s, fx, fy, fz).await;
+    // 新背包只有 36 号槽有石头；切到空槽 37（selected=1）即空手。
+    let body = [0u8, 1u8];
+    mc_network::framing::write_packet(&mut s, packets::PLAY_SET_HELD_ITEM_C2S_ID, &body)
+        .await
+        .unwrap();
+    // 对脚下草方块顶面右键（sequence=77 方便辨认）：目标是草上空气，可替换；
+    // 空手必须只回 ack，绝不能落石头。
+    let mut ubody = Vec::new();
+    packets::UseItemOn {
+        hand: 0, x: gx, y: gy, z: gz, face: 1,
+        cursor_x: 0.5, cursor_y: 1.0, cursor_z: 0.5,
+        inside_block: false, world_border_hit: false, sequence: 77,
+    }
+    .encode_body(&mut ubody);
+    mc_network::framing::write_packet(&mut s, packets::PLAY_USE_ITEM_ON_C2S_ID, &ubody)
+        .await
+        .unwrap();
+    // 只允许 ack（0x04，sequence=77）；绝不能出现 BlockUpdate（0x08）。
+    let mut saw_ack = false;
+    for _ in 0..40 {
+        let (id, payload) = read_frame_timeout(&mut s, Duration::from_secs(5)).await.unwrap();
+        assert_ne!(
+            id, packets::PLAY_BLOCK_UPDATE_S2C_ID,
+            "empty hand must not place any block"
+        );
+        if id == packets::PLAY_BLOCK_CHANGED_ACK_S2C_ID {
+            let (seq, _) = mc_protocol::read_varint(&payload).unwrap();
+            if seq == 77 {
+                saw_ack = true;
+                break;
+            }
+        }
+    }
+    assert!(saw_ack, "empty-hand use must still be acked");
+    assert_eq!(mutable.get(gx, gy + 1, gz), 0, "target above grass must stay air");
     drop(rx);
     let _ = std::fs::remove_dir_all(&dir);
 }
