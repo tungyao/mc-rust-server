@@ -387,7 +387,7 @@ pub(crate) async fn spawn_thrown_items(
     let sx = eye.0 + dir.0 * THROW_FORWARD_DIST;
     let sy = eye.1 + dir.1 * THROW_FORWARD_DIST;
     let sz = eye.2 + dir.2 * THROW_FORWARD_DIST;
-    // 初速 = 朝向×0.3 + 纵向基线 0.25（P18.2 `spawn` 默认 vy 同值，平扔抛物线一致）。
+    // 初速 = 朝向×THROW_SPEED(0.06) + 纵向基线 0.25（P18.2 `spawn` 默认 vy 同值，平扔抛物线一致）。
     let vel =
         (dir.0 * THROW_SPEED, THROW_UP_BIAS + dir.1 * THROW_SPEED, dir.2 * THROW_SPEED);
     let (bx, by, bz) = (sx.floor() as i32, sy.floor() as i32, sz.floor() as i32);
@@ -395,7 +395,17 @@ pub(crate) async fn spawn_thrown_items(
     let rest = world.drop_rest_y(bx, bz, by) as f64;
     let touched = {
         let mut items = drops.items.lock().unwrap_or_else(|p| p.into_inner());
-        match items.spawn_with_velocity(id, item_id, count, sx, sy, sz, rest, vel) {
+        match items.spawn_with_velocity(
+            id,
+            item_id,
+            count,
+            sx,
+            sy,
+            sz,
+            rest,
+            vel,
+            mc_world::items::THROWN_PICKUP_DELAY_TICKS,
+        ) {
             Ok(t) => t,
             Err(e) => {
                 debug!("throw spawn failed id={id} ({e})");
@@ -627,7 +637,18 @@ mod tests {
         let vel =
             (dir.0 * THROW_SPEED, THROW_UP_BIAS + dir.1 * THROW_SPEED, dir.2 * THROW_SPEED);
         let mut es = mc_world::ItemEntities::new();
-        es.spawn_with_velocity(9001, 1, 1, sx, sy, sz, feet.1, vel).unwrap();
+        es.spawn_with_velocity(
+            9001,
+            1,
+            1,
+            sx,
+            sy,
+            sz,
+            feet.1,
+            vel,
+            mc_world::items::THROWN_PICKUP_DELAY_TICKS,
+        )
+        .unwrap();
         for _ in 0..400 {
             es.tick();
             if es.get(9001).unwrap().on_ground {

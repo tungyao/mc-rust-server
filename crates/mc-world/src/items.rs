@@ -12,6 +12,11 @@ use mc_core::ChunkPos;
 
 /// 拾取保护 ticks（10）。
 pub const PICKUP_DELAY_TICKS: u32 = 10;
+/// 手扔物品（Q/背包 THROW）拾取延迟：原版 q-drop 40 ticks（2s）口径——
+///
+/// 先落地、再可捡。挖掘掉落仍用上面的 10（手感优先）。
+/// 合并吸收不改延迟：被吸入已有实体不延长，被扔出与旧实体合并时沿用旧实体剩余值。
+pub const THROWN_PICKUP_DELAY_TICKS: u32 = 40;
 /// despawn ticks（6000=5 分钟）。
 pub const DESPAWN_TICKS: u32 = 6000;
 /// 拾取半径（与玩家脚位置 3D 距离）。
@@ -105,12 +110,23 @@ impl ItemEntities {
         let h = (id as u64).wrapping_mul(0x9e3779b97f4a7c15);
         let hx = ((h >> 16) as f64 % 200.0) / 1000.0 - 0.1;
         let hz = ((h >> 32) as f64 % 200.0) / 1000.0 - 0.1;
-        self.spawn_with_velocity(id, item_id, count, x, y, z, rest_y, (hx, 0.25, hz))
+        self.spawn_with_velocity(
+            id,
+            item_id,
+            count,
+            x,
+            y,
+            z,
+            rest_y,
+            (hx, 0.25, hz),
+            PICKUP_DELAY_TICKS
+        )
     }
 
-    /// 带显式初速的生成（P28 扔物按视角定向；挖掘掉落走上面的 `spawn` 默认初速）。
+    /// 带显式初速与拾取延迟的生成（P28 扔物按视角定向，P28.1 手扔延迟 40 拍；
+    /// 挖掘掉落走上面的 `spawn` 默认初速 + 10 拍延迟）。
     /// 合并语义与 `spawn` 完全一致（同物品同 chunk 半径 1 格、64 上限）；
-    /// `vel` 只用于新落子实体，被合并吸收的数量不改变既有实体速度。
+    /// `vel`/`pickup_delay` 只用于新落子实体，被合并吸收的数量不改变既有实体速度与延迟。
     pub fn spawn_with_velocity(
         &mut self,
         id: i32,
@@ -121,6 +137,7 @@ impl ItemEntities {
         z: f64,
         rest_y: f64,
         vel: (f64, f64, f64),
+        pickup_delay: u32,
     ) -> Result<Vec<i32>, &'static str> {
         if count <= 0 {
             return Err("count must be positive");
@@ -163,7 +180,7 @@ impl ItemEntities {
                 pos: (x, y, z),
                 vel,
                 age: 0,
-                pickup_delay: PICKUP_DELAY_TICKS,
+                pickup_delay,
                 rest_y,
                 support,
                 on_ground: false,
@@ -387,16 +404,46 @@ mod tests {
         assert_eq!(e.pos.1, 67.0);
     }
 
+    #[test]
+    fn thrown_delay_outlasts_dig_delay() {
+        // P28.1 回归：手扔 40 拍延迟——15 拍（已过挖掘的 10 拍）站在实体上仍不可捡；
+        // 放满 40 拍后在实体当前位置可捡。对应真机"没落地就进背包"。
+        let mut es = ItemEntities::new();
+        es.spawn_with_velocity(2001, 55, 1, 0.5, 71.6, 0.5, 70.0, (0.0, 0.25, 0.06), THROWN_PICKUP_DELAY_TICKS)
+            .unwrap();
+        for _ in 0..15 {
+            es.tick();
+        }
+        let p = es.get(2001).unwrap().pos;
+        assert!(es.pickable(p).is_empty(), "thrown item must not be pickable at tick 15");
+        for _ in 0..25 {
+            es.tick();
+        }
+        let p = es.get(2001).unwrap().pos;
+        assert_eq!(es.pickable(p), vec![2001]);
+        assert!(p.1 < 71.6, "thrown item must have fallen, pos={p:?}");
+    }
+
     /// P28：显式初速只用于新落子实体（合并吸收不改变既有速度）。
     #[test]
     fn spawn_with_velocity_keeps_explicit_vel_and_merge_semantics() {
         let mut es = ItemEntities::new();
         es.spawn(1001, 55, 60, 0.5, 70.0, 0.5, 69.0).unwrap();
         let before = es.get(1001).unwrap().vel;
-        // 同位同物 +10：合并进 1001（64 上限，剩余 6 落新实体 1002 带显式初速）。
-        let touched =
-            es.spawn_with_velocity(1002, 55, 10, 0.5, 70.0, 0.5, 69.0, (0.0, 0.25, 0.06))
-                .unwrap();
+        // 同位同物 +10：合并进 1001（64 上限，剩余 6 落新实体 1002 带显式初速/延迟）。
+        let touched = es
+            .spawn_with_velocity(
+                1002,
+                55,
+                10,
+                0.5,
+                70.0,
+                0.5,
+                69.0,
+                (0.0, 0.25, 0.06),
+                PICKUP_DELAY_TICKS,
+            )
+            .unwrap();
         assert_eq!(es.get(1001).unwrap().count, 64);
         assert_eq!(es.get(1001).unwrap().vel, before, "merge must not touch existing velocity");
         assert_eq!(es.get(1002).unwrap().count, 6);
