@@ -1902,3 +1902,343 @@ async fn container_throw_single_all_and_cursor_noop() {
     drop(s);
     let _ = std::fs::remove_dir_all(&dir);
 }
+
+/// P21：双连接同视距——A 挖/放，B 实时收到 BlockUpdate；Ack 只回操作者本人。
+/// B 站 4 格外（同视距、超拾取半径），避免抢捡干扰。
+#[tokio::test]
+async fn broadcast_block_update_reaches_viewer_but_ack_only_to_actor() {
+    use mc_network::{BroadcastHub, DropState};
+    let dir = std::env::temp_dir().join(format!("mc-p21-block-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    let (tx, rx) = crossbeam_channel::unbounded::<PlayEvent>();
+    let mutable = Arc::new(MutableWorld::new(DEFAULT_SEED));
+    let cache = Arc::new(ChunkCache::new(DEFAULT_SEED, 64).with_mutable(Arc::clone(&mutable)));
+    let drops = Arc::new(DropState::new(dir.clone(), DEFAULT_SEED));
+    let hub = Arc::new(BroadcastHub::new());
+    let config = NetConfig::new(100, "p21-block".into(), Arc::new(AtomicUsize::new(0)))
+        .with_play_events(tx)
+        .with_view_distance(2)
+        .with_chunk_cache(cache)
+        .with_mutable_world(Arc::clone(&mutable))
+        .with_drops(Arc::clone(&drops))
+        .with_hub(Arc::clone(&hub));
+    let addr = spawn_server(config).await;
+    let mut a = login_and_join(addr, "BcastA", 2).await;
+    let mut b = login_and_join(addr, "BcastB", 2).await;
+    for s in [&mut a, &mut b] {
+        let (id, _) = read_frame_timeout(s, Duration::from_secs(5)).await.unwrap();
+        assert_eq!(id, packets::PLAY_SET_CONTAINER_CONTENT_S2C_ID);
+    }
+
+    let spawn = WorldGen::new(DEFAULT_SEED).spawn_pos();
+    let (fx, fy, fz) = (spawn.0 as f64 + 0.5, spawn.1 as f64, spawn.2 as f64 + 0.5);
+    let (gx, gy, gz) = (spawn.0, spawn.1 - 1, spawn.2);
+    assert_eq!(mutable.get(gx, gy, gz), 9);
+    send_pos_y(&mut a, fx, fy, fz).await;
+    match next_event(&rx).await {
+        PlayEvent::Movement { .. } => {}
+        other => panic!("expected movement event, got {other:?}"),
+    }
+    send_pos_y(&mut b, fx + 4.0, fy, fz).await;
+    match next_event(&rx).await {
+        PlayEvent::Movement { .. } => {}
+        other => panic!("expected movement event, got {other:?}"),
+    }
+    tokio::time::sleep(Duration::from_millis(100)).await;
+
+    // A 挖脚下草：FINISH seq=11。
+    let mut body = Vec::new();
+    packets::PlayerAction { status: 3, x: gx, y: gy, z: gz, face: 1, sequence: 11 }
+        .encode_body(&mut body);
+    mc_network::framing::write_packet(&mut a, packets::PLAY_PLAYER_ACTION_C2S_ID, &body)
+        .await
+        .unwrap();
+    // A 本人：BlockUpdate(air) + Ack(11) + Spawn + Data。
+    let (id, payload) = read_frame_timeout(&mut a, Duration::from_secs(5)).await.unwrap();
+    assert_eq!(id, packets::PLAY_BLOCK_UPDATE_S2C_ID);
+    assert_eq!(packets::BlockUpdate::decode_body(&payload).unwrap().0.block_id, 0);
+    let (id, payload) = read_frame_timeout(&mut a, Duration::from_secs(5)).await.unwrap();
+    assert_eq!(id, packets::PLAY_BLOCK_CHANGED_ACK_S2C_ID);
+    assert_eq!(read_varint(&payload).unwrap().0, 11);
+    let (id, _) = read_frame_timeout(&mut a, Duration::from_secs(5)).await.unwrap();
+    assert_eq!(id, packets::PLAY_SPAWN_ENTITY_S2C_ID);
+    let (id, _) = read_frame_timeout(&mut a, Duration::from_secs(5)).await.unwrap();
+    assert_eq!(id, packets::PLAY_SET_ENTITY_DATA_S2C_ID);
+    // 权威判定的 BlockEdit 事件（net 线程 → ECS）。
+    match next_event(&rx).await {
+        PlayEvent::BlockEdit { x, y, z, old_id: 9, new_id: 0, .. } => {
+            assert_eq!((x, y, z), (gx, gy, gz));
+        }
+        other => panic!("expected block edit event, got {other:?}"),
+    }
+    // A 走到 2.5 格外（同区块 23，不触发视距批次），避免 10 ticks 后自己捡走掉落。
+    send_pos_y(&mut a, fx + 2.5, fy, fz).await;
+    match next_event(&rx).await {
+        PlayEvent::Movement { .. } => {}
+        other => panic!("expected movement event, got {other:?}"),
+    }
+
+    // B：必须实时收到 BlockUpdate(air)；绝不能收到 Ack(11)。
+    let (mut saw_update, mut saw_spawn, mut saw_data) = (false, false, false);
+    for _ in 0..16 {
+        let (id, payload) = read_frame_timeout(&mut b, Duration::from_secs(5)).await.unwrap();
+        match id {
+            packets::PLAY_BLOCK_UPDATE_S2C_ID => {
+                let (u, _) = packets::BlockUpdate::decode_body(&payload).unwrap();
+                assert_eq!((u.x, u.y, u.z, u.block_id), (gx, gy, gz, 0));
+                saw_update = true;
+            }
+            packets::PLAY_SPAWN_ENTITY_S2C_ID => saw_spawn = true,
+            packets::PLAY_SET_ENTITY_DATA_S2C_ID => {
+                let (data, _) = packets::ItemEntityData::decode_body(&payload).unwrap();
+                assert_eq!(data.slot, packets::Slot { count: 1, item_id: 55 });
+                saw_data = true;
+            }
+            packets::PLAY_BLOCK_CHANGED_ACK_S2C_ID => {
+                panic!("ack must only go to the actor, viewer got {:?}", payload)
+            }
+            other => panic!("unexpected packet {other:#04x} for viewer after dig"),
+        }
+        if saw_update && saw_spawn && saw_data {
+            break;
+        }
+    }
+    assert!(saw_update && saw_spawn && saw_data, "viewer must see dig update + drop spawn");
+
+    // A 放置：点下方泥土顶面 seq=12 → 手持石头（selected=0 → 槽 36）。
+    let mut body = Vec::new();
+    packets::UseItemOn {
+        hand: 0, x: gx, y: gy - 1, z: gz, face: 1,
+        cursor_x: 0.5, cursor_y: 1.0, cursor_z: 0.5,
+        inside_block: false, world_border_hit: false, sequence: 12,
+    }
+    .encode_body(&mut body);
+    mc_network::framing::write_packet(&mut a, packets::PLAY_USE_ITEM_ON_C2S_ID, &body)
+        .await
+        .unwrap();
+    let (id, payload) = read_frame_timeout(&mut a, Duration::from_secs(5)).await.unwrap();
+    assert_eq!(id, packets::PLAY_BLOCK_UPDATE_S2C_ID);
+    assert_eq!(packets::BlockUpdate::decode_body(&payload).unwrap().0.block_id, 1);
+    let (id, payload) = read_frame_timeout(&mut a, Duration::from_secs(5)).await.unwrap();
+    assert_eq!(id, packets::PLAY_BLOCK_CHANGED_ACK_S2C_ID);
+    assert_eq!(read_varint(&payload).unwrap().0, 12);
+    let (id, _) = read_frame_timeout(&mut a, Duration::from_secs(5)).await.unwrap();
+    assert_eq!(id, packets::PLAY_SET_CONTAINER_SLOT_S2C_ID);
+
+    // B：必须实时收到 BlockUpdate(stone)；之后 300ms 内无其它包（无 Ack(12)）。
+    let (id, payload) = read_frame_timeout(&mut b, Duration::from_secs(5)).await.unwrap();
+    assert_eq!(id, packets::PLAY_BLOCK_UPDATE_S2C_ID, "viewer must see place update");
+    assert_eq!(packets::BlockUpdate::decode_body(&payload).unwrap().0.block_id, 1);
+    assert!(
+        read_frame_timeout(&mut b, Duration::from_millis(300)).await.is_err(),
+        "viewer must not get ack/sync after place"
+    );
+    assert_eq!(mutable.get(gx, gy, gz), 1);
+    drop(a);
+    drop(b);
+    drop(rx);
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// P21：A 按 Q 扔东西，B 实时收到 Spawn；A 拾取后 B 收到 TakeItem + Remove。
+#[tokio::test]
+async fn broadcast_thrown_drop_spawns_for_viewer_and_pickup_removes() {
+    use mc_network::{BroadcastHub, DropState};
+    let dir = std::env::temp_dir().join(format!("mc-p21-throw-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    let (tx, rx) = crossbeam_channel::unbounded::<PlayEvent>();
+    let mutable = Arc::new(MutableWorld::new(DEFAULT_SEED));
+    let cache = Arc::new(ChunkCache::new(DEFAULT_SEED, 64).with_mutable(Arc::clone(&mutable)));
+    let drops = Arc::new(DropState::new(dir.clone(), DEFAULT_SEED));
+    let hub = Arc::new(BroadcastHub::new());
+    let config = NetConfig::new(100, "p21-throw".into(), Arc::new(AtomicUsize::new(0)))
+        .with_play_events(tx)
+        .with_view_distance(2)
+        .with_chunk_cache(cache)
+        .with_mutable_world(Arc::clone(&mutable))
+        .with_drops(Arc::clone(&drops))
+        .with_hub(Arc::clone(&hub));
+    let addr = spawn_server(config).await;
+    let mut a = login_and_join(addr, "ThrowA", 2).await;
+    let mut b = login_and_join(addr, "ThrowB", 2).await;
+    for s in [&mut a, &mut b] {
+        let (id, _) = read_frame_timeout(s, Duration::from_secs(5)).await.unwrap();
+        assert_eq!(id, packets::PLAY_SET_CONTAINER_CONTENT_S2C_ID);
+    }
+    let spawn = WorldGen::new(DEFAULT_SEED).spawn_pos();
+    let (fx, fy, fz) = (spawn.0 as f64 + 0.5, spawn.1 as f64, spawn.2 as f64 + 0.5);
+    send_pos_y(&mut a, fx, fy, fz).await;
+    match next_event(&rx).await {
+        PlayEvent::Movement { .. } => {}
+        other => panic!("expected movement event, got {other:?}"),
+    }
+    send_pos_y(&mut b, fx + 4.0, fy, fz).await;
+    match next_event(&rx).await {
+        PlayEvent::Movement { .. } => {}
+        other => panic!("expected movement event, got {other:?}"),
+    }
+    tokio::time::sleep(Duration::from_millis(100)).await;
+
+    // A 按 Q 扔 1 个石头（DROP_ITEM=5，seq=71）；A 原地不动等拾取。
+    let mut body = Vec::new();
+    packets::PlayerAction { status: 5, x: spawn.0, y: spawn.1 - 1, z: spawn.2, face: 1, sequence: 71 }
+        .encode_body(&mut body);
+    mc_network::framing::write_packet(&mut a, packets::PLAY_PLAYER_ACTION_C2S_ID, &body)
+        .await
+        .unwrap();
+    let mut drop_id = None;
+    let (mut saw_data, mut saw_content, mut saw_ack) = (false, false, false);
+    for _ in 0..8 {
+        let (id, payload) = read_frame_timeout(&mut a, Duration::from_secs(5)).await.unwrap();
+        match id {
+            packets::PLAY_SPAWN_ENTITY_S2C_ID => {
+                drop_id = Some(packets::SpawnItemEntity::decode_body(&payload).unwrap().0.entity_id);
+            }
+            packets::PLAY_SET_ENTITY_DATA_S2C_ID => {
+                let (data, _) = packets::ItemEntityData::decode_body(&payload).unwrap();
+                assert_eq!(data.slot, packets::Slot { count: 1, item_id: 1 });
+                saw_data = true;
+            }
+            packets::PLAY_SET_CONTAINER_CONTENT_S2C_ID => {
+                let (c, _) = packets::SetContainerContent::decode_body(&payload).unwrap();
+                assert_eq!(c.slots[36], packets::Slot { count: 63, item_id: 1 });
+                saw_content = true;
+            }
+            packets::PLAY_BLOCK_CHANGED_ACK_S2C_ID => {
+                assert_eq!(read_varint(&payload).unwrap().0, 71);
+                saw_ack = true;
+            }
+            other => panic!("unexpected packet {other:#04x} for actor after throw"),
+        }
+        if drop_id.is_some() && saw_data && saw_content && saw_ack {
+            break;
+        }
+    }
+    let drop_id = drop_id.expect("throw must spawn a drop");
+    assert!(saw_data && saw_content && saw_ack, "throw must sync inventory and ack");
+
+    // B：Spawn（同一 entity_id）+ Data；拾取前绝不能出现 Ack(71)；
+    // A 原地拾取后 B 收到 TakeItem + Remove。
+    let (mut saw_spawn, mut saw_data, mut saw_take, mut saw_remove) = (false, false, false, false);
+    for _ in 0..60 {
+        let (id, payload) = read_frame_timeout(&mut b, Duration::from_secs(5)).await.unwrap();
+        match id {
+            packets::PLAY_SPAWN_ENTITY_S2C_ID => {
+                let (sp, _) = packets::SpawnItemEntity::decode_body(&payload).unwrap();
+                assert_eq!(sp.entity_id, drop_id, "viewer must see the same drop entity");
+                saw_spawn = true;
+            }
+            packets::PLAY_SET_ENTITY_DATA_S2C_ID => saw_data = true,
+            packets::PLAY_PICKUP_ITEM_S2C_ID => {
+                let (t, _) = packets::TakeItemEntity::decode_body(&payload).unwrap();
+                assert_eq!((t.collected_id, t.collector_id), (drop_id, 1));
+                saw_take = true;
+            }
+            packets::PLAY_REMOVE_ENTITIES_S2C_ID => {
+                let (r, _) = packets::RemoveEntities::decode_body(&payload).unwrap();
+                assert!(r.ids.contains(&drop_id));
+                saw_remove = true;
+            }
+            packets::PLAY_BLOCK_CHANGED_ACK_S2C_ID => {
+                panic!("ack must only go to the actor, viewer got {:?}", payload)
+            }
+            other => panic!("unexpected packet {other:#04x} for viewer"),
+        }
+        if saw_spawn && saw_data && saw_take && saw_remove {
+            break;
+        }
+    }
+    assert!(
+        saw_spawn && saw_data && saw_take && saw_remove,
+        "viewer must see throw spawn and pickup removal"
+    );
+    assert!(drops.items.lock().unwrap().is_empty(), "picked drop must be gone server-side");
+    drop(a);
+    drop(b);
+    drop(rx);
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// P21：断开一端清 hub 条目（与 Disconnect 同点），另一端不受影响照常挖放。
+#[tokio::test]
+async fn broadcast_disconnect_clears_hub_entry_and_survivor_unaffected() {
+    use mc_network::{BroadcastHub, DropState};
+    let dir = std::env::temp_dir().join(format!("mc-p21-disc-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    let (tx, rx) = crossbeam_channel::unbounded::<PlayEvent>();
+    let mutable = Arc::new(MutableWorld::new(DEFAULT_SEED));
+    let cache = Arc::new(ChunkCache::new(DEFAULT_SEED, 64).with_mutable(Arc::clone(&mutable)));
+    let drops = Arc::new(DropState::new(dir.clone(), DEFAULT_SEED));
+    let hub = Arc::new(BroadcastHub::new());
+    let config = NetConfig::new(100, "p21-disc".into(), Arc::new(AtomicUsize::new(0)))
+        .with_play_events(tx)
+        .with_view_distance(2)
+        .with_chunk_cache(cache)
+        .with_mutable_world(Arc::clone(&mutable))
+        .with_drops(Arc::clone(&drops))
+        .with_hub(Arc::clone(&hub));
+    let addr = spawn_server(config).await;
+    let mut a = login_and_join(addr, "GoneA", 2).await;
+    let mut b = login_and_join(addr, "StayB", 2).await;
+    for s in [&mut a, &mut b] {
+        let (id, _) = read_frame_timeout(s, Duration::from_secs(5)).await.unwrap();
+        assert_eq!(id, packets::PLAY_SET_CONTAINER_CONTENT_S2C_ID);
+    }
+    let spawn = WorldGen::new(DEFAULT_SEED).spawn_pos();
+    let (fx, fy, fz) = (spawn.0 as f64 + 0.5, spawn.1 as f64, spawn.2 as f64 + 0.5);
+    let (gx, gy, gz) = (spawn.0, spawn.1 - 1, spawn.2);
+    send_pos_y(&mut a, fx, fy, fz).await;
+    let conn_a = match next_event(&rx).await {
+        PlayEvent::Movement { conn_id, .. } => conn_id,
+        other => panic!("expected movement event, got {other:?}"),
+    };
+    send_pos_y(&mut b, fx + 4.0, fy, fz).await;
+    let conn_b = match next_event(&rx).await {
+        PlayEvent::Movement { conn_id, .. } => conn_id,
+        other => panic!("expected movement event, got {other:?}"),
+    };
+    let deadline = std::time::Instant::now() + Duration::from_secs(5);
+    while hub.len() != 2 && std::time::Instant::now() < deadline {
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+    assert_eq!(hub.len(), 2, "both connections must register");
+    assert!(hub.contains(conn_a) && hub.contains(conn_b));
+
+    // A 断开：Disconnect 事件 + hub 条目 cleared。
+    drop(a);
+    match next_event(&rx).await {
+        PlayEvent::Disconnect { conn_id, .. } => assert_eq!(conn_id, conn_a),
+        other => panic!("expected disconnect event, got {other:?}"),
+    }
+    let deadline = std::time::Instant::now() + Duration::from_secs(5);
+    while (hub.len() != 1 || hub.contains(conn_a)) && std::time::Instant::now() < deadline {
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+    assert_eq!(hub.len(), 1, "disconnect must clear the hub entry");
+    assert!(!hub.contains(conn_a) && hub.contains(conn_b));
+
+    // 存活端照常挖放：B 移到脚下挖草 seq=91。
+    send_pos_y(&mut b, fx, fy, fz).await;
+    match next_event(&rx).await {
+        PlayEvent::Movement { .. } => {}
+        other => panic!("expected movement event, got {other:?}"),
+    }
+    let mut body = Vec::new();
+    packets::PlayerAction { status: 3, x: gx, y: gy, z: gz, face: 1, sequence: 91 }
+        .encode_body(&mut body);
+    mc_network::framing::write_packet(&mut b, packets::PLAY_PLAYER_ACTION_C2S_ID, &body)
+        .await
+        .unwrap();
+    let (id, payload) = read_frame_timeout(&mut b, Duration::from_secs(5)).await.unwrap();
+    assert_eq!(id, packets::PLAY_BLOCK_UPDATE_S2C_ID);
+    assert_eq!(packets::BlockUpdate::decode_body(&payload).unwrap().0.block_id, 0);
+    let (id, payload) = read_frame_timeout(&mut b, Duration::from_secs(5)).await.unwrap();
+    assert_eq!(id, packets::PLAY_BLOCK_CHANGED_ACK_S2C_ID);
+    assert_eq!(read_varint(&payload).unwrap().0, 91);
+    let (id, _) = read_frame_timeout(&mut b, Duration::from_secs(5)).await.unwrap();
+    assert_eq!(id, packets::PLAY_SPAWN_ENTITY_S2C_ID);
+    assert_eq!(mutable.get(gx, gy, gz), 0);
+    drop(b);
+    drop(rx);
+    let _ = std::fs::remove_dir_all(&dir);
+}

@@ -515,6 +515,35 @@ $natives = 'C:\Users\qwe\AppData\Local\Temp\mc263natives'
     `play_stream.rs` 新增 3 个 e2e（单扔→整扔、空手只 ack、容器 THROW 含光标无操作）。
     遗留 TODO：原版真机复验（Q/背包 Q 手感、扔出物抛物线/落地/拾取、空手 Q 不断连）；
     创造模式/副手/死亡掉落未做；扔出方向未按视角偏置（落在脚下）。
+17. **P21 多人同服可见（本轮，已实现，未真机）**：新增全服共享 `BroadcastHub`
+    （`crates/mc-network/src/broadcast.rs`，`conn_id → 发送端 + 位置/视距快照`）；
+    A 的权威判定线程把 `BlockUpdate` / 掉落 `Spawn`+`Data` / `Remove` / `TakeItem`
+    按原始包体投递给视距内其它连接的无界队列，各连接 `play_loop` 在 tick 间隙
+    （50ms 读超时分支 + 包处理节拍）排空自己队列写入自己 socket。
+    - 范围：方块挖/放 `BlockUpdate` + `Ack`（`Ack` 只回操作者本人，客户端序列预测
+      是 per-connection 的，广播 `Ack` 会错位对端预测）；掉落 `Spawn`/`Data`/
+      `Remove`/`TakeItem`；拾取后即时向视距内其它连接补 `TakeItem` + `Remove`
+      （despawn/出视距仍走各连接 `tick_drops` 差集兜底）。
+      不同步：挖掘动画 `Set Block Destroy Stage 0x05`；玩家实体互相可见
+      （已有 `PlayerConnId` 实体但无位置广播，保持不动）。
+    - 并发：`decide_dig` 的 `set_if` CAS 语义不变；锁粒度最小——单把
+      `RwLock<HashMap>` 只做注册/注销/位置更新与接收集快照，广播先在读锁内拷贝
+      发送端、丢锁后再 `try_send`（无界队列，永不阻塞判定线程）；`update_pos`
+      只改本连接条目。断开时 `enter_play_with_options` 退出路径与 `Disconnect`
+      同点 `unregister`（注册在 Join 序列完成后，保证接收方已持有完整视距），不留幽灵通道。
+      视距用接收方 `last_pos` + `radius`（切比雪夫，与 `ChunkView` 同口径），
+      每个移动包后更新，跨区块移动后广播集自然跟随，无需等节流 flush。
+    - 接收方 `known` 集按对端逐个维护（`Spawn` 前 mark、`Remove` 后 unmark），
+      避免接收方 tick 重复补发/重复清理；与接收方自发包的竞态窗口内最多产生
+      无害重复（客户端忽略未知实体 Remove），e2e 断言均容忍重复包、但对 `Ack`
+      严格零容忍。`hub=None`（旧入口/旧单测）行为与旧版逐字节一致。
+    - 测试：`broadcast.rs` 单测（视距过滤/位置更新移动广播集/注销清通道）+
+      `play_stream.rs` 新增 3 个 e2e（A 挖/放 B 收 `BlockUpdate` 且无 `Ack`；
+      A 扔 B 收同 entity `Spawn`、A 拾取 B 收 `TakeItem`+`Remove`；
+      断开一端 hub 条目清除、另一端照常挖放）。旧 20 项一个字未动，全绿。
+    - 遗留 TODO：玩家实体互见（位置广播 + Spawn Player 159）；挖掘动画 0x05；
+      大视距（radius=10）广播风暴限流/合并（当前每变更即时广播，高频挖放 +
+      多人同视距时包量线性增长）；真机两人同屏复验。
 
 ## 6. 关键文件
 
@@ -532,6 +561,7 @@ crates/mc-protocol/src/packets/
   data/*_777.bin             LoginPlay / PositionSync / UpdateTags 抓包
 crates/mc-network/src/
   login_route/               Play 接线目录：login.rs（登录/Join序列）+ mod.rs（play_loop）+ block_edit.rs（decide_dig/decide_place + BlockUpdate/Ack）+ drop_sync.rs（掉落生成/50ms tick/拾取/背包同步 + P19 Q扔）+ view_sync.rs（视距节流/flush）
+  broadcast.rs               P21 per-player 写通道 hub（conn_id → 队列 + 位置/视距快照，BlockUpdate/Spawn/Data/Remove/TakeItem 视距广播）
   drop_state.rs              P18 DropState：ItemEntities + conn_id→背包 + entity_id 自增 + known 视距集 + 用户名键存档
   chunk_view.rs              clamp_view_radius/view_chunk_count、per-connection 视距集合/去重/跨区块 add/remove 规划
   chunk_cache.rs             共享已编码 ChunkData 0x2E 包体缓存（Mutex+HashMap+FIFO，默认 1024；`bodies` rayon 并行批量；P17 `with_mutable` + `invalidate`）

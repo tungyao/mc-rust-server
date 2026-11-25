@@ -2,6 +2,7 @@
 //! Shared small helpers (compression-aware IO, event emit, user_tag, chunk batches) reused by sibling modules.
 use super::drop_sync::send_full_inventory;
 use super::play_loop;
+use crate::broadcast::{BroadcastHub, QueuedPacket};
 use crate::chunk_cache::{encode_chunk_data_body, encode_chunk_data_body_mutable, ChunkCache};
 use crate::chunk_view::{clamp_view_radius, view_chunk_count, ChunkView, PLAY_VIEW_RADIUS};
 use crate::drop_state::DropState;
@@ -39,6 +40,8 @@ pub struct PlayOptions {
     pub mutable_world: Option<Arc<MutableWorld>>,
     /// 掉落物实体 + 背包共享状态（P18）；None 时挖/放不掉落不同步（旧行为）。
     pub drops: Option<Arc<DropState>>,
+    /// 多人广播 hub（P21）；None 时只回包给操作者本人（旧行为）。
+    pub hub: Option<Arc<BroadcastHub>>,
 }
 
 impl PlayOptions {
@@ -52,6 +55,7 @@ impl PlayOptions {
             chunk_cache: None,
             mutable_world: None,
             drops: None,
+            hub: None,
         }
     }
 
@@ -82,6 +86,11 @@ impl PlayOptions {
 
     pub fn with_drops(mut self, drops: Arc<DropState>) -> Self {
         self.drops = Some(drops);
+        self
+    }
+
+    pub fn with_hub(mut self, hub: Arc<BroadcastHub>) -> Self {
+        self.hub = Some(hub);
         self
     }
 }
@@ -312,6 +321,10 @@ pub async fn enter_play_with_options(
     if let Some(drops) = &opts.drops {
         drops.unload_inventory(conn_id, &user_tag(&profile));
     }
+    // P21 广播通道与 Disconnect 同点清理：覆盖所有退出路径，不留幽灵通道。
+    if let Some(hub) = &opts.hub {
+        hub.unregister(conn_id);
+    }
     // 正常 EOF / 读错误 / 写失败 / KeepAlive 超时 / Join 序列失败全部走这里，
     // 只发一次 Disconnect。ECS 按 conn_id 立即 despawn，与 15s timeout 去重。
     emit_play_event(&events, PlayEvent::Disconnect { addr, conn_id });
@@ -373,7 +386,19 @@ async fn enter_play_inner(
     );
     // P18 背包 Join 同步（读盘/开局 + 全量 Content），失败不阻断进服。
     send_join_inventory(stream, profile, opts).await;
-    play_loop(stream, addr, profile, opts, keepalive_id, view, &world, cache, mutable).await
+    // P21 广播队列：Join 序列完成后注册，保证接收方已持有完整视距区块，
+    // 广播包不会排在区块包前面；初始位置取出生点，移动包随后更新。
+    let outbox = opts.hub.as_ref().map(|hub| {
+        let (tx, rx) = crossbeam_channel::unbounded::<QueuedPacket>();
+        hub.register(
+            opts.conn_id,
+            tx,
+            radius,
+            (spawn.0 as f64 + 0.5, spawn.1 as f64, spawn.2 as f64 + 0.5),
+        );
+        rx
+    });
+    play_loop(stream, addr, profile, opts, keepalive_id, view, &world, cache, mutable, outbox).await
 }
 
 /// P18 Join 背包同步：读盘（缺文件=新背包+石头开局）→ 全量 Content。

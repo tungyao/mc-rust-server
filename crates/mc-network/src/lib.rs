@@ -1,5 +1,6 @@
 //! mc-network: tokio 监听 + 包收发，只兼容26.3/777
 //! 模块上限200行：config/framing/handshake_route/status_route/login_route
+pub mod broadcast;
 pub mod chunk_cache;
 pub mod chunk_view;
 pub mod config;
@@ -10,6 +11,7 @@ pub mod login_route;
 pub mod play_events;
 pub mod status_route;
 
+pub use broadcast::{BroadcastHub, QueuedPacket};
 pub use chunk_cache::{
     encode_chunk_data_body, encode_chunk_data_body_mutable, ChunkCache, ChunkCacheStats,
     DEFAULT_CHUNK_CACHE_CAPACITY,

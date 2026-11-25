@@ -1,4 +1,5 @@
 //! config: NetConfig + 常量，只兼容26.3/777
+use super::broadcast::BroadcastHub;
 use super::chunk_cache::ChunkCache;
 use super::chunk_view::clamp_view_radius;
 use super::drop_state::DropState;
@@ -34,6 +35,8 @@ pub struct NetConfig {
     pub mutable_world: Option<Arc<MutableWorld>>,
     /// 掉落物实体 + 背包共享状态（P18）；None 时挖/放不掉落不同步（旧行为）。
     pub drops: Option<Arc<DropState>>,
+    /// 多人广播 hub（P21）；None 时只回包给操作者本人（旧行为）。
+    pub hub: Option<Arc<BroadcastHub>>,
 }
 
 impl Default for NetConfig {
@@ -49,6 +52,7 @@ impl Default for NetConfig {
             chunk_cache: None,
             mutable_world: None,
             drops: None,
+            hub: None,
         }
     }
 }
@@ -68,6 +72,7 @@ impl NetConfig {
             chunk_cache: None,
             mutable_world: None,
             drops: None,
+            hub: None,
         }
     }
 
@@ -117,6 +122,11 @@ impl NetConfig {
 
     pub fn with_drops(mut self, drops: Arc<DropState>) -> Self {
         self.drops = Some(drops);
+        self
+    }
+
+    pub fn with_hub(mut self, hub: Arc<BroadcastHub>) -> Self {
+        self.hub = Some(hub);
         self
     }
 }

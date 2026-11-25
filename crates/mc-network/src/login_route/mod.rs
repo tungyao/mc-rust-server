@@ -15,6 +15,7 @@ use self::block_edit::{apply_block_outcome, eye_of};
 use self::drop_sync::{handle_throw_action, send_full_inventory, send_held_slot, spawn_drops, spawn_thrown_items, tick_drops};
 use self::login::{emit_play_event, read_packet_any, user_tag, write_packet_any};
 use self::view_sync::{maybe_flush_view, queue_view_move, PendingViewMove};
+use crate::broadcast::QueuedPacket;
 use crate::chunk_cache::ChunkCache;
 use crate::chunk_view::ChunkView;
 use crate::play_events::PlayEvent;
@@ -26,6 +27,21 @@ use tokio::net::TcpStream;
 use tracing::{debug, info, warn};
 use std::io;
 
+/// P21：排空本连接的广播队列（其它玩家投递的 BlockUpdate/Spawn/Data/Remove/TakeItem），
+///
+/// 在 tick 间隙写入自己的 socket；队列为空直接返回，写失败则断开并走统一清理路径。
+async fn drain_outbox(
+    stream: &mut TcpStream,
+    opts: &PlayOptions,
+    outbox: &Option<crossbeam_channel::Receiver<QueuedPacket>>,
+) -> io::Result<()> {
+    let Some(rx) = outbox else { return Ok(()) };
+    while let Ok(pkt) = rx.try_recv() {
+        write_packet_any(stream, pkt.id, &pkt.body, opts.threshold).await?;
+    }
+    Ok(())
+}
+
 async fn play_loop(
     stream: &mut TcpStream,
     addr: SocketAddr,
@@ -36,6 +52,7 @@ async fn play_loop(
     world: &WorldGen,
     cache: Option<&ChunkCache>,
     mutable: Option<&MutableWorld>,
+    outbox: Option<crossbeam_channel::Receiver<QueuedPacket>>,
 ) -> io::Result<()> {
     let threshold = opts.threshold;
     // net 线程的 last_seen 只认 KeepAlive 回显（移动包不刷新，避免客户端只发移动不回心跳）；
@@ -79,6 +96,10 @@ async fn play_loop(
                         debug!("play uuid={} drop sync failed ({e}), closing", profile.uuid);
                         break;
                     }
+                }
+                if let Err(e) = drain_outbox(stream, opts, &outbox).await {
+                    debug!("play uuid={} outbox drain failed ({e}), closing", profile.uuid);
+                    break;
                 }
                 last_drop_tick = Instant::now();
                 continue;
@@ -133,6 +154,10 @@ async fn play_loop(
                                 queue_view_move(&mut pending_view, view.center(), p.x, p.z);
                             }
                             _ => {}
+                        }
+                        // P21：广播集用接收方 last_pos，跨区块后自然跟随。
+                        if let Some(hub) = &opts.hub {
+                            hub.update_pos(opts.conn_id, last_pos);
                         }
                         emit_play_event(
                             &opts.events,
@@ -403,6 +428,11 @@ async fn play_loop(
                 }
             }
             last_drop_tick = Instant::now();
+        }
+        // P21：同节拍排空广播队列（其它玩家的编辑/掉落），再回读循环。
+        if let Err(e) = drain_outbox(stream, opts, &outbox).await {
+            debug!("play uuid={} outbox drain failed ({e}), closing", profile.uuid);
+            break;
         }
     }
     Ok(())

@@ -192,6 +192,8 @@ pub fn decide_place(
 }
 
 /// 落子后动作：缓存失效 → 发 BlockUpdate → 发 Ack → 投递 BlockEdit 事件。
+/// P21：每个 BlockUpdate 同步广播给视距内其它连接（`Ack` 仍只回操作者本人，
+/// 客户端序列预测是 per-connection 的）；无 hub 时行为与旧版逐字节一致。
 pub(crate) async fn apply_block_outcome(
     stream: &mut TcpStream,
     addr: SocketAddr,
@@ -214,6 +216,14 @@ pub(crate) async fn apply_block_outcome(
         let mut body = Vec::new();
         packets::BlockUpdate { x: c.x, y: c.y, z: c.z, block_id: c.new_id as i32 }
             .encode_body(&mut body);
+        if let Some(hub) = &opts.hub {
+            hub.broadcast(
+                opts.conn_id,
+                mc_world::chunk_of_block(c.x, c.z),
+                packets::PLAY_BLOCK_UPDATE_S2C_ID,
+                &body,
+            );
+        }
         write_packet_any(stream, packets::PLAY_BLOCK_UPDATE_S2C_ID, &body, opts.threshold).await?;
         emit_play_event(
             &opts.events,

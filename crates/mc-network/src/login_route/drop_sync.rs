@@ -116,6 +116,102 @@ pub(crate) async fn send_remove(
     Ok(())
 }
 
+/// P21：向事件区块视距内的其它连接同步单个掉落实体（Spawn 或 Data）。
+///
+/// - 接收方未知 → `Spawn` + `Data` 并 `mark_known`（与 `send_spawn` 同序）；
+/// - 接收方已知（合并堆叠）→ 只补 `Data`。
+/// `Ack`/背包同步不受影响（仍只发操作者本人）。
+pub(crate) fn broadcast_entity_to_viewers(
+    opts: &PlayOptions,
+    drops: &DropState,
+    chunk: mc_core::ChunkPos,
+    id: i32,
+) {
+    let Some(hub) = &opts.hub else { return };
+    let viewers = hub.recipients_in_view(opts.conn_id, chunk);
+    if viewers.is_empty() {
+        return;
+    }
+    let snap = {
+        let items = drops.items.lock().unwrap_or_else(|p| p.into_inner());
+        items.get(id).map(|e| (e.id, e.uuid, e.pos, e.vel, e.item_id, e.count))
+    };
+    let Some((id, uuid, (x, y, z), vel, item_id, count)) = snap else { return };
+    let mut dbody = Vec::new();
+    packets::ItemEntityData {
+        entity_id: id,
+        slot: packets::Slot { count, item_id },
+    }
+    .encode_body(&mut dbody);
+    for viewer in viewers {
+        if drops.is_known(viewer, id) {
+            hub.unicast(viewer, packets::PLAY_SET_ENTITY_DATA_S2C_ID, dbody.clone());
+            continue;
+        }
+        let mut sbody = Vec::new();
+        packets::SpawnItemEntity {
+            entity_id: id,
+            uuid,
+            x,
+            y,
+            z,
+            vel: packets::LpVec3 { x: vel.0, y: vel.1, z: vel.2 },
+            pitch: 0,
+            yaw: 0,
+            head_yaw: 0,
+        }
+        .encode_body(&mut sbody);
+        hub.unicast(viewer, packets::PLAY_SPAWN_ENTITY_S2C_ID, sbody);
+        hub.unicast(viewer, packets::PLAY_SET_ENTITY_DATA_S2C_ID, dbody.clone());
+        drops.mark_known(viewer, id);
+    }
+}
+
+/// P21：向视距内其它连接广播 `RemoveEntities`（拾取即时同步；despawn/出视距仍走
+/// 各连接自己的 `tick_drops` 差集兜底）。逐个接收方 `unmark_known`，避免接收方
+/// tick 重复补发。
+pub(crate) fn broadcast_remove_to_viewers(
+    opts: &PlayOptions,
+    drops: &DropState,
+    chunk: mc_core::ChunkPos,
+    ids: &[i32],
+) {
+    let Some(hub) = &opts.hub else { return };
+    if ids.is_empty() {
+        return;
+    }
+    let viewers = hub.recipients_in_view(opts.conn_id, chunk);
+    if viewers.is_empty() {
+        return;
+    }
+    let mut body = Vec::new();
+    packets::RemoveEntities { ids: ids.to_vec() }.encode_body(&mut body);
+    for viewer in viewers {
+        hub.unicast(viewer, packets::PLAY_REMOVE_ENTITIES_S2C_ID, body.clone());
+        for id in ids {
+            drops.unmark_known(viewer, *id);
+        }
+    }
+}
+
+/// P21：向视距内其它连接广播拾取动画（`collector` 与操作者看到的一致，恒为 1）。
+pub(crate) fn broadcast_takeitem_to_viewers(
+    opts: &PlayOptions,
+    chunk: mc_core::ChunkPos,
+    entity_id: i32,
+    count: i32,
+) {
+    let Some(hub) = &opts.hub else { return };
+    let mut body = Vec::new();
+    packets::TakeItemEntity {
+        collected_id: entity_id,
+        collector_id: PLAYER_ENTITY_ID,
+        count,
+    }
+    .encode_body(&mut body);
+    hub.broadcast(opts.conn_id, chunk, packets::PLAY_PICKUP_ITEM_S2C_ID, &body);
+}
+
 /// 全量背包同步（Join/拾取后）。
 pub(crate) async fn send_full_inventory(
     stream: &mut TcpStream,
@@ -179,6 +275,7 @@ pub(crate) async fn spawn_drops(
         let c = &outcome.changes[0];
         (c.x, c.y, c.z)
     };
+    let chunk = mc_world::chunk_of_block(bx, bz);
     for d in &outcome.drops {
         let id = drops.alloc_id();
         // 以被破坏方块为起点向下找支撑面：树冠/水面/洞穴顶不再把掉落物抬到高处，
@@ -212,6 +309,8 @@ pub(crate) async fn spawn_drops(
             } else {
                 send_spawn(stream, opts, drops, tid).await?;
             }
+            // P21：同视距其它连接实时看到掉落（Spawn/Data + known 维护）。
+            broadcast_entity_to_viewers(opts, drops, chunk, tid);
         }
     }
     Ok(())
@@ -244,6 +343,7 @@ pub(crate) async fn spawn_thrown_items(
     }
     let id = drops.alloc_id();
     let (bx, by, bz) = (feet.0.floor() as i32, feet.1.floor() as i32, feet.2.floor() as i32);
+    let chunk = mc_world::chunk_of_block(bx, bz);
     let rest = world.drop_rest_y(bx, bz, by) as f64;
     let touched = {
         let mut items = drops.items.lock().unwrap_or_else(|p| p.into_inner());
@@ -263,6 +363,8 @@ pub(crate) async fn spawn_thrown_items(
         } else {
             send_spawn(stream, opts, drops, tid).await?;
         }
+        // P21：同视距其它连接实时看到扔出的东西。
+        broadcast_entity_to_viewers(opts, drops, chunk, tid);
     }
     Ok(())
 }
@@ -307,19 +409,19 @@ pub(crate) async fn tick_drops(
     sync_view_entities(stream, opts, drops, view).await?;
     // 拾取：delay 到期 + 距离 <1.5 → TakeItem+Remove，入库，全量同步 + 刷盘。
     // items.pickable + items.remove 在同一把锁内，连接间先到先得，天然互斥。
-    let picked: Vec<(i32, i32, i32)> = {
+    let picked: Vec<(i32, i32, i32, mc_core::ChunkPos)> = {
         let mut items = drops.items.lock().unwrap_or_else(|p| p.into_inner());
         let ids = items.pickable(last_pos);
         let mut out = Vec::new();
         for id in ids {
             if let Some(e) = items.remove(id) {
-                out.push((id, e.item_id, e.count));
+                out.push((id, e.item_id, e.count, e.chunk));
             }
         }
         out
     };
     if !picked.is_empty() {
-        for (id, _, count) in &picked {
+        for (id, _, count, _) in &picked {
             let mut body = Vec::new();
             packets::TakeItemEntity {
                 collected_id: *id,
@@ -329,9 +431,14 @@ pub(crate) async fn tick_drops(
             .encode_body(&mut body);
             write_packet_any(stream, packets::PLAY_PICKUP_ITEM_S2C_ID, &body, opts.threshold).await?;
         }
-        let gone: Vec<i32> = picked.iter().map(|(id, _, _)| *id).collect();
+        let gone: Vec<i32> = picked.iter().map(|(id, _, _, _)| *id).collect();
         send_remove(stream, opts, drops, &gone).await?;
-        for (_, item_id, count) in picked {
+        // P21：拾取动画 + 移除即时同步给同视距其它连接（逐实体按其所在区块判定）。
+        for (id, _, count, chunk) in &picked {
+            broadcast_takeitem_to_viewers(opts, *chunk, *id, *count);
+            broadcast_remove_to_viewers(opts, drops, *chunk, &[*id]);
+        }
+        for (_, item_id, count, _) in picked {
             drops.with_inventory(opts.conn_id, |inv| {
                 inv.add_item(item_id, count);
             });
