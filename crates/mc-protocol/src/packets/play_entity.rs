@@ -9,7 +9,7 @@
 //! - S2C `take_item_entity` 0x7F：PickupItem 拾取动画（collector=LoginPlay entity_id=1）
 //! - S2C `container_set_content` 0x12 / `container_set_slot` 0x14：背包同步（window 0）
 //! - C2S `set_carried_item` 0x36：SetHeldItem（**Short** 0..=8，与 S2C 0x6B VarInt 不同）
-//! - C2S `container_click` 0x12：ClickContainer（PICKUP/SWAP/QUICK_MOVE 已实现；
+//! - C2S `container_click` 0x12：ClickContainer（PICKUP/SWAP/QUICK_MOVE/THROW 已实现；
 //!   changedSlots/carried 按 jar 实测线格式跳过、不做 hash 校验，见 §7）
 //!
 //! P18 范围：掉落看得见（Spawn+Metadata）、下落同步（0x23 Teleport）、拾取动画（0x7F
@@ -650,6 +650,9 @@ pub const CLICK_PICKUP: u8 = 0;
 pub const CLICK_QUICK_MOVE: u8 = 1;
 /// 数字键：点击槽 <-> 快捷栏 button 槽交换。
 pub const CLICK_SWAP: u8 = 2;
+/// 背包打开时按 Q：扔点击槽里的东西（jar `ContainerInput::THROW` id=4；
+/// button=0 扔 1 个，button=1 扔整栈；要求光标为空，否则原版无操作）。
+pub const CLICK_THROW: u8 = 4;
 
 /// C2S ContainerClick（0x12）解析结果（changedSlots/carried 已跳过不返回）。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -1026,6 +1029,26 @@ mod tests {
         write_varint(0, &mut many);
         write_varint(99, &mut many);
         assert!(decode_container_click(&many).is_err());
+    }
+
+    #[test]
+    fn container_click_throw_mode_decodes() {
+        // P19：背包打开时按 Q 走 THROW（`ContainerInput` id=4，button 0=1 个/1=整栈）。
+        assert_eq!(CLICK_THROW, 4);
+        let mut b = Vec::new();
+        write_varint(0, &mut b);
+        write_varint(9, &mut b);
+        b.extend_from_slice(&37i16.to_be_bytes());
+        b.push(1);
+        write_varint(CLICK_THROW as i32, &mut b);
+        write_varint(0, &mut b);
+        write_bool(false, &mut b);
+        let (got, used) = decode_container_click(&b).unwrap();
+        assert_eq!(used, b.len());
+        assert_eq!(
+            got,
+            ContainerClick { container_id: 0, state_id: 9, slot: 37, button: 1, click_type: CLICK_THROW }
+        );
     }
 
     #[test]

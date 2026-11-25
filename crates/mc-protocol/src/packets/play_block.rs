@@ -49,6 +49,12 @@ pub const PLAYER_ACTION_CANCEL_DIG: i32 = 2;
 /// Player Action Status：完成挖掘（26.3 `STOP_DESTROY_BLOCK` ordinal 3；
 /// 生存模式按住挖完、客户端进度满后才发；之前误标为 2，把 ABORT 当完成处理）。
 pub const PLAYER_ACTION_FINISH_DIG: i32 = 3;
+/// Player Action Status：扔整组手持（26.3 `DROP_ALL_ITEMS` ordinal 4；
+/// 原版 Q（Ctrl+Q）发这个；不碰方块，只从手持槽拿走整栈并在脚下生成掉落实体）。
+pub const PLAYER_ACTION_DROP_ALL_ITEMS: i32 = 4;
+/// Player Action Status：扔 1 个手持（26.3 `DROP_ITEM` ordinal 5；
+/// 原版 Q 发这个；空手时只 ack，不落子不断线）。
+pub const PLAYER_ACTION_DROP_ITEM: i32 = 5;
 
 /// 方块坐标 pack：26 位 x + 26 位 z + 12 位 y（见 wiki Data types/Position）。
 /// `((x & 0x3FFFFFF) << 38) | ((z & 0x3FFFFFF) << 12) | (y & 0xFFF)`。
@@ -374,5 +380,8 @@ mod tests {
         assert_eq!(PLAYER_ACTION_CHANGE_DIRECTION, 1);
         assert_eq!(PLAYER_ACTION_CANCEL_DIG, 2);
         assert_eq!(PLAYER_ACTION_FINISH_DIG, 3);
+        // Q 扔物同包：DROP_ALL_ITEMS=4（Ctrl+Q 整组）、DROP_ITEM=5（Q 单个），见 P19。
+        assert_eq!(PLAYER_ACTION_DROP_ALL_ITEMS, 4);
+        assert_eq!(PLAYER_ACTION_DROP_ITEM, 5);
     }
 }

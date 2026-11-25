@@ -815,7 +815,13 @@ async fn apply_block_outcome(
 //   despawn/出视距发 Remove(0x4E)，进视距补发 Spawn。
 // - 拾取：delay 到期 + 与脚位置 <1.5 → TakeItem(0x7F)+Remove，入库，全量 Content 同步。
 // - 背包：Join 全量 Content；放置成功 consume_held + 单槽 Slot 同步；C2S 0x36 切手持。
-// - ClickContainer(0x12)/CreativeSlot(0x39) 只忽略（Hashed Slot 复杂，留后续）。
+// - Q 扔物（P19）：C2S PlayerAction(0x29) status 4/5（jar `Action` DROP_ALL/DROP_ITEM）
+//   从手持槽拿走整栈/1 个，脚下生成掉落实体，全量 Content 同步 + 刷盘，恒回 Ack；
+//   空手只回 Ack（无变化不断连）。背包打开时按 Q 走 C2S ContainerClick(0x12) THROW
+//  （`ContainerInput` id=4：button 0=1 个，1=整栈；光标非空时原版无操作）。
+// - ClickContainer(0x12) PICKUP/SWAP/QUICK_MOVE/THROW 服务端权威应用；
+//   CreativeSlot(0x39) 仍忽略（Slot 的 data component 需注册表驱动解码，
+//   误解析会错位整条流）。
 //
 // TODO(真机验证，见 HANDOFF §5.11)：本轮四处改动需原版 26.3 客户端真机确认：
 //   1) Spawn 带初速 → 掉落物弹跳/落地是否与原版一致；
@@ -1009,6 +1015,81 @@ async fn spawn_drops(
         }
     }
     Ok(())
+}
+
+/// 只回 Ack（无世界影响的操作：空手 Q/空手放/UseItem；对齐客户端序列预测）。
+async fn send_ack_only(stream: &mut TcpStream, threshold: i32, sequence: i32) -> io::Result<()> {
+    let mut ack = Vec::new();
+    mc_protocol::write_varint(sequence, &mut ack);
+    write_packet_any(stream, packets::PLAY_BLOCK_CHANGED_ACK_S2C_ID, &ack, threshold).await
+}
+
+/// Q 扔物生成（P19）：在玩家脚下生成掉落实体，复用挖掘掉落的 Spawn/Data 同步路径
+///（同物同 chunk 半径 1 格合并；`touched` 的其它实体只补发 Data，未知连接补 Spawn）。
+/// 原版依据：`ServerboundPlayerActionPacket$Action` DROP_ITEM=5（Q，扔 1 个）/
+/// DROP_ALL_ITEMS=4（Ctrl+Q，扔整栈），`ServerPlayer.drop` 从手持槽拿走；
+/// 背包打开时按 Q 走 ContainerClick THROW（`ContainerInput` id=4，button 0/1），
+/// 要求光标为空（`doClick` THROW 分支先查 carried，手持栈时无操作）。
+async fn spawn_thrown_items(
+    stream: &mut TcpStream,
+    opts: &PlayOptions,
+    drops: &DropState,
+    world: &MutableWorld,
+    feet: (f64, f64, f64),
+    item_id: i32,
+    count: i32,
+) -> io::Result<()> {
+    if count <= 0 {
+        return Ok(());
+    }
+    let id = drops.alloc_id();
+    let (bx, by, bz) = (feet.0.floor() as i32, feet.1.floor() as i32, feet.2.floor() as i32);
+    let rest = world.drop_rest_y(bx, bz, by) as f64;
+    let touched = {
+        let mut items = drops.items.lock().unwrap_or_else(|p| p.into_inner());
+        match items.spawn(id, item_id, count, feet.0, feet.1, feet.2, rest) {
+            Ok(t) => t,
+            Err(e) => {
+                debug!("throw spawn failed id={id} ({e})");
+                return Ok(());
+            }
+        }
+    };
+    for tid in touched {
+        if tid == id {
+            send_spawn(stream, opts, drops, tid).await?;
+        } else if drops.is_known(opts.conn_id, tid) {
+            send_data(stream, opts, drops, tid).await?;
+        } else {
+            send_spawn(stream, opts, drops, tid).await?;
+        }
+    }
+    Ok(())
+}
+
+/// Q 扔手持（P19）：DROP_ITEM=5 扔 1 个，DROP_ALL_ITEMS=4 扔整组；
+/// 空手/无世界只回 Ack（无变化不断连）。成功时脚下生成掉落实体 +
+/// 全量背包同步 + 刷盘，最后恒回 Ack 对齐客户端预测。
+async fn handle_throw_action(
+    stream: &mut TcpStream,
+    opts: &PlayOptions,
+    conn_user: &str,
+    mutable: Option<&MutableWorld>,
+    feet: (f64, f64, f64),
+    act: &packets::PlayerAction,
+) -> io::Result<()> {
+    let all = act.status == packets::PLAYER_ACTION_DROP_ALL_ITEMS;
+    let (drops, world) = match (opts.drops.as_ref(), mutable) {
+        (Some(d), Some(w)) => (d, w),
+        _ => return send_ack_only(stream, opts.threshold, act.sequence).await,
+    };
+    let thrown = drops.with_inventory(opts.conn_id, |inv| inv.throw_held(all)).flatten();
+    if let Some((item_id, count)) = thrown {
+        spawn_thrown_items(stream, opts, drops, world, feet, item_id, count).await?;
+        send_full_inventory(stream, opts, drops).await?;
+        drops.save_inventory(opts.conn_id, conn_user);
+    }
+    send_ack_only(stream, opts.threshold, act.sequence).await
 }
 
 /// 每 50ms 连接侧同步（**不是**物理 tick）：视距补/卸 + despawn 清理 + 拾取 + 入库同步。
@@ -1296,6 +1377,8 @@ async fn play_loop(
                 // （START(0) 只 ack，让客户端播放原版破坏进度动画；ABORT(2) 只 ack 不落子，
                 // 之前把 1/2 当取消/完成，松开鼠标即破坏；CHANGE(1) 直接忽略）。
                 // 成功掉落同步生成物品实体（Spawn+Data，含初速，客户端自行模拟弹跳）。
+                // Q 扔物（P19）：DROP_ITEM(5) 扔 1 个手持，DROP_ALL_ITEMS(4) 扔整组；
+                // 空手只回 Ack（无变化不断连）。
                 // 判定前强制 flush：保证 view.center() 已跟上玩家（出视距误回滚），
                 // 也保证区块包先于 BlockUpdate/Spawn 到达客户端。
                 if let Err(e) = maybe_flush_view(
@@ -1308,7 +1391,17 @@ async fn play_loop(
                 }
                 match packets::PlayerAction::decode_body(&payload) {
                     Ok((act, _)) => {
-                        if let Some(outcome) = decide_dig(
+                        if act.status == packets::PLAYER_ACTION_DROP_ITEM
+                            || act.status == packets::PLAYER_ACTION_DROP_ALL_ITEMS
+                        {
+                            if let Err(e) =
+                                handle_throw_action(stream, opts, &conn_user, mutable, last_pos, &act)
+                                    .await
+                            {
+                                debug!("play uuid={} throw failed ({e}), closing", profile.uuid);
+                                break;
+                            }
+                        } else if let Some(outcome) = decide_dig(
                             mutable,
                             eye_of(last_pos),
                             view.center(),
@@ -1450,17 +1543,40 @@ async fn play_loop(
             Ok((id, payload)) if id == packets::PLAY_CLICK_CONTAINER_C2S_ID => {
                 // P18.1 集装箱点击：服务端权威应用（拿起/放下/交换/Shift 搬运/数字键交换），
                 // 之后必发全量同步——客户端预测与服务端不一致时回滚，永远不分叉。
+                // P19：THROW（背包打开时按 Q）从点击槽扔（button 0=1 个，1=整栈；
+                // 光标非空时原版无操作，只全量同步回滚预测）。
                 match packets::decode_container_click(&payload) {
                     Ok((click, _)) => {
+                        let mut thrown = None;
                         if click.container_id != packets::PLAYER_INVENTORY_WINDOW_ID {
                             debug!(
                                 "play uuid={} click non-player window {} ignored",
                                 profile.uuid, click.container_id
                             );
                         } else if let Some(ds) = &opts.drops {
-                            ds.with_inventory(opts.conn_id, |inv| {
-                                inv.apply_click(click.slot, click.button, click.click_type)
-                            });
+                            if click.click_type == packets::CLICK_THROW {
+                                thrown = ds
+                                    .with_inventory(opts.conn_id, |inv| {
+                                        inv.throw_from_slot(click.slot, click.button)
+                                    })
+                                    .flatten();
+                            } else {
+                                ds.with_inventory(opts.conn_id, |inv| {
+                                    inv.apply_click(click.slot, click.button, click.click_type)
+                                });
+                            }
+                        }
+                        if let Some((item_id, count)) = thrown {
+                            if let (Some(ds), Some(world)) = (opts.drops.as_ref(), mutable) {
+                                if let Err(e) = spawn_thrown_items(
+                                    stream, opts, ds, world, last_pos, item_id, count,
+                                )
+                                .await
+                                {
+                                    debug!("play uuid={} throw spawn failed ({e}), closing", profile.uuid);
+                                    break;
+                                }
+                            }
                         }
                         if let Some(ds) = &opts.drops {
                             if let Err(e) = send_full_inventory(stream, opts, ds).await {

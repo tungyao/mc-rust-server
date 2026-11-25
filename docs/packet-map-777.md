@@ -94,7 +94,7 @@
 
 | 方向 | 包 | 777 ID | 线格式（本服实现） |
 |---|---|---|---|
-| C2S | Player Action（挖/取消/完成） | `0x29` | Status VarInt + Position + Face Byte + Sequence VarInt；26.3 jar ordinal：0=开始/1=换朝向（忽略）/2=取消(ABORT)/3=完成(STOP)/4+=丢弃等（无世界影响）。旧文档曾误写 1=取消/2=完成，导致松开鼠标即破坏（P18.2 修） |
+| C2S | Player Action（挖/取消/完成/扔） | `0x29` | Status VarInt + Position + Face Byte + Sequence VarInt；26.3 jar ordinal：0=开始/1=换朝向（忽略）/2=取消(ABORT)/3=完成(STOP)/**4=扔整组(DROP_ALL_ITEMS，P19)/5=扔1个(DROP_ITEM，P19，原版Q)**/6=释放/7=换手/8=穿刺（无世界影响）。旧文档曾误写 1=取消/2=完成，导致松开鼠标即破坏（P18.2 修） |
 | C2S | Use Item On（放置） | `0x42` | Hand VarInt + Position + Face VarInt + 3×Float + 2×Bool + Sequence VarInt |
 | C2S | Use Item（空手使用） | `0x43` | Hand VarInt + Sequence VarInt + Yaw/Pitch Float（只 ack） |
 | C2S | Punch（挥拳） | `0x2E` | 空包体，只忽略 |
@@ -125,7 +125,7 @@
 | S2C | Set Container Content（背包全量，window 0=46 槽） | `0x12` | VarInt window(0) + VarInt state + Prefixed Array Slot + Slot carried(空) |
 | S2C | Set Container Slot（背包单槽） | `0x14` | VarInt window(0) + VarInt state + Short slot + Slot |
 | C2S | Set Held Item（切手持） | `0x36` | Short BE 0..=8（越界/截断忽略不断线） |
-| C2S | Click Container / Set Creative Mode Slot | `0x12` / `0x39` | P18.1 起 `0x12` 解析头字段并服务端权威应用（PICKUP 拿起/放下/合并/交换、SHIFT 整搬、数字键交换；changed/carried 按 jar 线格式跳过不校验，点后必全量同步回滚分叉）；`0x39` 仍忽略 |
+| C2S | Click Container / Set Creative Mode Slot | `0x12` / `0x39` | P18.1 起 `0x12` 解析头字段并服务端权威应用（PICKUP 拿起/放下/合并/交换、SHIFT 整搬、数字键交换；**P19 起 THROW=4 背包开屏按 Q：button 0 扔 1 个、1 扔整栈，要求光标为空否则无操作**；changed/carried 按 jar 线格式跳过不校验，点后必全量同步回滚分叉）；`0x39` 仍忽略 |
 
 Slot 线格式（普通物品）：count VarInt（0=空，后无字段）；否则 item_id VarInt +
 add数 VarInt(0) + remove数 VarInt(0)。带 component 的解码报错（避免错位整条流）。

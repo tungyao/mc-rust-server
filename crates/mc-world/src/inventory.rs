@@ -304,6 +304,49 @@ impl PlayerInventory {
         }
     }
 
+    /// Q 扔手持（P19；原版 `ServerboundPlayerActionPacket$Action` DROP 语义）：
+    /// `all=false`（DROP_ITEM=5，Q）扔 1 个，`all=true`（DROP_ALL_ITEMS=4，Ctrl+Q）
+    /// 扔整栈；返回 (item_id, 扔出数量)。空手返回 None（调用方只 ack，不落子不断线）。
+    pub fn throw_held(&mut self, all: bool) -> Option<(i32, i32)> {
+        let idx = self.selected_slot_index();
+        let (id, c) = self.slots[idx]?;
+        if all || c <= 1 {
+            self.slots[idx] = None;
+            Some((id, c))
+        } else {
+            self.slots[idx] = Some((id, c - 1));
+            Some((id, 1))
+        }
+    }
+
+    /// 背包打开时按 Q（P19；原版 `AbstractContainerMenu.doClick` 的 THROW 分支）：
+    /// 要求光标为空（手持栈时原版无操作，返回 None）；button=0 扔 1 个，
+    /// button=1 扔整栈；其它 button/越界槽/空槽返回 None。
+    /// 返回 (item_id, 扔出数量)，调用方在脚下生成掉落实体。
+    pub fn throw_from_slot(&mut self, slot: i16, button: i8) -> Option<(i32, i32)> {
+        if self.cursor.is_some() {
+            return None;
+        }
+        let idx = self.play_slot(slot)?;
+        let (id, c) = self.slots[idx]?;
+        match button {
+            0 => {
+                if c <= 1 {
+                    self.slots[idx] = None;
+                    Some((id, 1))
+                } else {
+                    self.slots[idx] = Some((id, c - 1));
+                    Some((id, 1))
+                }
+            }
+            1 => {
+                self.slots[idx] = None;
+                Some((id, c))
+            }
+            _ => None,
+        }
+    }
+
     /// 全量同步槽（46 个 Slot，空位 count=0）。
     pub fn to_protocol_slots(&self) -> Vec<mc_protocol::packets::Slot> {
         self.slots
@@ -456,6 +499,54 @@ mod tests {
         assert_eq!(inv.consume_held(), Some((1, 0)));
         assert_eq!(inv.get(36), None);
         assert_eq!(inv.consume_held(), None);
+    }
+
+    #[test]
+    fn throw_held_single_all_and_empty() {
+        let mut inv = PlayerInventory::new();
+        inv.set_selected(0);
+        assert_eq!(inv.throw_held(false), None, "empty hand throws nothing");
+        assert_eq!(inv.throw_held(true), None);
+        inv.slots[36] = Some((1, 3));
+        // Q：扔 1 个，槽剩 2。
+        assert_eq!(inv.throw_held(false), Some((1, 1)));
+        assert_eq!(inv.get(36), Some((1, 2)));
+        // Ctrl+Q：整组扔完，槽变空。
+        assert_eq!(inv.throw_held(true), Some((1, 2)));
+        assert_eq!(inv.get(36), None);
+        // 单个整组扔：一次清空。
+        inv.slots[36] = Some((55, 1));
+        assert_eq!(inv.throw_held(true), Some((55, 1)));
+        assert_eq!(inv.get(36), None);
+        inv.slots[36] = Some((55, 1));
+        assert_eq!(inv.throw_held(false), Some((55, 1)));
+        assert_eq!(inv.get(36), None);
+    }
+
+    #[test]
+    fn throw_from_slot_button_cursor_and_bounds() {
+        let mut inv = PlayerInventory::new();
+        inv.slots[9] = Some((55, 10));
+        // button=0 扔 1 个。
+        assert_eq!(inv.throw_from_slot(9, 0), Some((55, 1)));
+        assert_eq!(inv.get(9), Some((55, 9)));
+        // button=1 扔整栈。
+        assert_eq!(inv.throw_from_slot(9, 1), Some((55, 9)));
+        assert_eq!(inv.get(9), None);
+        // 空槽/越界/非法 button 无操作。
+        assert_eq!(inv.throw_from_slot(9, 0), None);
+        assert_eq!(inv.throw_from_slot(0, 0), None, "crafting slots untouched");
+        assert_eq!(inv.throw_from_slot(46, 0), None);
+        assert_eq!(inv.throw_from_slot(-999, 0), None);
+        inv.slots[10] = Some((1, 5));
+        assert_eq!(inv.throw_from_slot(10, 2), None);
+        assert_eq!(inv.get(10), Some((1, 5)));
+        // 光标上有东西时按 Q：原版无操作（doClick THROW 要求 carried 为空）。
+        inv.cursor = Some((62, 3));
+        assert_eq!(inv.throw_from_slot(10, 0), None);
+        assert_eq!(inv.throw_from_slot(10, 1), None);
+        assert_eq!(inv.get(10), Some((1, 5)));
+        assert_eq!(inv.cursor(), Some((62, 3)));
     }
 
     #[test]

@@ -1586,3 +1586,319 @@ async fn drop_leaves_view_then_respawns_on_return() {
     drop(rx);
     let _ = std::fs::remove_dir_all(&dir);
 }
+
+/// P19 端到端：手持石头按 Q（DROP_ITEM=5）→ 背包扣 1 + 脚下生成对应掉落实体 +
+/// 全量同步；再按 Ctrl+Q（DROP_ALL_ITEMS=4）→ 整组扔完变空。
+/// 原版依据：26.3 jar `ServerboundPlayerActionPacket$Action` ordinal 4/5
+///（`ServerPlayer.drop` 从手持槽拿走整栈/1 个）。
+#[tokio::test]
+async fn throw_held_q_drops_one_then_all_with_sync() {
+    use mc_network::DropState;
+    let dir = std::env::temp_dir().join(format!("mc-p19-throw-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    let mutable = Arc::new(MutableWorld::new(DEFAULT_SEED));
+    let cache = Arc::new(ChunkCache::new(DEFAULT_SEED, 64).with_mutable(Arc::clone(&mutable)));
+    let drops = Arc::new(DropState::new(dir.clone(), DEFAULT_SEED));
+    let config = NetConfig::new(100, "throw".into(), Arc::new(AtomicUsize::new(0)))
+        .with_view_distance(2)
+        .with_chunk_cache(cache)
+        .with_mutable_world(Arc::clone(&mutable))
+        .with_drops(Arc::clone(&drops));
+    let addr = spawn_server(config).await;
+    let mut s = login_and_join(addr, "Thrower", 2).await;
+    let (id, _) = read_frame_timeout(&mut s, Duration::from_secs(5)).await.unwrap();
+    assert_eq!(id, packets::PLAY_SET_CONTAINER_CONTENT_S2C_ID);
+
+    let spawn = WorldGen::new(DEFAULT_SEED).spawn_pos();
+    let (fx, fy, fz) = (spawn.0 as f64 + 0.5, spawn.1 as f64, spawn.2 as f64 + 0.5);
+    send_pos_y(&mut s, fx, fy, fz).await;
+
+    // Q（DROP_ITEM=5，seq=71）：手持 64 石头 → 扔 1 个。
+    let mut body = Vec::new();
+    packets::PlayerAction { status: 5, x: spawn.0, y: spawn.1 - 1, z: spawn.2, face: 1, sequence: 71 }
+        .encode_body(&mut body);
+    mc_network::framing::write_packet(&mut s, packets::PLAY_PLAYER_ACTION_C2S_ID, &body)
+        .await
+        .unwrap();
+    // 扔完立刻走开 4 格（同 chunk，不触发视距批次），避免 10 ticks 后被拾取。
+    send_pos_y(&mut s, fx + 4.0, fy, fz).await;
+
+    let mut first_id = None;
+    let mut saw_content = false;
+    let mut saw_ack = false;
+    for _ in 0..16 {
+        let (id, payload) = read_frame_timeout(&mut s, Duration::from_secs(5)).await.unwrap();
+        match id {
+            packets::PLAY_SPAWN_ENTITY_S2C_ID => {
+                let sp = packets::SpawnItemEntity::decode_body(&payload).unwrap().0;
+                assert!(sp.entity_id >= 1000, "drop ids must not collide with the player");
+                assert!(
+                    (sp.x - fx).abs() < 1.5 && (sp.z - fz).abs() < 1.5,
+                    "drop must spawn at the feet, got ({},{},{})",
+                    sp.x, sp.y, sp.z
+                );
+                assert!((sp.y - fy).abs() < 2.0, "drop y must be near the feet, got {}", sp.y);
+                first_id = Some(sp.entity_id);
+            }
+            packets::PLAY_SET_ENTITY_DATA_S2C_ID => {
+                let (data, _) = packets::ItemEntityData::decode_body(&payload).unwrap();
+                assert_eq!(data.slot, packets::Slot { count: 1, item_id: 1 }, "Q must throw one stone");
+            }
+            packets::PLAY_SET_CONTAINER_CONTENT_S2C_ID => {
+                let (c, _) = packets::SetContainerContent::decode_body(&payload).unwrap();
+                assert_eq!(c.slots[36], packets::Slot { count: 63, item_id: 1 });
+                assert_eq!(c.carried, packets::Slot::empty());
+                saw_content = true;
+            }
+            packets::PLAY_BLOCK_CHANGED_ACK_S2C_ID => {
+                if read_varint(&payload).unwrap().0 == 71 {
+                    saw_ack = true;
+                }
+            }
+            other => panic!("unexpected packet {other:#04x} after Q throw"),
+        }
+        if first_id.is_some() && saw_content && saw_ack {
+            break;
+        }
+    }
+    let first_id = first_id.expect("Q must spawn a drop entity");
+    assert!(saw_content && saw_ack, "Q must sync inventory and ack the sequence");
+
+    // Ctrl+Q（DROP_ALL_ITEMS=4，seq=72）：剩余 63 个整组扔完，槽变空。
+    // 新掉落点距上一个 4 格（>1m 合并半径），不会合并成一包。
+    let mut body = Vec::new();
+    packets::PlayerAction { status: 4, x: spawn.0, y: spawn.1 - 1, z: spawn.2, face: 1, sequence: 72 }
+        .encode_body(&mut body);
+    mc_network::framing::write_packet(&mut s, packets::PLAY_PLAYER_ACTION_C2S_ID, &body)
+        .await
+        .unwrap();
+    send_pos_y(&mut s, fx + 8.0, fy, fz).await;
+
+    let mut second_id = None;
+    let mut saw_empty = false;
+    let mut saw_ack2 = false;
+    for _ in 0..16 {
+        let (id, payload) = read_frame_timeout(&mut s, Duration::from_secs(5)).await.unwrap();
+        match id {
+            packets::PLAY_SPAWN_ENTITY_S2C_ID => {
+                let sp = packets::SpawnItemEntity::decode_body(&payload).unwrap().0;
+                assert_ne!(sp.entity_id, first_id, "far-apart throws must not merge");
+                second_id = Some(sp.entity_id);
+            }
+            packets::PLAY_SET_ENTITY_DATA_S2C_ID => {
+                let (data, _) = packets::ItemEntityData::decode_body(&payload).unwrap();
+                assert_eq!(data.slot, packets::Slot { count: 63, item_id: 1 });
+            }
+            packets::PLAY_SET_CONTAINER_CONTENT_S2C_ID => {
+                let (c, _) = packets::SetContainerContent::decode_body(&payload).unwrap();
+                assert_eq!(c.slots[36], packets::Slot::empty(), "whole stack must be gone");
+                saw_empty = true;
+            }
+            packets::PLAY_BLOCK_CHANGED_ACK_S2C_ID => {
+                if read_varint(&payload).unwrap().0 == 72 {
+                    saw_ack2 = true;
+                }
+            }
+            other => panic!("unexpected packet {other:#04x} after Ctrl+Q throw"),
+        }
+        if second_id.is_some() && saw_empty && saw_ack2 {
+            break;
+        }
+    }
+    assert!(second_id.is_some() && saw_empty && saw_ack2, "Ctrl+Q must drop all + sync + ack");
+    drop(s);
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// P19 回归：空手按 Q → 只回 ack，无掉落、无同步、不断连。
+#[tokio::test]
+async fn empty_hand_q_only_acks() {
+    use mc_network::DropState;
+    let dir = std::env::temp_dir().join(format!("mc-p19-emptythrow-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    let mutable = Arc::new(MutableWorld::new(DEFAULT_SEED));
+    let cache = Arc::new(ChunkCache::new(DEFAULT_SEED, 64).with_mutable(Arc::clone(&mutable)));
+    let drops = Arc::new(DropState::new(dir.clone(), DEFAULT_SEED));
+    let config = NetConfig::new(100, "emptythrow".into(), Arc::new(AtomicUsize::new(0)))
+        .with_view_distance(2)
+        .with_chunk_cache(cache)
+        .with_mutable_world(Arc::clone(&mutable))
+        .with_drops(Arc::clone(&drops));
+    let addr = spawn_server(config).await;
+    let mut s = login_and_join(addr, "EmptyThrow", 2).await;
+    let (id, _) = read_frame_timeout(&mut s, Duration::from_secs(5)).await.unwrap();
+    assert_eq!(id, packets::PLAY_SET_CONTAINER_CONTENT_S2C_ID);
+
+    let spawn = WorldGen::new(DEFAULT_SEED).spawn_pos();
+    let (fx, fy, fz) = (spawn.0 as f64 + 0.5, spawn.1 as f64, spawn.2 as f64 + 0.5);
+    send_pos_y(&mut s, fx, fy, fz).await;
+    // 切到空槽（selected=1 → 槽 37 空）即空手。
+    let body = [0u8, 1u8];
+    mc_network::framing::write_packet(&mut s, packets::PLAY_SET_HELD_ITEM_C2S_ID, &body)
+        .await
+        .unwrap();
+
+    // 空手 Q（DROP_ITEM=5，seq=77）：只允许 ack；绝不能出现掉落/同步包。
+    let mut body = Vec::new();
+    packets::PlayerAction { status: 5, x: spawn.0, y: spawn.1 - 1, z: spawn.2, face: 1, sequence: 77 }
+        .encode_body(&mut body);
+    mc_network::framing::write_packet(&mut s, packets::PLAY_PLAYER_ACTION_C2S_ID, &body)
+        .await
+        .unwrap();
+    let mut saw_ack = false;
+    for _ in 0..40 {
+        let (id, payload) = read_frame_timeout(&mut s, Duration::from_secs(5)).await.unwrap();
+        assert_ne!(id, packets::PLAY_SPAWN_ENTITY_S2C_ID, "empty hand must not spawn");
+        assert_ne!(id, packets::PLAY_SET_ENTITY_DATA_S2C_ID, "empty hand must not sync data");
+        assert_ne!(id, packets::PLAY_SET_CONTAINER_CONTENT_S2C_ID, "empty hand must not sync");
+        assert_ne!(id, packets::PLAY_SET_CONTAINER_SLOT_S2C_ID, "empty hand must not sync");
+        assert_ne!(id, packets::PLAY_REMOVE_ENTITIES_S2C_ID, "empty hand must not remove");
+        if id == packets::PLAY_BLOCK_CHANGED_ACK_S2C_ID {
+            if read_varint(&payload).unwrap().0 == 77 {
+                saw_ack = true;
+                break;
+            }
+        }
+    }
+    assert!(saw_ack, "empty-hand Q must still be acked");
+    assert!(drops.items.lock().unwrap().is_empty(), "no drop entity may exist");
+    // 连接仍活着：移动包后 300ms 内无 EOF（只超时，不断连）。
+    send_pos_y(&mut s, fx, fy, fz).await;
+    assert!(
+        read_frame_timeout(&mut s, Duration::from_millis(300)).await.is_err(),
+        "connection must stay open after empty-hand Q"
+    );
+    drop(s);
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// P19 端到端（背包打开时按 Q）：ContainerClick THROW（mode=4）从点击槽扔
+///（button 0=1 个，1=整栈）；光标上有东西时按原版无操作（只全量同步回滚预测）。
+/// 原版依据：26.3 jar `ContainerInput::THROW` + `AbstractContainerMenu.doClick`
+///（THROW 要求 carried 为空；button=0 取 1 个，button=1 取整栈）。
+#[tokio::test]
+async fn container_throw_single_all_and_cursor_noop() {
+    use mc_network::DropState;
+    fn click_frame(container: i32, state: i32, slot: i16, button: u8, ty: u8) -> Vec<u8> {
+        let mut b = Vec::new();
+        mc_protocol::write_varint(container, &mut b);
+        mc_protocol::write_varint(state, &mut b);
+        b.extend_from_slice(&slot.to_be_bytes());
+        b.push(button);
+        mc_protocol::write_varint(ty as i32, &mut b);
+        mc_protocol::write_varint(0, &mut b);
+        b.push(0);
+        b
+    }
+    let dir = std::env::temp_dir().join(format!("mc-p19-clickthrow-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    let mutable = Arc::new(MutableWorld::new(DEFAULT_SEED));
+    let cache = Arc::new(ChunkCache::new(DEFAULT_SEED, 64).with_mutable(Arc::clone(&mutable)));
+    let drops = Arc::new(DropState::new(dir.clone(), DEFAULT_SEED));
+    let config = NetConfig::new(100, "clickthrow".into(), Arc::new(AtomicUsize::new(0)))
+        .with_view_distance(2)
+        .with_chunk_cache(cache)
+        .with_mutable_world(Arc::clone(&mutable))
+        .with_drops(Arc::clone(&drops));
+    let addr = spawn_server(config).await;
+    let mut s = login_and_join(addr, "ClickThrow", 2).await;
+    let (id, _) = read_frame_timeout(&mut s, Duration::from_secs(5)).await.unwrap();
+    assert_eq!(id, packets::PLAY_SET_CONTAINER_CONTENT_S2C_ID);
+
+    let spawn = WorldGen::new(DEFAULT_SEED).spawn_pos();
+    let (fx, fy, fz) = (spawn.0 as f64 + 0.5, spawn.1 as f64, spawn.2 as f64 + 0.5);
+    send_pos_y(&mut s, fx, fy, fz).await;
+
+    // 准备：左键拿起 36 号槽石头（64）→ 光标 64 石头，槽空。
+    let frame = click_frame(0, 1, 36, 0, 0);
+    mc_network::framing::write_packet(&mut s, packets::PLAY_CLICK_CONTAINER_C2S_ID, &frame)
+        .await
+        .unwrap();
+    let (id, payload) = read_frame_timeout(&mut s, Duration::from_secs(5)).await.unwrap();
+    assert_eq!(id, packets::PLAY_SET_CONTAINER_CONTENT_S2C_ID);
+    let (c, _) = packets::SetContainerContent::decode_body(&payload).unwrap();
+    assert_eq!(c.slots[36], packets::Slot::empty());
+    assert_eq!(c.carried, packets::Slot { count: 64, item_id: 1 });
+
+    // 光标上有东西时按 Q（THROW 槽 9 button 0）：原版无操作——
+    // 槽 9 不动、光标 64 石头不动、不生成掉落，只全量同步。
+    let frame = click_frame(0, 2, 9, 0, 4);
+    mc_network::framing::write_packet(&mut s, packets::PLAY_CLICK_CONTAINER_C2S_ID, &frame)
+        .await
+        .unwrap();
+    let (id, payload) = read_frame_timeout(&mut s, Duration::from_secs(5)).await.unwrap();
+    assert_eq!(id, packets::PLAY_SET_CONTAINER_CONTENT_S2C_ID);
+    let (c, _) = packets::SetContainerContent::decode_body(&payload).unwrap();
+    assert_eq!(c.slots[9], packets::Slot::empty());
+    assert_eq!(c.carried, packets::Slot { count: 64, item_id: 1 }, "cursor must survive THROW");
+    assert!(drops.items.lock().unwrap().is_empty(), "cursor THROW must not spawn");
+
+    // 放下光标：左键点 37（空）→ 槽 37 = 64 石头，光标空。
+    let frame = click_frame(0, 3, 37, 0, 0);
+    mc_network::framing::write_packet(&mut s, packets::PLAY_CLICK_CONTAINER_C2S_ID, &frame)
+        .await
+        .unwrap();
+    let (id, payload) = read_frame_timeout(&mut s, Duration::from_secs(5)).await.unwrap();
+    assert_eq!(id, packets::PLAY_SET_CONTAINER_CONTENT_S2C_ID);
+    let (c, _) = packets::SetContainerContent::decode_body(&payload).unwrap();
+    assert_eq!(c.slots[37], packets::Slot { count: 64, item_id: 1 });
+    assert_eq!(c.carried, packets::Slot::empty());
+
+    // THROW button 0（扔 1 个）：Spawn(1 石头) + Content(37=63)。
+    let frame = click_frame(0, 4, 37, 0, 4);
+    mc_network::framing::write_packet(&mut s, packets::PLAY_CLICK_CONTAINER_C2S_ID, &frame)
+        .await
+        .unwrap();
+    send_pos_y(&mut s, fx + 4.0, fy, fz).await;
+    let mut saw_spawn1 = false;
+    for _ in 0..16 {
+        let (id, payload) = read_frame_timeout(&mut s, Duration::from_secs(5)).await.unwrap();
+        match id {
+            packets::PLAY_SPAWN_ENTITY_S2C_ID => {
+                assert!(packets::SpawnItemEntity::decode_body(&payload).unwrap().0.entity_id >= 1000);
+                saw_spawn1 = true;
+            }
+            packets::PLAY_SET_ENTITY_DATA_S2C_ID => {
+                let (data, _) = packets::ItemEntityData::decode_body(&payload).unwrap();
+                assert_eq!(data.slot, packets::Slot { count: 1, item_id: 1 });
+            }
+            packets::PLAY_SET_CONTAINER_CONTENT_S2C_ID => {
+                let (c, _) = packets::SetContainerContent::decode_body(&payload).unwrap();
+                assert_eq!(c.slots[37], packets::Slot { count: 63, item_id: 1 });
+                assert_eq!(c.carried, packets::Slot::empty());
+                break;
+            }
+            other => panic!("unexpected packet {other:#04x} after THROW button=0"),
+        }
+    }
+    assert!(saw_spawn1, "THROW button=0 must spawn one item");
+
+    // THROW button 1（扔整栈 63）：Spawn(63 石头) + Content(37 空)。
+    let frame = click_frame(0, 5, 37, 1, 4);
+    mc_network::framing::write_packet(&mut s, packets::PLAY_CLICK_CONTAINER_C2S_ID, &frame)
+        .await
+        .unwrap();
+    send_pos_y(&mut s, fx + 8.0, fy, fz).await;
+    let mut saw_spawn2 = false;
+    for _ in 0..16 {
+        let (id, payload) = read_frame_timeout(&mut s, Duration::from_secs(5)).await.unwrap();
+        match id {
+            packets::PLAY_SPAWN_ENTITY_S2C_ID => {
+                saw_spawn2 = true;
+            }
+            packets::PLAY_SET_ENTITY_DATA_S2C_ID => {
+                let (data, _) = packets::ItemEntityData::decode_body(&payload).unwrap();
+                assert_eq!(data.slot, packets::Slot { count: 63, item_id: 1 });
+            }
+            packets::PLAY_SET_CONTAINER_CONTENT_S2C_ID => {
+                let (c, _) = packets::SetContainerContent::decode_body(&payload).unwrap();
+                assert_eq!(c.slots[37], packets::Slot::empty(), "whole stack must be gone");
+                break;
+            }
+            other => panic!("unexpected packet {other:#04x} after THROW button=1"),
+        }
+    }
+    assert!(saw_spawn2, "THROW button=1 must spawn the whole stack");
+    drop(s);
+    let _ = std::fs::remove_dir_all(&dir);
+}

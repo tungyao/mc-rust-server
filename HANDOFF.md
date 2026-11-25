@@ -1,5 +1,13 @@
 # 交接文档：Rust 自研 MC 服务器（只兼容 Java 26.3 / protocol 777 / data 5023）
 
+> P19（本轮，未合入 main）：**Q 键扔东西**。C2S PlayerAction 0x29 status 4/5
+>（jar `ServerboundPlayerActionPacket$Action` ordinal：DROP_ALL_ITEMS=4 整组、DROP_ITEM=5 单个，
+>`ServerPlayer.drop(boolean)` 经 `Inventory.removeFromSelected` 从手持槽拿走）；
+>背包开屏按 Q 走 C2S ContainerClick 0x12 THROW（`ContainerInput` id=4，button 0=1 个/1=整栈，
+>原版 `doClick` 要求 carried 为空，光标非空无操作）。手持槽减 1（整组扔完变空），
+>脚下生成 ItemEntity（复用 dig 的 Spawn/Data 路径），全量 Content 同步 + 刷盘，恒回 Ack；
+>空手只回 Ack。分支 `p19-throw`（worktree），未 push/未合入。
+>
 > 日期：2026-11-24；分支 `main`；本轮 P18（基线 `7a0dca7`；P17 代码 `c5c57af`/`db8f666`/`1fc0a45`/`4de7bbe`、文档 `3744455`/`7a0dca7`）
 > 目标：**掉落看得见、捡得起来、进背包看得见**（生存第一棒；窗口整理/工具等级/精准采集/经验球留后续）。
 
@@ -498,6 +506,15 @@ $natives = 'C:\Users\qwe\AppData\Local\Temp\mc263natives'
       `resume_fall` 的 support x/z 保持原列；`play_stream.rs` e2e 证明掉落物出视距收到 Remove、
       回返后收到**同 entity_id 的 Spawn**（不是只发位置包）。三处均注明 T1–T13 仍需人工确认。
     - 真机不可测期间未改发包行为；上述断言全部是服务端状态级/包流级验证。
+16. **P19 Q 扔物（本轮，已实现，未真机）**：`play_block.rs` 新增
+    `PLAYER_ACTION_DROP_ALL_ITEMS=4`/`DROP_ITEM=5`（与 jar ordinal 一致，单测断言）；
+    `play_entity.rs` 新增 `CLICK_THROW=4`；`inventory.rs` 新增 `throw_held`/`throw_from_slot`
+   （含单测：单扔/整扔/清空、button 语义、光标非空无操作、越界拒绝）；
+    `login_route.rs` 新增 `spawn_thrown_items`/`handle_throw_action` + 两处接线
+    （PlayerAction 4/5 恒回 Ack；ContainerClick THROW 全量同步 + 刷盘）。
+    `play_stream.rs` 新增 3 个 e2e（单扔→整扔、空手只 ack、容器 THROW 含光标无操作）。
+    遗留 TODO：原版真机复验（Q/背包 Q 手感、扔出物抛物线/落地/拾取、空手 Q 不断连）；
+    创造模式/副手/死亡掉落未做；扔出方向未按视角偏置（落在脚下）。
 
 ## 6. 关键文件
 
@@ -508,25 +525,25 @@ crates/mc-protocol/src/packets/
   data/vanilla_config_777/   抓包二进制（33 个文件，约 216KB）
   block_tags_777.rs          300 个 block tag / 14825 项的回归数据
   play_chunk.rs              SetCenter/ChunkData/GameEvent/Batch/Unload（0x26 packed i64）
-  play_block.rs              挖掘/放置 C2S（0x29/0x42/0x43/0x2E）+ BlockUpdate 0x08/Ack 0x04 + Position pack/unpack + P18 ClickContainer 0x12 常量
-  play_entity.rs             P18 掉落/背包包：Spawn 0x01/SetData 0x65/Remove 0x4E/Teleport 0x23/PosDelta 0x36/TakeItem 0x7F/Content 0x12/SlotPkt 0x14 + Slot/LpVec3/元数据编解码 + C2S SetHeld Short 解析
+  play_block.rs              挖掘/放置 C2S（0x29/0x42/0x43/0x2E）+ BlockUpdate 0x08/Ack 0x04 + Position pack/unpack + P18 ClickContainer 0x12 常量 + P19 DROP_ALL/ITEM=4/5
+  play_entity.rs             P18 掉落/背包包：Spawn 0x01/SetData 0x65/Remove 0x4E/Teleport 0x23/PosDelta 0x36/TakeItem 0x7F/Content 0x12/SlotPkt 0x14 + Slot/LpVec3/元数据编解码 + C2S SetHeld Short 解析 + P19 CLICK_THROW=4
   play_login.rs              LoginPlay 777 布局 + 抓包往返测试
   play_sync.rs               PlayerPositionSync/KeepAlive/C2S 移动包
   data/*_777.bin             LoginPlay / PositionSync / UpdateTags 抓包
 crates/mc-network/src/
-  login_route.rs             PlayOptions（+mutable_world/+drops）、发送序列、`(2r+1)^2` 块、KeepAlive/动态区块/移动/Disconnect 事件、P17 decide_dig/decide_place（+P18 drops 带出）+ BlockUpdate/Ack 即时回包 + P18 掉落生成/50ms tick/拾取/背包同步接线
+  login_route.rs             PlayOptions（+mutable_world/+drops）、发送序列、`(2r+1)^2` 块、KeepAlive/动态区块/移动/Disconnect 事件、P17 decide_dig/decide_place（+P18 drops 带出）+ BlockUpdate/Ack 即时回包 + P18 掉落生成/50ms tick/拾取/背包同步接线 + P19 Q 扔（PlayerAction 4/5 + ContainerClick THROW）
   drop_state.rs              P18 DropState：ItemEntities + conn_id→背包 + entity_id 自增 + known 视距集 + 用户名键存档
   chunk_view.rs              clamp_view_radius/view_chunk_count、per-connection 视距集合/去重/跨区块 add/remove 规划
   chunk_cache.rs             共享已编码 ChunkData 0x2E 包体缓存（Mutex+HashMap+FIFO，默认 1024；`bodies` rayon 并行批量；P17 `with_mutable` + `invalidate`）
   play_events.rs             net 线程 → ECS 的移动/KeepAlive/Disconnect/BlockEdit 事件（conn_id 实体键）
   config.rs                  NetConfig（视距/压缩阈值/seed/Play 事件通道/ChunkCache/MutableWorld/DropState）
   framing.rs                 VarInt 帧 + zlib 压缩帧 + 阈值边界
-crates/mc-network/tests/play_stream.rs   移动事件/压缩配置/seed 透传/视距 2/4 初始块与跨区块批次/P17 挖放端到端/P18 挖→掉落→拾取→背包→放置扣减→存档端到端集成测试
+crates/mc-network/tests/play_stream.rs   移动事件/压缩配置/seed 透传/视距 2/4 初始块与跨区块批次/P17 挖放端到端/P18 挖→掉落→拾取→背包→放置扣减→存档端到端/P19 Q 扔（单扔/整扔/空手 ack/容器 THROW）集成测试
 crates/mc-world/src/
   mutable.rs                 MutableWorld（基底 + 稀疏 override + dirty）+ 自有稀疏存档读/写 + 出生点抬升 + P18 support_top_y
   drops.rs                   P18 确定性掉落表 + item ID 常量 + 手持→方块映射
   items.rs                   P18 物品实体纯逻辑（生成/合并/重力/拾取/despawn/视距过滤）
-  inventory.rs               P18 背包（46 槽/手持/合并/扣减）+ `player-<user>-<seed>.dat` 存档
+  inventory.rs               P18 背包（46 槽/手持/合并/扣减）+ `player-<user>-<seed>.dat` 存档 + P19 throw_held/throw_from_slot
   worldgen/
     mod.rs                   WorldGen、高度/出生保护/biome/洞穴/矿/树、跨 chunk 扫描
     noise.rs                 2D/3D 平滑 value noise + 确定性 hash
