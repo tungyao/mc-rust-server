@@ -67,6 +67,12 @@ pub struct DropState {
     saplings: Mutex<HashMap<(i32, i32, i32), u64>>,
     /// P26 树苗生长 tick 数（生产 `SAPLING_GROW_TICKS` = 7200 ≈ 6min；测试调小）。
     sapling_ticks: AtomicU64,
+    /// P27 失支撑树叶：pos → 登记时的全局 tick；到期且半径内无原木即 decay。
+    /// 登记只由原木被挖触发（`schedule_leaf_decay_around`），自然树天然有支撑，
+    /// 无需全世界扫描（见 HANDOFF §5）。
+    pending_leaves: Mutex<HashMap<(i32, i32, i32), u64>>,
+    /// P27 树叶 decay 延迟 tick 数（生产 `LEAF_DECAY_TICKS` = 100 ≈ 5s；测试调小）。
+    leaf_decay_ticks: AtomicU64,
     /// P22 生长广播用 hub（`serve` 在 world+drops+hub 齐备时注入；None 则生长只落子不广播）。
     hub: Mutex<Option<Arc<BroadcastHub>>>,
     /// P22 生长缓存失效用（同上；None 则跳过失效，下次编辑时自然重编）。
@@ -92,6 +98,8 @@ impl DropState {
             stage_ticks: AtomicU64::new(mc_world::WHEAT_TICKS_PER_STAGE),
             saplings: Mutex::new(HashMap::new()),
             sapling_ticks: AtomicU64::new(mc_world::SAPLING_GROW_TICKS),
+            pending_leaves: Mutex::new(HashMap::new()),
+            leaf_decay_ticks: AtomicU64::new(mc_world::LEAF_DECAY_TICKS),
             hub: Mutex::new(None),
             cache: Mutex::new(None),
             tick_started: AtomicBool::new(false),
@@ -213,20 +221,30 @@ impl DropState {
         self.tick_crops(world);
         // P26 树苗生长：同一 ticker 内推进，连接侧绝不碰（P18.1 R1 不重犯）。
         self.tick_saplings(world);
+        // P27 树叶 decay：同一 ticker 内推进，连接侧绝不碰。
+        self.tick_leaves(world);
     }
 
-    /// P22：按 `(now - planted) / WHEAT_TICKS_PER_STAGE` 算应处 age，到阶段即
+    /// P22：按 `(now - planted) / interval` 算应处 age，到阶段即
     /// `world.set` + 缓存失效 + hub 广播 BlockUpdate（`u64::MAX` 占位 except，
     /// 全体视距内连接都收，含种植者本人）；方块已不是预期旧阶段（被挖/被改）
     /// 则静默摘除，不广播。
+    /// P27：interval 按脚下土壤动态取——仍是耕地才减半（`stage_ticks / 2`），
+    /// 否则普通速度（耕地被挖/被换后自动回落，无需 retime；只前进不回退）。
     fn tick_crops(&self, world: &MutableWorld) {
         let now = self.tick_count.load(Ordering::Relaxed);
-        let interval = self.stage_ticks.load(Ordering::Relaxed).max(1);
+        let base = self.stage_ticks.load(Ordering::Relaxed).max(1);
         let due: Vec<((i32, i32, i32), u8, u8)> = {
             let crops = self.crops.lock().unwrap_or_else(|p| p.into_inner());
             crops
                 .iter()
                 .map(|(pos, e)| {
+                    let soil = world.get(pos.0, pos.1 - 1, pos.2);
+                    let interval = if soil == mc_world::FARMLAND_BLOCK_ID {
+                        (base / 2).max(1)
+                    } else {
+                        base
+                    };
                     let want = ((now.saturating_sub(e.planted_tick)) / interval)
                         .min(mc_world::WHEAT_MAX_AGE as u64) as u8;
                     (*pos, e.stage, want)
@@ -278,6 +296,27 @@ impl DropState {
             (x, y, z),
             CropEntry { planted_tick: self.tick_count.load(Ordering::Relaxed), stage: 0 },
         );
+    }
+
+    /// P27：某作物的当前跟踪阶段（骨粉同步/e2e 断言用；未跟踪返回 None）。
+    pub fn crop_stage(&self, x: i32, y: i32, z: i32) -> Option<u8> {
+        self.crops.lock().unwrap_or_else(|p| p.into_inner()).get(&(x, y, z)).map(|e| e.stage)
+    }
+
+    /// P27：骨粉推进后同步跟踪（方块已由 `decide_bonemeal` 落子）：
+    /// 已跟踪 → stage 更新为催熟后值（ticker 后续从此继续，不跳变）；
+    /// 未跟踪（重启后未认领等边缘）→ 按现状补登记，避免此后生长停滞。
+    pub fn apply_bonemeal_crop(&self, x: i32, y: i32, z: i32, new_stage: u8) {
+        let mut crops = self.crops.lock().unwrap_or_else(|p| p.into_inner());
+        match crops.get_mut(&(x, y, z)) {
+            Some(e) => e.stage = new_stage,
+            None => {
+                crops.insert(
+                    (x, y, z),
+                    CropEntry { planted_tick: self.tick_count.load(Ordering::Relaxed), stage: new_stage },
+                );
+            }
+        }
     }
 
     /// P22：挖掉/移除时摘除跟踪（挖掘路径调用；ticker 内的懒摘除是兜底）。
@@ -366,12 +405,63 @@ impl DropState {
         }
     }
 
+    /// P27：立即长树（骨粉催熟用；ticker 到期长树复用同一函数）：
+    /// - 树苗格已不是树苗（被挖/被改）→ 摘除跟踪，返回 false；
+    /// - 土壤（y-1）不是草/泥土/耕地 → 摘除跟踪，返回 false；
+    /// - 否则按 `mc_world::sapling_oak_blocks` 落子（树苗格恒变原木，其余只在空气时放，
+    ///   被占跳过不覆盖玩家建筑），受影响 chunk 失效，多格变更逐格 hub 广播，
+    ///   摘除跟踪，返回 true。
+    pub fn grow_sapling_now(&self, world: &MutableWorld, x: i32, y: i32, z: i32) -> bool {
+        if world.get(x, y, z) != mc_world::OAK_SAPLING_BLOCK_ID {
+            self.saplings.lock().unwrap_or_else(|p| p.into_inner()).remove(&(x, y, z));
+            return false;
+        }
+        let soil = world.get(x, y - 1, z);
+        if !mc_world::is_crop_soil(soil) {
+            self.saplings.lock().unwrap_or_else(|p| p.into_inner()).remove(&(x, y, z));
+            return false;
+        }
+        let hub = self.hub.lock().unwrap_or_else(|p| p.into_inner()).clone();
+        let cache = self.cache.lock().unwrap_or_else(|p| p.into_inner()).clone();
+        let mut placed: Vec<((i32, i32, i32), u16)> = Vec::new();
+        for (pos, id) in mc_world::sapling_oak_blocks(x, y, z) {
+            if pos == (x, y, z) {
+                world.set(pos.0, pos.1, pos.2, id);
+                placed.push((pos, id));
+            } else if world.get(pos.0, pos.1, pos.2) == mc_world::AIR_BLOCK_ID {
+                world.set(pos.0, pos.1, pos.2, id);
+                placed.push((pos, id));
+            }
+        }
+        if let Some(cache) = &cache {
+            use std::collections::HashSet;
+            let mut chunks: HashSet<mc_core::ChunkPos> = HashSet::new();
+            for ((bx, _, bz), _) in &placed {
+                chunks.insert(mc_world::chunk_of_block(*bx, *bz));
+            }
+            for c in chunks {
+                cache.invalidate(c);
+            }
+        }
+        if let Some(hub) = &hub {
+            for ((bx, by, bz), id) in &placed {
+                let mut body = Vec::new();
+                mc_protocol::packets::BlockUpdate { x: *bx, y: *by, z: *bz, block_id: *id as i32 }
+                    .encode_body(&mut body);
+                hub.broadcast(
+                    u64::MAX,
+                    mc_world::chunk_of_block(*bx, *bz),
+                    mc_protocol::packets::PLAY_BLOCK_UPDATE_S2C_ID,
+                    &body,
+                );
+            }
+        }
+        self.saplings.lock().unwrap_or_else(|p| p.into_inner()).remove(&(x, y, z));
+        true
+    }
+
     /// P26：树苗到期长成小橡树（全服唯一 ticker 内，连接侧绝不调用）。
-    /// - 到期条件：`now - planted >= sapling_ticks`；
-    /// - 树苗格已不是树苗（被挖/被改）→ 静默摘除；土壤（y-1）不是草/泥土 → 取消生长摘除；
-    /// - 树形经 `mc_world::sapling_oak_blocks` 计算（trunk 在前、leaves 在后）：
-    ///   树苗格本身恒替换为原木，其余格只在空气时放（被占跳过，不覆盖玩家建筑）；
-    /// - 每格经 `MutableWorld::set` 落子，受影响 chunk 失效，多格变更逐格 hub 广播。
+    /// 到期条件：`now - planted >= sapling_ticks`；落子走 [`Self::grow_sapling_now`]。
     fn tick_saplings(&self, world: &MutableWorld) {
         let now = self.tick_count.load(Ordering::Relaxed);
         let interval = self.sapling_ticks.load(Ordering::Relaxed).max(1);
@@ -386,52 +476,113 @@ impl DropState {
         if due.is_empty() {
             return;
         }
+        for (x, y, z) in due {
+            self.grow_sapling_now(world, x, y, z);
+        }
+    }
+
+    /// P27 测试钩子：覆盖树叶 decay 延迟（生产 `LEAF_DECAY_TICKS` = 100 ≈ 5s）。
+    pub fn set_leaf_decay_ticks(&self, n: u64) {
+        self.leaf_decay_ticks.store(n.max(1), Ordering::Relaxed);
+    }
+
+    /// P27：decay 观察中的树叶数（e2e/诊断用）。
+    pub fn leaf_pending_count(&self) -> usize {
+        self.pending_leaves.lock().unwrap_or_else(|p| p.into_inner()).len()
+    }
+
+    /// P27：原木被挖后，把周围 [`mc_world::LEAF_DECAY_RADIUS`] 内树叶纳入 decay 观察
+    ///（挖掘路径调用；`or_insert` 保留最早登记时刻，多次挖同一片不续命）。
+    pub fn schedule_leaf_decay_around(&self, world: &MutableWorld, x: i32, y: i32, z: i32) {
+        let now = self.tick_count.load(Ordering::Relaxed);
+        let r = mc_world::LEAF_DECAY_RADIUS;
+        let mut pending = self.pending_leaves.lock().unwrap_or_else(|p| p.into_inner());
+        for dx in -r..=r {
+            for dy in -r..=r {
+                for dz in -r..=r {
+                    let p = (x + dx, y + dy, z + dz);
+                    if world.get(p.0, p.1, p.2) == mc_world::OAK_LEAVES_BLOCK_ID {
+                        pending.entry(p).or_insert(now);
+                    }
+                }
+            }
+        }
+    }
+
+    /// P27：半径内是否有橡木原木（有即有支撑，不 decay；简化判定，见 HANDOFF §5）。
+    fn has_log_nearby(world: &MutableWorld, x: i32, y: i32, z: i32) -> bool {
+        let r = mc_world::LEAF_DECAY_RADIUS;
+        for dx in -r..=r {
+            for dy in -r..=r {
+                for dz in -r..=r {
+                    if world.get(x + dx, y + dy, z + dz) == mc_world::OAK_LOG_BLOCK_ID {
+                        return true;
+                    }
+                }
+            }
+        }
+        false
+    }
+
+    /// P27：失支撑树叶随全局 ticker 消失（连接侧绝不调用）：
+    /// - 已不是树叶（被挖/被改）→ 摘除观察；半径内有原木 → 有支撑，摘除观察；
+    /// - 否则登记满 `leaf_decay_ticks` 后：设空气 + decay 掉落生成实体
+    ///  （`leaf_decay_drops`：树苗/木棍口径 + 1/200 苹果）+ 缓存失效 + hub 广播。
+    ///   掉落实体靠各连接 `tick_drops` 的视距补发自动同步（ticker 内无 socket，不直接发包）。
+    fn tick_leaves(&self, world: &MutableWorld) {
+        let now = self.tick_count.load(Ordering::Relaxed);
+        let delay = self.leaf_decay_ticks.load(Ordering::Relaxed).max(1);
+        let due: Vec<(i32, i32, i32)> = {
+            let pending = self.pending_leaves.lock().unwrap_or_else(|p| p.into_inner());
+            pending
+                .iter()
+                .filter(|(_, since)| now.saturating_sub(**since) >= delay)
+                .map(|(pos, _)| *pos)
+                .collect()
+        };
+        if due.is_empty() {
+            return;
+        }
         let hub = self.hub.lock().unwrap_or_else(|p| p.into_inner()).clone();
         let cache = self.cache.lock().unwrap_or_else(|p| p.into_inner()).clone();
         for (x, y, z) in due {
-            if world.get(x, y, z) != mc_world::OAK_SAPLING_BLOCK_ID {
-                self.saplings.lock().unwrap_or_else(|p| p.into_inner()).remove(&(x, y, z));
+            if world.get(x, y, z) != mc_world::OAK_LEAVES_BLOCK_ID {
+                self.pending_leaves.lock().unwrap_or_else(|p| p.into_inner()).remove(&(x, y, z));
                 continue;
             }
-            let soil = world.get(x, y - 1, z);
-            if soil != mc_world::GRASS_BLOCK_ID && soil != mc_world::DIRT_BLOCK_ID {
-                self.saplings.lock().unwrap_or_else(|p| p.into_inner()).remove(&(x, y, z));
+            if Self::has_log_nearby(world, x, y, z) {
+                self.pending_leaves.lock().unwrap_or_else(|p| p.into_inner()).remove(&(x, y, z));
                 continue;
             }
-            let mut placed: Vec<((i32, i32, i32), u16)> = Vec::new();
-            for (pos, id) in mc_world::sapling_oak_blocks(x, y, z) {
-                if pos == (x, y, z) {
-                    world.set(pos.0, pos.1, pos.2, id);
-                    placed.push((pos, id));
-                } else if world.get(pos.0, pos.1, pos.2) == mc_world::AIR_BLOCK_ID {
-                    world.set(pos.0, pos.1, pos.2, id);
-                    placed.push((pos, id));
-                }
+            world.set(x, y, z, mc_world::AIR_BLOCK_ID);
+            for d in mc_world::drops::leaf_decay_drops(x, y, z, world.seed()) {
+                let rest = world.drop_rest_y(x, z, y) as f64;
+                let mut items = self.items.lock().unwrap_or_else(|p| p.into_inner());
+                let _ = items.spawn(
+                    self.alloc_id(),
+                    d.item_id,
+                    d.count,
+                    x as f64 + 0.5,
+                    y as f64 + 0.5,
+                    z as f64 + 0.5,
+                    rest,
+                );
             }
             if let Some(cache) = &cache {
-                use std::collections::HashSet;
-                let mut chunks: HashSet<mc_core::ChunkPos> = HashSet::new();
-                for ((bx, _, bz), _) in &placed {
-                    chunks.insert(mc_world::chunk_of_block(*bx, *bz));
-                }
-                for c in chunks {
-                    cache.invalidate(c);
-                }
+                cache.invalidate(mc_world::chunk_of_block(x, z));
             }
             if let Some(hub) = &hub {
-                for ((bx, by, bz), id) in &placed {
-                    let mut body = Vec::new();
-                    mc_protocol::packets::BlockUpdate { x: *bx, y: *by, z: *bz, block_id: *id as i32 }
-                        .encode_body(&mut body);
-                    hub.broadcast(
-                        u64::MAX,
-                        mc_world::chunk_of_block(*bx, *bz),
-                        mc_protocol::packets::PLAY_BLOCK_UPDATE_S2C_ID,
-                        &body,
-                    );
-                }
+                let mut body = Vec::new();
+                mc_protocol::packets::BlockUpdate { x, y, z, block_id: mc_world::AIR_BLOCK_ID as i32 }
+                    .encode_body(&mut body);
+                hub.broadcast(
+                    u64::MAX,
+                    mc_world::chunk_of_block(x, z),
+                    mc_protocol::packets::PLAY_BLOCK_UPDATE_S2C_ID,
+                    &body,
+                );
             }
-            self.saplings.lock().unwrap_or_else(|p| p.into_inner()).remove(&(x, y, z));
+            self.pending_leaves.lock().unwrap_or_else(|p| p.into_inner()).remove(&(x, y, z));
         }
     }
 
@@ -765,5 +916,166 @@ mod tests {
             st.physics_tick(&world);
         }
         assert_eq!(world.get(s.0, s.1, s.2), mc_world::OAK_LOG_BLOCK_ID);
+    }
+
+    #[test]
+    fn p27_crops_on_farmland_grow_twice_as_fast_and_revert_on_soil_change() {
+        use mc_world::MutableWorld;
+        let world = MutableWorld::new(21);
+        let st = DropState::new(std::env::temp_dir(), 21);
+        // 基础间隔 8 拍：泥土 8 拍/阶段，耕地 4 拍/阶段。
+        st.set_stage_ticks(8);
+        world.set(0, 70, 0, mc_world::DIRT_BLOCK_ID);
+        world.set(0, 71, 0, mc_world::WHEAT_CROP_BASE_ID);
+        st.plant_crop(0, 71, 0);
+        world.set(4, 70, 0, mc_world::FARMLAND_BLOCK_ID);
+        world.set(4, 71, 0, mc_world::WHEAT_CROP_BASE_ID);
+        st.plant_crop(4, 71, 0);
+        // 8 拍后：耕地 age=2，泥土 age=1。
+        for _ in 0..8 {
+            st.physics_tick(&world);
+        }
+        assert_eq!(world.get(4, 71, 0), mc_world::wheat_stage_id(2), "farmland must halve the interval");
+        assert_eq!(world.get(0, 71, 0), mc_world::wheat_stage_id(1), "dirt keeps the base interval");
+        // 耕地换回泥土（直接换土模拟）：下一阶段回到普通速度，不回退已有阶段。
+        // 数学：种下 tick=0；前 8 拍耕地按间隔 4 走到 want=8/4=2；
+        // 换土后间隔 8：now=16 时 want=16/8=2（不变，只前进不回退）；
+        // now=24 时 want=3。泥土株全程间隔 8：8→1、16→2、24→3。
+        world.set(4, 70, 0, mc_world::DIRT_BLOCK_ID);
+        for _ in 0..8 {
+            st.physics_tick(&world);
+        }
+        assert_eq!(world.get(4, 71, 0), mc_world::wheat_stage_id(2), "soil change must not regress");
+        assert_eq!(world.get(0, 71, 0), mc_world::wheat_stage_id(2));
+        // 再 8 拍（elapsed=24）：两株都 want=3。
+        for _ in 0..8 {
+            st.physics_tick(&world);
+        }
+        assert_eq!(world.get(4, 71, 0), mc_world::wheat_stage_id(3));
+        assert_eq!(world.get(0, 71, 0), mc_world::wheat_stage_id(3));
+    }
+
+    #[test]
+    fn p27_bonemealed_wheat_updates_tracking_without_stage_jump() {
+        use mc_world::MutableWorld;
+        let world = MutableWorld::new(22);
+        let st = DropState::new(std::env::temp_dir(), 22);
+        st.set_stage_ticks(10);
+        world.set(0, 70, 0, mc_world::DIRT_BLOCK_ID);
+        world.set(0, 71, 0, mc_world::WHEAT_CROP_BASE_ID);
+        st.plant_crop(0, 71, 0);
+        // 骨粉落子到 age=2（模拟 `decide_bonemeal` 已 set），同步跟踪。
+        world.set(0, 71, 0, mc_world::wheat_stage_id(2));
+        st.apply_bonemeal_crop(0, 71, 0, 2);
+        assert_eq!(st.crop_stage(0, 71, 0), Some(2));
+        // ticker 不跳变：elapsed 很小，want 仍 < 2，不回退也不快进。
+        for _ in 0..5 {
+            st.physics_tick(&world);
+        }
+        assert_eq!(world.get(0, 71, 0), mc_world::wheat_stage_id(2));
+        assert_eq!(st.crop_stage(0, 71, 0), Some(2));
+        // 未跟踪作物被骨粉：补登记后继续生长（planted 按补登记时刻记，
+        // 需走满一个整间隔才进下一阶段：planted=5、间隔 10 → now=25 时 want=2）。
+        world.set(9, 70, 0, mc_world::DIRT_BLOCK_ID);
+        world.set(9, 71, 0, mc_world::wheat_stage_id(1));
+        st.apply_bonemeal_crop(9, 71, 0, 1);
+        assert_eq!(st.crop_stage(9, 71, 0), Some(1));
+        for _ in 0..10 {
+            st.physics_tick(&world);
+        }
+        assert_eq!(world.get(9, 71, 0), mc_world::wheat_stage_id(1), "one interval not yet elapsed");
+        for _ in 0..10 {
+            st.physics_tick(&world);
+        }
+        assert_eq!(world.get(9, 71, 0), mc_world::wheat_stage_id(2));
+    }
+
+    #[test]
+    fn p27_grow_sapling_now_places_tree_and_rejects_bad_soil() {
+        use mc_world::{MutableWorld, WorldGen};
+        let world = MutableWorld::new(23);
+        let st = DropState::new(std::env::temp_dir(), 23);
+        let s = WorldGen::new(23).spawn_pos();
+        let (x, y, z) = (s.0, s.1, s.2);
+        // 好土壤（耕地也行，P27 简化）：长树成功，跟踪摘除。
+        world.set(x, y - 1, z, mc_world::FARMLAND_BLOCK_ID);
+        world.set(x, y, z, mc_world::OAK_SAPLING_BLOCK_ID);
+        st.plant_sapling(x, y, z);
+        assert!(st.grow_sapling_now(&world, x, y, z));
+        assert_eq!(world.get(x, y, z), mc_world::OAK_LOG_BLOCK_ID);
+        assert_eq!(world.get(x + 1, y + 1, z), mc_world::OAK_LEAVES_BLOCK_ID);
+        assert_eq!(st.sapling_count(), 0);
+        // 坏土壤（石头）：拒绝并摘除。
+        world.set(x + 5, y - 1, z, mc_world::STONE_BLOCK_ID);
+        world.set(x + 5, y, z, mc_world::OAK_SAPLING_BLOCK_ID);
+        st.plant_sapling(x + 5, y, z);
+        assert!(!st.grow_sapling_now(&world, x + 5, y, z));
+        assert_eq!(world.get(x + 5, y, z), mc_world::OAK_SAPLING_BLOCK_ID, "refused tree stays a sapling");
+        assert_eq!(st.sapling_count(), 0);
+    }
+
+    #[test]
+    fn p27_leaves_decay_when_no_log_nearby_and_survive_with_support() {
+        use mc_world::MutableWorld;
+        let world = MutableWorld::new(24);
+        let st = DropState::new(std::env::temp_dir(), 24);
+        st.set_leaf_decay_ticks(3);
+        // 高空孤叶（y=200，世界生成树冠到不了，基底全空气）：登记 → 3 拍后变空气。
+        world.set(50, 200, 50, mc_world::OAK_LEAVES_BLOCK_ID);
+        st.schedule_leaf_decay_around(&world, 50, 200, 50);
+        assert_eq!(st.leaf_pending_count(), 1);
+        st.physics_tick(&world);
+        assert_eq!(world.get(50, 200, 50), mc_world::OAK_LEAVES_BLOCK_ID, "delay not yet reached");
+        st.physics_tick(&world);
+        st.physics_tick(&world);
+        assert_eq!(world.get(50, 200, 50), mc_world::AIR_BLOCK_ID, "unsupported leaves must decay");
+        assert_eq!(st.leaf_pending_count(), 0);
+        // 有支撑的叶子：登记后因 3 格内有原木而取消，不 decay。
+        world.set(60, 200, 60, mc_world::OAK_LEAVES_BLOCK_ID);
+        world.set(62, 200, 60, mc_world::OAK_LOG_BLOCK_ID);
+        st.schedule_leaf_decay_around(&world, 62, 200, 60);
+        assert_eq!(st.leaf_pending_count(), 1);
+        for _ in 0..6 {
+            st.physics_tick(&world);
+        }
+        assert_eq!(world.get(60, 200, 60), mc_world::OAK_LEAVES_BLOCK_ID, "supported leaves must stay");
+        assert_eq!(st.leaf_pending_count(), 0);
+    }
+
+    #[test]
+    fn p27_leaf_decay_spawns_drops_and_clears_pending() {
+        use mc_world::MutableWorld;
+        let seed = 25i64;
+        let world = MutableWorld::new(seed);
+        let st = DropState::new(std::env::temp_dir(), seed);
+        st.set_leaf_decay_ticks(2);
+        // 高空选一个 decay 必掉东西的位点（避开 6/8 空分支与苹果随机性，掉什么都行；
+        // y=200 基底全空气，保证 3 格内无世界生成原木、不被支撑误取消）。
+        let mut spot = None;
+        for x in 0..200 {
+            if !mc_world::drops::leaf_decay_drops(x, 200, 7, seed).is_empty() {
+                spot = Some(x);
+                break;
+            }
+        }
+        let x = spot.expect("some leaf position must drop something");
+        let want = mc_world::drops::leaf_decay_drops(x, 200, 7, seed);
+        world.set(x, 200, 7, mc_world::OAK_LEAVES_BLOCK_ID);
+        st.schedule_leaf_decay_around(&world, x, 200, 7);
+        st.physics_tick(&world);
+        st.physics_tick(&world);
+        assert_eq!(world.get(x, 200, 7), mc_world::AIR_BLOCK_ID);
+        // 掉落已生成实体（各连接 tick_drops 视距补发会自动同步，ticker 内不直接发包）。
+        let items = st.items.lock().unwrap_or_else(|p| p.into_inner());
+        assert_eq!(items.len(), want.len(), "each decay drop becomes one entity");
+        for d in &want {
+            assert!(
+                items.ids().iter().any(|id| {
+                    let e = items.get(*id).unwrap();
+                    e.item_id == d.item_id && e.count == d.count
+                }),
+                "decay must spawn {d:?}"
+            );
+        }
     }
 }

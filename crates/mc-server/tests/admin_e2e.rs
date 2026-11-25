@@ -279,3 +279,67 @@ async fn admin_give_kick_save_flow() {
     env.shutdown.store(true, Ordering::SeqCst);
     let _ = std::fs::remove_dir_all(env.world_dir.parent().unwrap());
 }
+
+/// P27：种田套件靠管理面板领取（无合成/无掉落来源）：锄头 + 骨粉 + 苹果都能 give。
+#[tokio::test]
+async fn admin_give_farming_kit_hoe_bonemeal_apple() {
+    let env = boot().await;
+    let mut s = join(env.game, "Farmer").await;
+    let mut online = serde_json::Value::Null;
+    for _ in 0..50 {
+        let (st, b) = http(env.admin, "GET", "/api/online", "").await;
+        assert_eq!(st, 200);
+        online = j(&b);
+        if online["count"] == 1 {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
+    assert_eq!(online["count"], 1);
+
+    // 短名与全名都接受（`mc_registry::item_id` 双写法）：木锄/骨粉/苹果各发 1 组。
+    for (item, id) in [
+        ("wooden_hoe", mc_registry::item_id("minecraft:wooden_hoe").unwrap() as i64),
+        ("minecraft:bone_meal", mc_registry::item_id("minecraft:bone_meal").unwrap() as i64),
+        ("apple", mc_registry::item_id("minecraft:apple").unwrap() as i64),
+    ] {
+        let (st, b) = http(
+            env.admin,
+            "POST",
+            "/api/give",
+            &format!(r#"{{"username":"Farmer","item":"{item}","count":1}}"#),
+        )
+        .await;
+        assert_eq!(st, 200, "give {item} must succeed");
+        assert_eq!(j(&b), serde_json::json!({"ok": true, "leftover": 0, "delivered": true}));
+        let mut got = false;
+        for _ in 0..40 {
+            let (pid, payload) = read_frame_timeout(&mut s, Duration::from_secs(5)).await.unwrap();
+            if pid == packets::PLAY_SET_CONTAINER_CONTENT_S2C_ID {
+                let (c, _) = packets::SetContainerContent::decode_body(&payload).unwrap();
+                if c.slots.iter().any(|sl| sl.item_id as i64 == id && sl.count == 1) {
+                    got = true;
+                    break;
+                }
+            }
+        }
+        assert!(got, "client must receive the given {item} without rejoin");
+    }
+    // 复核端点看到同一终态。
+    let (st, b) = http(env.admin, "GET", "/api/inventory?username=Farmer", "").await;
+    assert_eq!(st, 200);
+    let inv = j(&b);
+    for id in [
+        mc_registry::item_id("minecraft:wooden_hoe").unwrap() as i64,
+        mc_registry::item_id("minecraft:bone_meal").unwrap() as i64,
+        mc_registry::item_id("minecraft:apple").unwrap() as i64,
+    ] {
+        assert!(
+            inv["slots"].as_array().unwrap().iter().any(|e| e[1] == id && e[2] == 1),
+            "inventory must list item {id}"
+        );
+    }
+
+    env.shutdown.store(true, Ordering::SeqCst);
+    let _ = std::fs::remove_dir_all(env.world_dir.parent().unwrap());
+}
