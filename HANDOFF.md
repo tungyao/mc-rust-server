@@ -455,13 +455,24 @@ $natives = 'C:\Users\qwe\AppData\Local\Temp\mc263natives'
     `ItemEntities::find_unsupported` / `resume_fall` 纯逻辑 + `tick_drops` 接入世界查询；
     支撑被挖空则重算 `rest_y` 并恢复下落。单测 + e2e 覆盖（挖掉掉落物脚下泥土验证重算）。
     TODO(真机)：挖掉掉落物下方方块时观察是否平滑落到新支撑面。
-13. **高危（只读审查发现，待修）**：多连接共享 `Arc<DropState>`，每个连接的 `play_loop` 都调
-    `items.tick()`（`login_route.rs:1021`），N 个在线连接 → 物理 tick 每秒 20×N 次：掉落物
-    落地/可捡/despawn 全部加速 N 倍。双开即可复现。修复方向：把 `ItemEntities::tick()` 移到
-    单一全局调度点（独立 tokio 任务按 50ms 统一跑），各连接只做同步/拾取；顺带处理
-    `decide_dig` 的 `get`+`set` 非原子（两连接同挖一格产生重复掉落）。
-    另附待真机测试清单（T1–T13，含初速/弹跳/拾取/START-FINISH/走远/树下/换列/合并/双开/视距回返）
-    见本轮审查报告；脚本 e2e 只验服务端状态，不能替代真机观察。
+13. **R1 多连接重复 tick（已修）**：多连接共享 `Arc<DropState>` 曾导致每连接都调
+    `items.tick()` → N 连接 = N 倍速物理。现由 `serve()` 启动**唯一**独立 `std::thread`
+    ticker（50ms，`DropState::start_global_tick`），`physics_tick()` 在同一把 items 写锁内
+    做支撑重算 + `items.tick()` + `tick_count++`；各连接 `tick_drops` 只做拾取/视距同步，
+    绝不 tick。`MutableWorld::set_if` CAS 让 `decide_dig` 原子化，两连接同挖一格只一份掉落。
+    测试：`drop_state` 单测（tick_count/支撑）、`set_if` CAS 单测、并发挖掘单测、
+    `two_connections_share_one_global_drop_physics_tick` 双连接 e2e（700ms 内 tick 增量 ≈14
+    而非 28，拾取延迟不被加速）。剩余：ticker 线程无显式停止句柄（进程生命周期），
+    仅配置 drops 不配 mutable_world 不启动（main/测试均同时配置）。
+    另附待真机测试清单 T1–T13（初速/弹跳/拾取/START-FINISH/走远/树下/换列/合并/双开/
+    视距回返）见本轮审查报告；脚本 e2e 只验服务端状态，不能替代真机观察。
+14. **数据驱动 P0/P1（已完成，见 `docs/data-driven-plan.md`）**：`data/manifest.json` +
+    `data/777/{packets,blocks,items,entities,properties}.json`（精简表）+ `data/777/full/` 原资产
+    （来源/SHA 见 `SOURCE.md`，共 ~9.4MB）；`mc-registry/build.rs` 从 JSON 生成 1286 方块 /
+    1658 物品 / 161 实体 / 全量包 ID 表，**替换 216 项连续假 ID**；29 个真机实测 ID
+    构建期断言 + 6 个集成校验测试。新增 `item_id`/`entity_id`/`packet_id` API，旧 API 不变。
+    剩余：P2/P3（mc-world/drops/play_entity 硬编码 ID 改为从表派生、33 bin 迁移、
+    `0x23` 常量改名 `ENTITY_POSITION_SYNC`）待做。
 
 ## 6. 关键文件
 

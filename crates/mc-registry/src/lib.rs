@@ -1,7 +1,8 @@
-//! mc-registry: 方块/物品/生物群系注册表
+//! mc-registry: 方块/物品/实体/包 ID 注册表
 //! 只兼容 26.3 (protocol 777, data 5023)。
-//! 方块表由 build.rs 在编译期从 data_0.rs/data_1.rs 手写占位表生成（离线可构建，216 项），
-//! ID 为占位连续号，待按 26.3 minecraft-data(777) blockstate 表对齐。
+//!
+//! 全部 ID 由 `build.rs` 从 `data/manifest.json` + `data/777/*.json` 编译期生成，
+//! 来源与校验见 `data/777/SOURCE.md`。旧的 216 项连续占位表已废弃。
 use std::collections::HashMap;
 
 // ---- 26.3 版本常量透传（以 mc-core 为唯一来源） ----
@@ -11,13 +12,13 @@ pub const PROTOCOL: i32 = mc_core::PROTOCOL_VERSION;
 /// 别名：兼容 `DATA` 短名断言。
 pub const DATA: i32 = mc_core::DATA_VERSION;
 
-// ---- 编译期生成的 26.3 方块表占位 ----
+// ---- 编译期生成的真实 26.3 注册表 ----
 mod generated {
-    include!(concat!(env!("OUT_DIR"), "/blocks_generated.rs"));
+    include!(concat!(env!("OUT_DIR"), "/generated.rs"));
 }
 
-/// 26.3 方块表：`&[(block_id, namespaced_name)]`，由 build.rs 生成。
-pub use generated::{BLOCKS, by_name};
+/// 26.3 方块表：`&[(blockstate_id, namespaced_name)]`，由 build.rs 从 JSON 生成。
+pub use generated::{BLOCKS, by_id as block_by_id, by_name, ENTITIES, ITEMS, PACKETS};
 
 #[derive(Debug, Clone)]
 pub struct BlockDef {
@@ -25,7 +26,8 @@ pub struct BlockDef {
     pub name: &'static str,
 }
 
-/// 旧 API（兼容保留）：只返回最初 3 个条目。
+/// 旧 API（兼容保留）：仍返回最初 3 个条目及其历史 ID（air=0/stone=1/grass_block=2）。
+/// 新代码请使用 [`block_id`] / [`block_name`] 查询真实 blockstate ID。
 pub fn vanilla_blocks() -> HashMap<u32, BlockDef> {
     let mut m = HashMap::new();
     m.insert(0, BlockDef { id: 0, name: "minecraft:air" });
@@ -51,6 +53,58 @@ pub fn block_id(name: &str) -> Option<u32> {
         }
     }
     None
+}
+
+/// 通用查找：同时接受 `minecraft:dirt` 与 `dirt`。
+fn lookup_id(table: &[(u32, &'static str)], name: &str) -> Option<u32> {
+    if let Some((id, _)) = table.iter().find(|(_, n)| *n == name) {
+        return Some(*id);
+    }
+    if !name.contains(':') {
+        let full = format!("minecraft:{name}");
+        if let Some((id, _)) = table.iter().find(|(_, n)| *n == full.as_str()) {
+            return Some(*id);
+        }
+    }
+    None
+}
+
+/// 按名查物品 ID（`minecraft:dirt` / `dirt` 均可）。
+pub fn item_id(name: &str) -> Option<u32> {
+    lookup_id(ITEMS, name)
+}
+
+/// 按物品 ID 查名字。
+pub fn item_name(id: u32) -> Option<&'static str> {
+    ITEMS.iter().find(|(i, _)| *i == id).map(|(_, n)| *n)
+}
+
+/// 按名查实体类型 ID（`minecraft:zombie` / `zombie` 均可）。
+pub fn entity_id(name: &str) -> Option<u32> {
+    lookup_id(ENTITIES, name)
+}
+
+/// 按实体类型 ID 查名字。
+pub fn entity_name(id: u32) -> Option<&'static str> {
+    ENTITIES.iter().find(|(i, _)| *i == id).map(|(_, n)| *n)
+}
+
+/// 按 `side` + `state` + 包名查包 ID，例如
+/// `packet_id("clientbound", "play", "block_update") == Some(8)`。
+pub fn packet_id(side: &str, state: &str, name: &str) -> Option<i32> {
+    let key = format!("{side}.{state}");
+    PACKETS
+        .iter()
+        .find(|(s, n, _)| *s == key.as_str() && *n == name)
+        .map(|(_, _, id)| *id)
+}
+
+/// 与 [`packet_id`] 相同，但 state 直接写 `"clientbound.play"` 形式。
+pub fn packet_id_in(state: &str, name: &str) -> Option<i32> {
+    PACKETS
+        .iter()
+        .find(|(s, n, _)| *s == state && *n == name)
+        .map(|(_, _, id)| *id)
 }
 
 #[cfg(test)]
@@ -80,25 +134,62 @@ mod tests {
     }
 
     #[test]
-    fn generated_table_has_200_plus_entries() {
-        assert!(BLOCKS.len() >= 200, "want 200+ blocks, got {}", BLOCKS.len());
-        // 任务点名的几个常见方块必须存在
+    fn generated_table_has_real_blockstate_ids() {
+        assert!(BLOCKS.len() >= 1000, "want full 26.3 table, got {}", BLOCKS.len());
+        // 任务点名的常见方块必须存在，且 ID 是真实 blockstate ID（非连续占位号）。
+        for (name, id) in [
+            ("minecraft:air", 0),
+            ("minecraft:stone", 1),
+            ("minecraft:grass_block", 9),
+            ("minecraft:dirt", 10),
+            ("minecraft:water", 89),
+            ("minecraft:sand", 121),
+            ("minecraft:coal_ore", 136),
+            ("minecraft:iron_ore", 134),
+            ("minecraft:oak_log", 140),
+            ("minecraft:oak_leaves", 294),
+        ] {
+            assert_eq!(block_id(name), Some(id), "wrong blockstate ID for {name}");
+            assert_eq!(by_name(name), Some(id));
+            assert_eq!(block_by_id(id), Some(name));
+            assert_eq!(block_name(id), Some(name));
+        }
         for name in [
-            "minecraft:air",
-            "minecraft:stone",
-            "minecraft:grass_block",
-            "minecraft:dirt",
-            "minecraft:oak_log",
             "minecraft:deepslate",
             "minecraft:white_wool",
             "minecraft:redstone_lamp",
         ] {
-            assert!(by_name(name).is_some(), "missing {name}");
             assert!(block_id(name).is_some(), "missing {name}");
         }
-        // ID 占位连续：0..N 无断号
-        for (i, (id, _)) in BLOCKS.iter().enumerate() {
-            assert_eq!(*id, i as u32, "placeholder id gap at index {i}");
-        }
+        // 不再是 0..N 的连续假 ID：grass_block 应为 9 而不是 2。
+        assert_ne!(BLOCKS.get(2).map(|(id, _)| *id), Some(9));
+    }
+
+    #[test]
+    fn item_id_matches_26_3() {
+        assert_eq!(item_id("minecraft:stone"), Some(1));
+        assert_eq!(item_id("minecraft:dirt"), Some(55));
+        assert_eq!(item_id("dirt"), Some(55));
+        assert_eq!(item_name(55), Some("minecraft:dirt"));
+        assert_eq!(ITEMS.len(), 1658);
+    }
+
+    #[test]
+    fn entity_id_matches_26_3() {
+        assert_eq!(entity_id("minecraft:player"), Some(159));
+        assert_eq!(entity_id("zombie"), Some(154));
+        assert_eq!(entity_name(159), Some("minecraft:player"));
+        assert_eq!(ENTITIES.len(), 161);
+    }
+
+    #[test]
+    fn packet_id_matches_26_3() {
+        assert_eq!(packet_id("clientbound", "play", "block_update"), Some(8));
+        assert_eq!(packet_id("clientbound", "play", "add_entity"), Some(1));
+        assert_eq!(packet_id("clientbound", "play", "level_chunk_with_light"), Some(46));
+        assert_eq!(packet_id("serverbound", "play", "player_action"), Some(41));
+        assert_eq!(packet_id("serverbound", "play", "use_item_on"), Some(66));
+        assert_eq!(packet_id_in("clientbound.play", "take_item_entity"), Some(127));
+        assert!(!PACKETS.is_empty());
     }
 }

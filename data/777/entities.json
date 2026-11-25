@@ -1,0 +1,485 @@
+{
+  "acacia_boat": {
+    "id": 0
+  },
+  "acacia_chest_boat": {
+    "id": 1
+  },
+  "allay": {
+    "id": 2
+  },
+  "area_effect_cloud": {
+    "id": 3
+  },
+  "armadillo": {
+    "id": 4
+  },
+  "armor_stand": {
+    "id": 5
+  },
+  "arrow": {
+    "id": 6
+  },
+  "axolotl": {
+    "id": 7
+  },
+  "bamboo_chest_raft": {
+    "id": 8
+  },
+  "bamboo_raft": {
+    "id": 9
+  },
+  "bat": {
+    "id": 10
+  },
+  "bee": {
+    "id": 11
+  },
+  "birch_boat": {
+    "id": 12
+  },
+  "birch_chest_boat": {
+    "id": 13
+  },
+  "blaze": {
+    "id": 14
+  },
+  "block_display": {
+    "id": 15
+  },
+  "bogged": {
+    "id": 16
+  },
+  "breeze": {
+    "id": 17
+  },
+  "breeze_wind_charge": {
+    "id": 18
+  },
+  "camel": {
+    "id": 19
+  },
+  "camel_husk": {
+    "id": 20
+  },
+  "cat": {
+    "id": 21
+  },
+  "cave_spider": {
+    "id": 22
+  },
+  "cherry_boat": {
+    "id": 23
+  },
+  "cherry_chest_boat": {
+    "id": 24
+  },
+  "chest_minecart": {
+    "id": 25
+  },
+  "chicken": {
+    "id": 26
+  },
+  "cod": {
+    "id": 27
+  },
+  "copper_golem": {
+    "id": 28
+  },
+  "command_block_minecart": {
+    "id": 29
+  },
+  "cow": {
+    "id": 30
+  },
+  "creaking": {
+    "id": 31
+  },
+  "creeper": {
+    "id": 32
+  },
+  "cushion": {
+    "id": 33
+  },
+  "dark_oak_boat": {
+    "id": 34
+  },
+  "dark_oak_chest_boat": {
+    "id": 35
+  },
+  "dolphin": {
+    "id": 36
+  },
+  "donkey": {
+    "id": 37
+  },
+  "dragon_fireball": {
+    "id": 38
+  },
+  "drowned": {
+    "id": 39
+  },
+  "egg": {
+    "id": 40
+  },
+  "elder_guardian": {
+    "id": 41
+  },
+  "enderman": {
+    "id": 42
+  },
+  "endermite": {
+    "id": 43
+  },
+  "ender_dragon": {
+    "id": 44
+  },
+  "ender_pearl": {
+    "id": 45
+  },
+  "end_crystal": {
+    "id": 46
+  },
+  "evoker": {
+    "id": 47
+  },
+  "evoker_fangs": {
+    "id": 48
+  },
+  "experience_bottle": {
+    "id": 49
+  },
+  "experience_orb": {
+    "id": 50
+  },
+  "eye_of_ender": {
+    "id": 51
+  },
+  "falling_block": {
+    "id": 52
+  },
+  "fireball": {
+    "id": 53
+  },
+  "firework_rocket": {
+    "id": 54
+  },
+  "fox": {
+    "id": 55
+  },
+  "frog": {
+    "id": 56
+  },
+  "furnace_minecart": {
+    "id": 57
+  },
+  "ghast": {
+    "id": 58
+  },
+  "happy_ghast": {
+    "id": 59
+  },
+  "giant": {
+    "id": 60
+  },
+  "glow_item_frame": {
+    "id": 61
+  },
+  "glow_squid": {
+    "id": 62
+  },
+  "goat": {
+    "id": 63
+  },
+  "guardian": {
+    "id": 64
+  },
+  "hoglin": {
+    "id": 65
+  },
+  "hopper_minecart": {
+    "id": 66
+  },
+  "horse": {
+    "id": 67
+  },
+  "husk": {
+    "id": 68
+  },
+  "illusioner": {
+    "id": 69
+  },
+  "interaction": {
+    "id": 70
+  },
+  "iron_golem": {
+    "id": 71
+  },
+  "item": {
+    "id": 72
+  },
+  "item_display": {
+    "id": 73
+  },
+  "item_frame": {
+    "id": 74
+  },
+  "jungle_boat": {
+    "id": 75
+  },
+  "jungle_chest_boat": {
+    "id": 76
+  },
+  "leash_knot": {
+    "id": 77
+  },
+  "lightning_bolt": {
+    "id": 78
+  },
+  "llama": {
+    "id": 79
+  },
+  "llama_spit": {
+    "id": 80
+  },
+  "magma_cube": {
+    "id": 81
+  },
+  "mangrove_boat": {
+    "id": 82
+  },
+  "mangrove_chest_boat": {
+    "id": 83
+  },
+  "mannequin": {
+    "id": 84
+  },
+  "marker": {
+    "id": 85
+  },
+  "minecart": {
+    "id": 86
+  },
+  "mooshroom": {
+    "id": 87
+  },
+  "mule": {
+    "id": 88
+  },
+  "nautilus": {
+    "id": 89
+  },
+  "oak_boat": {
+    "id": 90
+  },
+  "oak_chest_boat": {
+    "id": 91
+  },
+  "ocelot": {
+    "id": 92
+  },
+  "ominous_item_spawner": {
+    "id": 93
+  },
+  "painting": {
+    "id": 94
+  },
+  "pale_oak_boat": {
+    "id": 95
+  },
+  "pale_oak_chest_boat": {
+    "id": 96
+  },
+  "panda": {
+    "id": 97
+  },
+  "parched": {
+    "id": 98
+  },
+  "parrot": {
+    "id": 99
+  },
+  "phantom": {
+    "id": 100
+  },
+  "pig": {
+    "id": 101
+  },
+  "piglin": {
+    "id": 102
+  },
+  "piglin_brute": {
+    "id": 103
+  },
+  "pillager": {
+    "id": 104
+  },
+  "polar_bear": {
+    "id": 105
+  },
+  "poplar_boat": {
+    "id": 106
+  },
+  "poplar_chest_boat": {
+    "id": 107
+  },
+  "splash_potion": {
+    "id": 108
+  },
+  "lingering_potion": {
+    "id": 109
+  },
+  "pufferfish": {
+    "id": 110
+  },
+  "rabbit": {
+    "id": 111
+  },
+  "ravager": {
+    "id": 112
+  },
+  "salmon": {
+    "id": 113
+  },
+  "sheep": {
+    "id": 114
+  },
+  "shulker": {
+    "id": 115
+  },
+  "shulker_bullet": {
+    "id": 116
+  },
+  "silverfish": {
+    "id": 117
+  },
+  "skeleton": {
+    "id": 118
+  },
+  "skeleton_horse": {
+    "id": 119
+  },
+  "slime": {
+    "id": 120
+  },
+  "small_fireball": {
+    "id": 121
+  },
+  "sniffer": {
+    "id": 122
+  },
+  "snowball": {
+    "id": 123
+  },
+  "snow_golem": {
+    "id": 124
+  },
+  "spawner_minecart": {
+    "id": 125
+  },
+  "spectral_arrow": {
+    "id": 126
+  },
+  "spider": {
+    "id": 127
+  },
+  "spruce_boat": {
+    "id": 128
+  },
+  "spruce_chest_boat": {
+    "id": 129
+  },
+  "squid": {
+    "id": 130
+  },
+  "stray": {
+    "id": 131
+  },
+  "strider": {
+    "id": 132
+  },
+  "sulfur_cube": {
+    "id": 133
+  },
+  "tadpole": {
+    "id": 134
+  },
+  "text_display": {
+    "id": 135
+  },
+  "tnt": {
+    "id": 136
+  },
+  "tnt_minecart": {
+    "id": 137
+  },
+  "trader_llama": {
+    "id": 138
+  },
+  "trident": {
+    "id": 139
+  },
+  "tropical_fish": {
+    "id": 140
+  },
+  "turtle": {
+    "id": 141
+  },
+  "vex": {
+    "id": 142
+  },
+  "villager": {
+    "id": 143
+  },
+  "vindicator": {
+    "id": 144
+  },
+  "wandering_trader": {
+    "id": 145
+  },
+  "warden": {
+    "id": 146
+  },
+  "wind_charge": {
+    "id": 147
+  },
+  "witch": {
+    "id": 148
+  },
+  "wither": {
+    "id": 149
+  },
+  "wither_skeleton": {
+    "id": 150
+  },
+  "wither_skull": {
+    "id": 151
+  },
+  "wolf": {
+    "id": 152
+  },
+  "zoglin": {
+    "id": 153
+  },
+  "zombie": {
+    "id": 154
+  },
+  "zombie_horse": {
+    "id": 155
+  },
+  "zombie_nautilus": {
+    "id": 156
+  },
+  "zombie_villager": {
+    "id": 157
+  },
+  "zombified_piglin": {
+    "id": 158
+  },
+  "player": {
+    "id": 159
+  },
+  "fishing_bobber": {
+    "id": 160
+  }
+}

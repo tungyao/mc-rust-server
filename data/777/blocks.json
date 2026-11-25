@@ -1,0 +1,7720 @@
+{
+  "blocks": [
+    {
+      "name": "air",
+      "id": 0,
+      "default_state_id": 0,
+      "hardness": 0.0
+    },
+    {
+      "name": "stone",
+      "id": 1,
+      "default_state_id": 1,
+      "hardness": 1.5
+    },
+    {
+      "name": "granite",
+      "id": 2,
+      "default_state_id": 2,
+      "hardness": 1.5
+    },
+    {
+      "name": "polished_granite",
+      "id": 3,
+      "default_state_id": 3,
+      "hardness": 1.5
+    },
+    {
+      "name": "diorite",
+      "id": 4,
+      "default_state_id": 4,
+      "hardness": 1.5
+    },
+    {
+      "name": "polished_diorite",
+      "id": 5,
+      "default_state_id": 5,
+      "hardness": 1.5
+    },
+    {
+      "name": "andesite",
+      "id": 6,
+      "default_state_id": 6,
+      "hardness": 1.5
+    },
+    {
+      "name": "polished_andesite",
+      "id": 7,
+      "default_state_id": 7,
+      "hardness": 1.5
+    },
+    {
+      "name": "grass_block",
+      "id": 8,
+      "default_state_id": 9,
+      "hardness": 0.6
+    },
+    {
+      "name": "dirt",
+      "id": 9,
+      "default_state_id": 10,
+      "hardness": 0.5
+    },
+    {
+      "name": "coarse_dirt",
+      "id": 10,
+      "default_state_id": 11,
+      "hardness": 0.5
+    },
+    {
+      "name": "podzol",
+      "id": 11,
+      "default_state_id": 13,
+      "hardness": 0.5
+    },
+    {
+      "name": "cobblestone",
+      "id": 12,
+      "default_state_id": 14,
+      "hardness": 2.0
+    },
+    {
+      "name": "oak_planks",
+      "id": 13,
+      "default_state_id": 15,
+      "hardness": 2.0
+    },
+    {
+      "name": "spruce_planks",
+      "id": 14,
+      "default_state_id": 16,
+      "hardness": 2.0
+    },
+    {
+      "name": "birch_planks",
+      "id": 15,
+      "default_state_id": 17,
+      "hardness": 2.0
+    },
+    {
+      "name": "jungle_planks",
+      "id": 16,
+      "default_state_id": 18,
+      "hardness": 2.0
+    },
+    {
+      "name": "acacia_planks",
+      "id": 17,
+      "default_state_id": 19,
+      "hardness": 2.0
+    },
+    {
+      "name": "cherry_planks",
+      "id": 18,
+      "default_state_id": 20,
+      "hardness": 2.0
+    },
+    {
+      "name": "dark_oak_planks",
+      "id": 19,
+      "default_state_id": 21,
+      "hardness": 2.0
+    },
+    {
+      "name": "pale_oak_wood",
+      "id": 20,
+      "default_state_id": 23,
+      "hardness": 2.0
+    },
+    {
+      "name": "pale_oak_planks",
+      "id": 21,
+      "default_state_id": 25,
+      "hardness": 2.0
+    },
+    {
+      "name": "mangrove_planks",
+      "id": 22,
+      "default_state_id": 26,
+      "hardness": 2.0
+    },
+    {
+      "name": "poplar_planks",
+      "id": 23,
+      "default_state_id": 27,
+      "hardness": 2.0
+    },
+    {
+      "name": "bamboo_planks",
+      "id": 24,
+      "default_state_id": 28,
+      "hardness": 2.0
+    },
+    {
+      "name": "bamboo_mosaic",
+      "id": 25,
+      "default_state_id": 29,
+      "hardness": 2.0
+    },
+    {
+      "name": "oak_sapling",
+      "id": 26,
+      "default_state_id": 30,
+      "hardness": 0.0
+    },
+    {
+      "name": "spruce_sapling",
+      "id": 27,
+      "default_state_id": 32,
+      "hardness": 0.0
+    },
+    {
+      "name": "birch_sapling",
+      "id": 28,
+      "default_state_id": 34,
+      "hardness": 0.0
+    },
+    {
+      "name": "jungle_sapling",
+      "id": 29,
+      "default_state_id": 36,
+      "hardness": 0.0
+    },
+    {
+      "name": "acacia_sapling",
+      "id": 30,
+      "default_state_id": 38,
+      "hardness": 0.0
+    },
+    {
+      "name": "cherry_sapling",
+      "id": 31,
+      "default_state_id": 40,
+      "hardness": 0.0
+    },
+    {
+      "name": "dark_oak_sapling",
+      "id": 32,
+      "default_state_id": 42,
+      "hardness": 0.0
+    },
+    {
+      "name": "pale_oak_sapling",
+      "id": 33,
+      "default_state_id": 44,
+      "hardness": 0.0
+    },
+    {
+      "name": "mangrove_propagule",
+      "id": 34,
+      "default_state_id": 51,
+      "hardness": 0.0
+    },
+    {
+      "name": "poplar_sapling",
+      "id": 35,
+      "default_state_id": 86,
+      "hardness": 0.0
+    },
+    {
+      "name": "bedrock",
+      "id": 36,
+      "default_state_id": 88,
+      "hardness": -1.0
+    },
+    {
+      "name": "water",
+      "id": 37,
+      "default_state_id": 89,
+      "hardness": 100.0
+    },
+    {
+      "name": "lava",
+      "id": 38,
+      "default_state_id": 105,
+      "hardness": 100.0
+    },
+    {
+      "name": "sand",
+      "id": 39,
+      "default_state_id": 121,
+      "hardness": 0.5
+    },
+    {
+      "name": "suspicious_sand",
+      "id": 40,
+      "default_state_id": 122,
+      "hardness": 0.25
+    },
+    {
+      "name": "red_sand",
+      "id": 41,
+      "default_state_id": 126,
+      "hardness": 0.5
+    },
+    {
+      "name": "gravel",
+      "id": 42,
+      "default_state_id": 127,
+      "hardness": 0.6
+    },
+    {
+      "name": "suspicious_gravel",
+      "id": 43,
+      "default_state_id": 128,
+      "hardness": 0.25
+    },
+    {
+      "name": "gold_ore",
+      "id": 44,
+      "default_state_id": 132,
+      "hardness": 3.0
+    },
+    {
+      "name": "deepslate_gold_ore",
+      "id": 45,
+      "default_state_id": 133,
+      "hardness": 4.5
+    },
+    {
+      "name": "iron_ore",
+      "id": 46,
+      "default_state_id": 134,
+      "hardness": 3.0
+    },
+    {
+      "name": "deepslate_iron_ore",
+      "id": 47,
+      "default_state_id": 135,
+      "hardness": 4.5
+    },
+    {
+      "name": "coal_ore",
+      "id": 48,
+      "default_state_id": 136,
+      "hardness": 3.0
+    },
+    {
+      "name": "deepslate_coal_ore",
+      "id": 49,
+      "default_state_id": 137,
+      "hardness": 4.5
+    },
+    {
+      "name": "nether_gold_ore",
+      "id": 50,
+      "default_state_id": 138,
+      "hardness": 3.0
+    },
+    {
+      "name": "oak_log",
+      "id": 51,
+      "default_state_id": 140,
+      "hardness": 2.0
+    },
+    {
+      "name": "spruce_log",
+      "id": 52,
+      "default_state_id": 143,
+      "hardness": 2.0
+    },
+    {
+      "name": "birch_log",
+      "id": 53,
+      "default_state_id": 146,
+      "hardness": 2.0
+    },
+    {
+      "name": "jungle_log",
+      "id": 54,
+      "default_state_id": 149,
+      "hardness": 2.0
+    },
+    {
+      "name": "acacia_log",
+      "id": 55,
+      "default_state_id": 152,
+      "hardness": 2.0
+    },
+    {
+      "name": "cherry_log",
+      "id": 56,
+      "default_state_id": 155,
+      "hardness": 2.0
+    },
+    {
+      "name": "dark_oak_log",
+      "id": 57,
+      "default_state_id": 158,
+      "hardness": 2.0
+    },
+    {
+      "name": "pale_oak_log",
+      "id": 58,
+      "default_state_id": 161,
+      "hardness": 2.0
+    },
+    {
+      "name": "mangrove_log",
+      "id": 59,
+      "default_state_id": 164,
+      "hardness": 2.0
+    },
+    {
+      "name": "poplar_log",
+      "id": 60,
+      "default_state_id": 167,
+      "hardness": 2.0
+    },
+    {
+      "name": "mangrove_roots",
+      "id": 61,
+      "default_state_id": 170,
+      "hardness": 0.7
+    },
+    {
+      "name": "muddy_mangrove_roots",
+      "id": 62,
+      "default_state_id": 172,
+      "hardness": 0.7
+    },
+    {
+      "name": "bamboo_block",
+      "id": 63,
+      "default_state_id": 175,
+      "hardness": 2.0
+    },
+    {
+      "name": "stripped_spruce_log",
+      "id": 64,
+      "default_state_id": 178,
+      "hardness": 2.0
+    },
+    {
+      "name": "stripped_birch_log",
+      "id": 65,
+      "default_state_id": 181,
+      "hardness": 2.0
+    },
+    {
+      "name": "stripped_jungle_log",
+      "id": 66,
+      "default_state_id": 184,
+      "hardness": 2.0
+    },
+    {
+      "name": "stripped_acacia_log",
+      "id": 67,
+      "default_state_id": 187,
+      "hardness": 2.0
+    },
+    {
+      "name": "stripped_cherry_log",
+      "id": 68,
+      "default_state_id": 190,
+      "hardness": 2.0
+    },
+    {
+      "name": "stripped_dark_oak_log",
+      "id": 69,
+      "default_state_id": 193,
+      "hardness": 2.0
+    },
+    {
+      "name": "stripped_pale_oak_log",
+      "id": 70,
+      "default_state_id": 196,
+      "hardness": 2.0
+    },
+    {
+      "name": "stripped_oak_log",
+      "id": 71,
+      "default_state_id": 199,
+      "hardness": 2.0
+    },
+    {
+      "name": "stripped_mangrove_log",
+      "id": 72,
+      "default_state_id": 202,
+      "hardness": 2.0
+    },
+    {
+      "name": "stripped_poplar_log",
+      "id": 73,
+      "default_state_id": 205,
+      "hardness": 2.0
+    },
+    {
+      "name": "stripped_bamboo_block",
+      "id": 74,
+      "default_state_id": 208,
+      "hardness": 2.0
+    },
+    {
+      "name": "oak_wood",
+      "id": 75,
+      "default_state_id": 211,
+      "hardness": 2.0
+    },
+    {
+      "name": "spruce_wood",
+      "id": 76,
+      "default_state_id": 214,
+      "hardness": 2.0
+    },
+    {
+      "name": "birch_wood",
+      "id": 77,
+      "default_state_id": 217,
+      "hardness": 2.0
+    },
+    {
+      "name": "jungle_wood",
+      "id": 78,
+      "default_state_id": 220,
+      "hardness": 2.0
+    },
+    {
+      "name": "acacia_wood",
+      "id": 79,
+      "default_state_id": 223,
+      "hardness": 2.0
+    },
+    {
+      "name": "cherry_wood",
+      "id": 80,
+      "default_state_id": 226,
+      "hardness": 2.0
+    },
+    {
+      "name": "dark_oak_wood",
+      "id": 81,
+      "default_state_id": 229,
+      "hardness": 2.0
+    },
+    {
+      "name": "mangrove_wood",
+      "id": 82,
+      "default_state_id": 232,
+      "hardness": 2.0
+    },
+    {
+      "name": "poplar_wood",
+      "id": 83,
+      "default_state_id": 235,
+      "hardness": 2.0
+    },
+    {
+      "name": "stripped_oak_wood",
+      "id": 84,
+      "default_state_id": 238,
+      "hardness": 2.0
+    },
+    {
+      "name": "stripped_spruce_wood",
+      "id": 85,
+      "default_state_id": 241,
+      "hardness": 2.0
+    },
+    {
+      "name": "stripped_birch_wood",
+      "id": 86,
+      "default_state_id": 244,
+      "hardness": 2.0
+    },
+    {
+      "name": "stripped_jungle_wood",
+      "id": 87,
+      "default_state_id": 247,
+      "hardness": 2.0
+    },
+    {
+      "name": "stripped_acacia_wood",
+      "id": 88,
+      "default_state_id": 250,
+      "hardness": 2.0
+    },
+    {
+      "name": "stripped_cherry_wood",
+      "id": 89,
+      "default_state_id": 253,
+      "hardness": 2.0
+    },
+    {
+      "name": "stripped_dark_oak_wood",
+      "id": 90,
+      "default_state_id": 256,
+      "hardness": 2.0
+    },
+    {
+      "name": "stripped_pale_oak_wood",
+      "id": 91,
+      "default_state_id": 259,
+      "hardness": 2.0
+    },
+    {
+      "name": "stripped_mangrove_wood",
+      "id": 92,
+      "default_state_id": 262,
+      "hardness": 2.0
+    },
+    {
+      "name": "stripped_poplar_wood",
+      "id": 93,
+      "default_state_id": 265,
+      "hardness": 2.0
+    },
+    {
+      "name": "oak_leaves",
+      "id": 94,
+      "default_state_id": 294,
+      "hardness": 0.2
+    },
+    {
+      "name": "spruce_leaves",
+      "id": 95,
+      "default_state_id": 322,
+      "hardness": 0.2
+    },
+    {
+      "name": "birch_leaves",
+      "id": 96,
+      "default_state_id": 350,
+      "hardness": 0.2
+    },
+    {
+      "name": "jungle_leaves",
+      "id": 97,
+      "default_state_id": 378,
+      "hardness": 0.2
+    },
+    {
+      "name": "acacia_leaves",
+      "id": 98,
+      "default_state_id": 406,
+      "hardness": 0.2
+    },
+    {
+      "name": "cherry_leaves",
+      "id": 99,
+      "default_state_id": 434,
+      "hardness": 0.2
+    },
+    {
+      "name": "dark_oak_leaves",
+      "id": 100,
+      "default_state_id": 462,
+      "hardness": 0.2
+    },
+    {
+      "name": "pale_oak_leaves",
+      "id": 101,
+      "default_state_id": 490,
+      "hardness": 0.2
+    },
+    {
+      "name": "mangrove_leaves",
+      "id": 102,
+      "default_state_id": 518,
+      "hardness": 0.2
+    },
+    {
+      "name": "red_poplar_leaves",
+      "id": 103,
+      "default_state_id": 546,
+      "hardness": 0.2
+    },
+    {
+      "name": "orange_poplar_leaves",
+      "id": 104,
+      "default_state_id": 574,
+      "hardness": 0.2
+    },
+    {
+      "name": "yellow_poplar_leaves",
+      "id": 105,
+      "default_state_id": 602,
+      "hardness": 0.2
+    },
+    {
+      "name": "azalea_leaves",
+      "id": 106,
+      "default_state_id": 630,
+      "hardness": 0.2
+    },
+    {
+      "name": "flowering_azalea_leaves",
+      "id": 107,
+      "default_state_id": 658,
+      "hardness": 0.2
+    },
+    {
+      "name": "sponge",
+      "id": 108,
+      "default_state_id": 659,
+      "hardness": 0.6
+    },
+    {
+      "name": "wet_sponge",
+      "id": 109,
+      "default_state_id": 660,
+      "hardness": 0.6
+    },
+    {
+      "name": "glass",
+      "id": 110,
+      "default_state_id": 661,
+      "hardness": 0.3
+    },
+    {
+      "name": "lapis_ore",
+      "id": 111,
+      "default_state_id": 662,
+      "hardness": 3.0
+    },
+    {
+      "name": "deepslate_lapis_ore",
+      "id": 112,
+      "default_state_id": 663,
+      "hardness": 4.5
+    },
+    {
+      "name": "lapis_block",
+      "id": 113,
+      "default_state_id": 664,
+      "hardness": 3.0
+    },
+    {
+      "name": "dispenser",
+      "id": 114,
+      "default_state_id": 666,
+      "hardness": 3.5
+    },
+    {
+      "name": "sandstone",
+      "id": 115,
+      "default_state_id": 677,
+      "hardness": 0.8
+    },
+    {
+      "name": "chiseled_sandstone",
+      "id": 116,
+      "default_state_id": 678,
+      "hardness": 0.8
+    },
+    {
+      "name": "cut_sandstone",
+      "id": 117,
+      "default_state_id": 679,
+      "hardness": 0.8
+    },
+    {
+      "name": "note_block",
+      "id": 118,
+      "default_state_id": 681,
+      "hardness": 0.8
+    },
+    {
+      "name": "white_bed",
+      "id": 119,
+      "default_state_id": 2033,
+      "hardness": 0.2
+    },
+    {
+      "name": "orange_bed",
+      "id": 120,
+      "default_state_id": 2049,
+      "hardness": 0.2
+    },
+    {
+      "name": "magenta_bed",
+      "id": 121,
+      "default_state_id": 2065,
+      "hardness": 0.2
+    },
+    {
+      "name": "light_blue_bed",
+      "id": 122,
+      "default_state_id": 2081,
+      "hardness": 0.2
+    },
+    {
+      "name": "yellow_bed",
+      "id": 123,
+      "default_state_id": 2097,
+      "hardness": 0.2
+    },
+    {
+      "name": "lime_bed",
+      "id": 124,
+      "default_state_id": 2113,
+      "hardness": 0.2
+    },
+    {
+      "name": "pink_bed",
+      "id": 125,
+      "default_state_id": 2129,
+      "hardness": 0.2
+    },
+    {
+      "name": "gray_bed",
+      "id": 126,
+      "default_state_id": 2145,
+      "hardness": 0.2
+    },
+    {
+      "name": "light_gray_bed",
+      "id": 127,
+      "default_state_id": 2161,
+      "hardness": 0.2
+    },
+    {
+      "name": "cyan_bed",
+      "id": 128,
+      "default_state_id": 2177,
+      "hardness": 0.2
+    },
+    {
+      "name": "purple_bed",
+      "id": 129,
+      "default_state_id": 2193,
+      "hardness": 0.2
+    },
+    {
+      "name": "blue_bed",
+      "id": 130,
+      "default_state_id": 2209,
+      "hardness": 0.2
+    },
+    {
+      "name": "brown_bed",
+      "id": 131,
+      "default_state_id": 2225,
+      "hardness": 0.2
+    },
+    {
+      "name": "green_bed",
+      "id": 132,
+      "default_state_id": 2241,
+      "hardness": 0.2
+    },
+    {
+      "name": "red_bed",
+      "id": 133,
+      "default_state_id": 2257,
+      "hardness": 0.2
+    },
+    {
+      "name": "black_bed",
+      "id": 134,
+      "default_state_id": 2273,
+      "hardness": 0.2
+    },
+    {
+      "name": "straw_bed",
+      "id": 135,
+      "default_state_id": 2289,
+      "hardness": 0.2
+    },
+    {
+      "name": "powered_rail",
+      "id": 136,
+      "default_state_id": 2315,
+      "hardness": 0.7
+    },
+    {
+      "name": "detector_rail",
+      "id": 137,
+      "default_state_id": 2339,
+      "hardness": 0.7
+    },
+    {
+      "name": "sticky_piston",
+      "id": 138,
+      "default_state_id": 2356,
+      "hardness": 1.5
+    },
+    {
+      "name": "cobweb",
+      "id": 139,
+      "default_state_id": 2362,
+      "hardness": 4.0
+    },
+    {
+      "name": "short_grass",
+      "id": 140,
+      "default_state_id": 2363,
+      "hardness": 0.0
+    },
+    {
+      "name": "fern",
+      "id": 141,
+      "default_state_id": 2364,
+      "hardness": 0.0
+    },
+    {
+      "name": "dead_bush",
+      "id": 142,
+      "default_state_id": 2365,
+      "hardness": 0.0
+    },
+    {
+      "name": "bush",
+      "id": 143,
+      "default_state_id": 2366,
+      "hardness": 0.0
+    },
+    {
+      "name": "red_shrub",
+      "id": 144,
+      "default_state_id": 2367,
+      "hardness": 0.0
+    },
+    {
+      "name": "short_dry_grass",
+      "id": 145,
+      "default_state_id": 2368,
+      "hardness": 0.0
+    },
+    {
+      "name": "tall_dry_grass",
+      "id": 146,
+      "default_state_id": 2369,
+      "hardness": 0.0
+    },
+    {
+      "name": "seagrass",
+      "id": 147,
+      "default_state_id": 2370,
+      "hardness": 0.0
+    },
+    {
+      "name": "tall_seagrass",
+      "id": 148,
+      "default_state_id": 2372,
+      "hardness": 0.0
+    },
+    {
+      "name": "piston",
+      "id": 149,
+      "default_state_id": 2379,
+      "hardness": 1.5
+    },
+    {
+      "name": "piston_head",
+      "id": 150,
+      "default_state_id": 2387,
+      "hardness": 1.5
+    },
+    {
+      "name": "white_wool",
+      "id": 151,
+      "default_state_id": 2409,
+      "hardness": 0.8
+    },
+    {
+      "name": "orange_wool",
+      "id": 152,
+      "default_state_id": 2410,
+      "hardness": 0.8
+    },
+    {
+      "name": "magenta_wool",
+      "id": 153,
+      "default_state_id": 2411,
+      "hardness": 0.8
+    },
+    {
+      "name": "light_blue_wool",
+      "id": 154,
+      "default_state_id": 2412,
+      "hardness": 0.8
+    },
+    {
+      "name": "yellow_wool",
+      "id": 155,
+      "default_state_id": 2413,
+      "hardness": 0.8
+    },
+    {
+      "name": "lime_wool",
+      "id": 156,
+      "default_state_id": 2414,
+      "hardness": 0.8
+    },
+    {
+      "name": "pink_wool",
+      "id": 157,
+      "default_state_id": 2415,
+      "hardness": 0.8
+    },
+    {
+      "name": "gray_wool",
+      "id": 158,
+      "default_state_id": 2416,
+      "hardness": 0.8
+    },
+    {
+      "name": "light_gray_wool",
+      "id": 159,
+      "default_state_id": 2417,
+      "hardness": 0.8
+    },
+    {
+      "name": "cyan_wool",
+      "id": 160,
+      "default_state_id": 2418,
+      "hardness": 0.8
+    },
+    {
+      "name": "purple_wool",
+      "id": 161,
+      "default_state_id": 2419,
+      "hardness": 0.8
+    },
+    {
+      "name": "blue_wool",
+      "id": 162,
+      "default_state_id": 2420,
+      "hardness": 0.8
+    },
+    {
+      "name": "brown_wool",
+      "id": 163,
+      "default_state_id": 2421,
+      "hardness": 0.8
+    },
+    {
+      "name": "green_wool",
+      "id": 164,
+      "default_state_id": 2422,
+      "hardness": 0.8
+    },
+    {
+      "name": "red_wool",
+      "id": 165,
+      "default_state_id": 2423,
+      "hardness": 0.8
+    },
+    {
+      "name": "black_wool",
+      "id": 166,
+      "default_state_id": 2424,
+      "hardness": 0.8
+    },
+    {
+      "name": "white_wool_stairs",
+      "id": 167,
+      "default_state_id": 2436,
+      "hardness": 0.8
+    },
+    {
+      "name": "orange_wool_stairs",
+      "id": 168,
+      "default_state_id": 2516,
+      "hardness": 0.8
+    },
+    {
+      "name": "magenta_wool_stairs",
+      "id": 169,
+      "default_state_id": 2596,
+      "hardness": 0.8
+    },
+    {
+      "name": "light_blue_wool_stairs",
+      "id": 170,
+      "default_state_id": 2676,
+      "hardness": 0.8
+    },
+    {
+      "name": "yellow_wool_stairs",
+      "id": 171,
+      "default_state_id": 2756,
+      "hardness": 0.8
+    },
+    {
+      "name": "lime_wool_stairs",
+      "id": 172,
+      "default_state_id": 2836,
+      "hardness": 0.8
+    },
+    {
+      "name": "pink_wool_stairs",
+      "id": 173,
+      "default_state_id": 2916,
+      "hardness": 0.8
+    },
+    {
+      "name": "gray_wool_stairs",
+      "id": 174,
+      "default_state_id": 2996,
+      "hardness": 0.8
+    },
+    {
+      "name": "light_gray_wool_stairs",
+      "id": 175,
+      "default_state_id": 3076,
+      "hardness": 0.8
+    },
+    {
+      "name": "cyan_wool_stairs",
+      "id": 176,
+      "default_state_id": 3156,
+      "hardness": 0.8
+    },
+    {
+      "name": "purple_wool_stairs",
+      "id": 177,
+      "default_state_id": 3236,
+      "hardness": 0.8
+    },
+    {
+      "name": "blue_wool_stairs",
+      "id": 178,
+      "default_state_id": 3316,
+      "hardness": 0.8
+    },
+    {
+      "name": "brown_wool_stairs",
+      "id": 179,
+      "default_state_id": 3396,
+      "hardness": 0.8
+    },
+    {
+      "name": "green_wool_stairs",
+      "id": 180,
+      "default_state_id": 3476,
+      "hardness": 0.8
+    },
+    {
+      "name": "red_wool_stairs",
+      "id": 181,
+      "default_state_id": 3556,
+      "hardness": 0.8
+    },
+    {
+      "name": "black_wool_stairs",
+      "id": 182,
+      "default_state_id": 3636,
+      "hardness": 0.8
+    },
+    {
+      "name": "white_wool_slab",
+      "id": 183,
+      "default_state_id": 3708,
+      "hardness": 0.8
+    },
+    {
+      "name": "orange_wool_slab",
+      "id": 184,
+      "default_state_id": 3714,
+      "hardness": 0.8
+    },
+    {
+      "name": "magenta_wool_slab",
+      "id": 185,
+      "default_state_id": 3720,
+      "hardness": 0.8
+    },
+    {
+      "name": "light_blue_wool_slab",
+      "id": 186,
+      "default_state_id": 3726,
+      "hardness": 0.8
+    },
+    {
+      "name": "yellow_wool_slab",
+      "id": 187,
+      "default_state_id": 3732,
+      "hardness": 0.8
+    },
+    {
+      "name": "lime_wool_slab",
+      "id": 188,
+      "default_state_id": 3738,
+      "hardness": 0.8
+    },
+    {
+      "name": "pink_wool_slab",
+      "id": 189,
+      "default_state_id": 3744,
+      "hardness": 0.8
+    },
+    {
+      "name": "gray_wool_slab",
+      "id": 190,
+      "default_state_id": 3750,
+      "hardness": 0.8
+    },
+    {
+      "name": "light_gray_wool_slab",
+      "id": 191,
+      "default_state_id": 3756,
+      "hardness": 0.8
+    },
+    {
+      "name": "cyan_wool_slab",
+      "id": 192,
+      "default_state_id": 3762,
+      "hardness": 0.8
+    },
+    {
+      "name": "purple_wool_slab",
+      "id": 193,
+      "default_state_id": 3768,
+      "hardness": 0.8
+    },
+    {
+      "name": "blue_wool_slab",
+      "id": 194,
+      "default_state_id": 3774,
+      "hardness": 0.8
+    },
+    {
+      "name": "brown_wool_slab",
+      "id": 195,
+      "default_state_id": 3780,
+      "hardness": 0.8
+    },
+    {
+      "name": "green_wool_slab",
+      "id": 196,
+      "default_state_id": 3786,
+      "hardness": 0.8
+    },
+    {
+      "name": "red_wool_slab",
+      "id": 197,
+      "default_state_id": 3792,
+      "hardness": 0.8
+    },
+    {
+      "name": "black_wool_slab",
+      "id": 198,
+      "default_state_id": 3798,
+      "hardness": 0.8
+    },
+    {
+      "name": "moving_piston",
+      "id": 199,
+      "default_state_id": 3801,
+      "hardness": -1.0
+    },
+    {
+      "name": "dandelion",
+      "id": 200,
+      "default_state_id": 3813,
+      "hardness": 0.0
+    },
+    {
+      "name": "golden_dandelion",
+      "id": 201,
+      "default_state_id": 3814,
+      "hardness": 0.0
+    },
+    {
+      "name": "torchflower",
+      "id": 202,
+      "default_state_id": 3815,
+      "hardness": 0.0
+    },
+    {
+      "name": "poppy",
+      "id": 203,
+      "default_state_id": 3816,
+      "hardness": 0.0
+    },
+    {
+      "name": "blue_orchid",
+      "id": 204,
+      "default_state_id": 3817,
+      "hardness": 0.0
+    },
+    {
+      "name": "allium",
+      "id": 205,
+      "default_state_id": 3818,
+      "hardness": 0.0
+    },
+    {
+      "name": "azure_bluet",
+      "id": 206,
+      "default_state_id": 3819,
+      "hardness": 0.0
+    },
+    {
+      "name": "red_tulip",
+      "id": 207,
+      "default_state_id": 3820,
+      "hardness": 0.0
+    },
+    {
+      "name": "orange_tulip",
+      "id": 208,
+      "default_state_id": 3821,
+      "hardness": 0.0
+    },
+    {
+      "name": "white_tulip",
+      "id": 209,
+      "default_state_id": 3822,
+      "hardness": 0.0
+    },
+    {
+      "name": "pink_tulip",
+      "id": 210,
+      "default_state_id": 3823,
+      "hardness": 0.0
+    },
+    {
+      "name": "oxeye_daisy",
+      "id": 211,
+      "default_state_id": 3824,
+      "hardness": 0.0
+    },
+    {
+      "name": "cornflower",
+      "id": 212,
+      "default_state_id": 3825,
+      "hardness": 0.0
+    },
+    {
+      "name": "wither_rose",
+      "id": 213,
+      "default_state_id": 3826,
+      "hardness": 0.0
+    },
+    {
+      "name": "lily_of_the_valley",
+      "id": 214,
+      "default_state_id": 3827,
+      "hardness": 0.0
+    },
+    {
+      "name": "brown_mushroom",
+      "id": 215,
+      "default_state_id": 3828,
+      "hardness": 0.0
+    },
+    {
+      "name": "red_mushroom",
+      "id": 216,
+      "default_state_id": 3829,
+      "hardness": 0.0
+    },
+    {
+      "name": "gold_block",
+      "id": 217,
+      "default_state_id": 3830,
+      "hardness": 3.0
+    },
+    {
+      "name": "iron_block",
+      "id": 218,
+      "default_state_id": 3831,
+      "hardness": 5.0
+    },
+    {
+      "name": "bricks",
+      "id": 219,
+      "default_state_id": 3832,
+      "hardness": 2.0
+    },
+    {
+      "name": "tnt",
+      "id": 220,
+      "default_state_id": 3834,
+      "hardness": 0.0
+    },
+    {
+      "name": "bookshelf",
+      "id": 221,
+      "default_state_id": 3835,
+      "hardness": 1.5
+    },
+    {
+      "name": "chiseled_bookshelf",
+      "id": 222,
+      "default_state_id": 3899,
+      "hardness": 1.5
+    },
+    {
+      "name": "acacia_shelf",
+      "id": 223,
+      "default_state_id": 4101,
+      "hardness": 2.0
+    },
+    {
+      "name": "bamboo_shelf",
+      "id": 224,
+      "default_state_id": 4165,
+      "hardness": 2.0
+    },
+    {
+      "name": "birch_shelf",
+      "id": 225,
+      "default_state_id": 4229,
+      "hardness": 2.0
+    },
+    {
+      "name": "cherry_shelf",
+      "id": 226,
+      "default_state_id": 4293,
+      "hardness": 2.0
+    },
+    {
+      "name": "crimson_shelf",
+      "id": 227,
+      "default_state_id": 4357,
+      "hardness": 2.0
+    },
+    {
+      "name": "dark_oak_shelf",
+      "id": 228,
+      "default_state_id": 4421,
+      "hardness": 2.0
+    },
+    {
+      "name": "jungle_shelf",
+      "id": 229,
+      "default_state_id": 4485,
+      "hardness": 2.0
+    },
+    {
+      "name": "mangrove_shelf",
+      "id": 230,
+      "default_state_id": 4549,
+      "hardness": 2.0
+    },
+    {
+      "name": "oak_shelf",
+      "id": 231,
+      "default_state_id": 4613,
+      "hardness": 2.0
+    },
+    {
+      "name": "pale_oak_shelf",
+      "id": 232,
+      "default_state_id": 4677,
+      "hardness": 2.0
+    },
+    {
+      "name": "poplar_shelf",
+      "id": 233,
+      "default_state_id": 4741,
+      "hardness": 2.0
+    },
+    {
+      "name": "spruce_shelf",
+      "id": 234,
+      "default_state_id": 4805,
+      "hardness": 2.0
+    },
+    {
+      "name": "warped_shelf",
+      "id": 235,
+      "default_state_id": 4869,
+      "hardness": 2.0
+    },
+    {
+      "name": "mossy_cobblestone",
+      "id": 236,
+      "default_state_id": 4924,
+      "hardness": 2.0
+    },
+    {
+      "name": "obsidian",
+      "id": 237,
+      "default_state_id": 4925,
+      "hardness": 50.0
+    },
+    {
+      "name": "torch",
+      "id": 238,
+      "default_state_id": 4926,
+      "hardness": 0.0
+    },
+    {
+      "name": "wall_torch",
+      "id": 239,
+      "default_state_id": 4927,
+      "hardness": 0.0
+    },
+    {
+      "name": "fire",
+      "id": 240,
+      "default_state_id": 4962,
+      "hardness": 0.0
+    },
+    {
+      "name": "soul_fire",
+      "id": 241,
+      "default_state_id": 5443,
+      "hardness": 0.0
+    },
+    {
+      "name": "spawner",
+      "id": 242,
+      "default_state_id": 5444,
+      "hardness": 5.0
+    },
+    {
+      "name": "creaking_heart",
+      "id": 243,
+      "default_state_id": 5452,
+      "hardness": 10.0
+    },
+    {
+      "name": "oak_stairs",
+      "id": 244,
+      "default_state_id": 5474,
+      "hardness": 2.0
+    },
+    {
+      "name": "chest",
+      "id": 245,
+      "default_state_id": 5544,
+      "hardness": 2.5
+    },
+    {
+      "name": "redstone_wire",
+      "id": 246,
+      "default_state_id": 6727,
+      "hardness": 0.0
+    },
+    {
+      "name": "diamond_ore",
+      "id": 247,
+      "default_state_id": 6863,
+      "hardness": 3.0
+    },
+    {
+      "name": "deepslate_diamond_ore",
+      "id": 248,
+      "default_state_id": 6864,
+      "hardness": 4.5
+    },
+    {
+      "name": "diamond_block",
+      "id": 249,
+      "default_state_id": 6865,
+      "hardness": 5.0
+    },
+    {
+      "name": "crafting_table",
+      "id": 250,
+      "default_state_id": 6866,
+      "hardness": 2.5
+    },
+    {
+      "name": "wheat",
+      "id": 251,
+      "default_state_id": 6867,
+      "hardness": 0.0
+    },
+    {
+      "name": "farmland",
+      "id": 252,
+      "default_state_id": 6875,
+      "hardness": 0.6
+    },
+    {
+      "name": "furnace",
+      "id": 253,
+      "default_state_id": 6884,
+      "hardness": 3.5
+    },
+    {
+      "name": "oak_sign",
+      "id": 254,
+      "default_state_id": 6908,
+      "hardness": 1.0
+    },
+    {
+      "name": "spruce_sign",
+      "id": 255,
+      "default_state_id": 6940,
+      "hardness": 1.0
+    },
+    {
+      "name": "birch_sign",
+      "id": 256,
+      "default_state_id": 6972,
+      "hardness": 1.0
+    },
+    {
+      "name": "acacia_sign",
+      "id": 257,
+      "default_state_id": 7004,
+      "hardness": 1.0
+    },
+    {
+      "name": "cherry_sign",
+      "id": 258,
+      "default_state_id": 7036,
+      "hardness": 1.0
+    },
+    {
+      "name": "jungle_sign",
+      "id": 259,
+      "default_state_id": 7068,
+      "hardness": 1.0
+    },
+    {
+      "name": "dark_oak_sign",
+      "id": 260,
+      "default_state_id": 7100,
+      "hardness": 1.0
+    },
+    {
+      "name": "pale_oak_sign",
+      "id": 261,
+      "default_state_id": 7132,
+      "hardness": 1.0
+    },
+    {
+      "name": "mangrove_sign",
+      "id": 262,
+      "default_state_id": 7164,
+      "hardness": 1.0
+    },
+    {
+      "name": "poplar_sign",
+      "id": 263,
+      "default_state_id": 7196,
+      "hardness": 1.0
+    },
+    {
+      "name": "bamboo_sign",
+      "id": 264,
+      "default_state_id": 7228,
+      "hardness": 1.0
+    },
+    {
+      "name": "oak_door",
+      "id": 265,
+      "default_state_id": 7254,
+      "hardness": 3.0
+    },
+    {
+      "name": "ladder",
+      "id": 266,
+      "default_state_id": 7308,
+      "hardness": 0.4
+    },
+    {
+      "name": "rail",
+      "id": 267,
+      "default_state_id": 7316,
+      "hardness": 0.7
+    },
+    {
+      "name": "cobblestone_stairs",
+      "id": 268,
+      "default_state_id": 7346,
+      "hardness": 2.0
+    },
+    {
+      "name": "oak_wall_sign",
+      "id": 269,
+      "default_state_id": 7416,
+      "hardness": 1.0
+    },
+    {
+      "name": "spruce_wall_sign",
+      "id": 270,
+      "default_state_id": 7424,
+      "hardness": 1.0
+    },
+    {
+      "name": "birch_wall_sign",
+      "id": 271,
+      "default_state_id": 7432,
+      "hardness": 1.0
+    },
+    {
+      "name": "acacia_wall_sign",
+      "id": 272,
+      "default_state_id": 7440,
+      "hardness": 1.0
+    },
+    {
+      "name": "cherry_wall_sign",
+      "id": 273,
+      "default_state_id": 7448,
+      "hardness": 1.0
+    },
+    {
+      "name": "jungle_wall_sign",
+      "id": 274,
+      "default_state_id": 7456,
+      "hardness": 1.0
+    },
+    {
+      "name": "dark_oak_wall_sign",
+      "id": 275,
+      "default_state_id": 7464,
+      "hardness": 1.0
+    },
+    {
+      "name": "pale_oak_wall_sign",
+      "id": 276,
+      "default_state_id": 7472,
+      "hardness": 1.0
+    },
+    {
+      "name": "mangrove_wall_sign",
+      "id": 277,
+      "default_state_id": 7480,
+      "hardness": 1.0
+    },
+    {
+      "name": "poplar_wall_sign",
+      "id": 278,
+      "default_state_id": 7488,
+      "hardness": 1.0
+    },
+    {
+      "name": "bamboo_wall_sign",
+      "id": 279,
+      "default_state_id": 7496,
+      "hardness": 1.0
+    },
+    {
+      "name": "oak_hanging_sign",
+      "id": 280,
+      "default_state_id": 7552,
+      "hardness": 1.0
+    },
+    {
+      "name": "spruce_hanging_sign",
+      "id": 281,
+      "default_state_id": 7616,
+      "hardness": 1.0
+    },
+    {
+      "name": "birch_hanging_sign",
+      "id": 282,
+      "default_state_id": 7680,
+      "hardness": 1.0
+    },
+    {
+      "name": "acacia_hanging_sign",
+      "id": 283,
+      "default_state_id": 7744,
+      "hardness": 1.0
+    },
+    {
+      "name": "cherry_hanging_sign",
+      "id": 284,
+      "default_state_id": 7808,
+      "hardness": 1.0
+    },
+    {
+      "name": "jungle_hanging_sign",
+      "id": 285,
+      "default_state_id": 7872,
+      "hardness": 1.0
+    },
+    {
+      "name": "dark_oak_hanging_sign",
+      "id": 286,
+      "default_state_id": 7936,
+      "hardness": 1.0
+    },
+    {
+      "name": "pale_oak_hanging_sign",
+      "id": 287,
+      "default_state_id": 8000,
+      "hardness": 1.0
+    },
+    {
+      "name": "crimson_hanging_sign",
+      "id": 288,
+      "default_state_id": 8064,
+      "hardness": 1.0
+    },
+    {
+      "name": "warped_hanging_sign",
+      "id": 289,
+      "default_state_id": 8128,
+      "hardness": 1.0
+    },
+    {
+      "name": "mangrove_hanging_sign",
+      "id": 290,
+      "default_state_id": 8192,
+      "hardness": 1.0
+    },
+    {
+      "name": "poplar_hanging_sign",
+      "id": 291,
+      "default_state_id": 8256,
+      "hardness": 1.0
+    },
+    {
+      "name": "bamboo_hanging_sign",
+      "id": 292,
+      "default_state_id": 8320,
+      "hardness": 1.0
+    },
+    {
+      "name": "oak_wall_hanging_sign",
+      "id": 293,
+      "default_state_id": 8336,
+      "hardness": 1.0
+    },
+    {
+      "name": "spruce_wall_hanging_sign",
+      "id": 294,
+      "default_state_id": 8344,
+      "hardness": 1.0
+    },
+    {
+      "name": "birch_wall_hanging_sign",
+      "id": 295,
+      "default_state_id": 8352,
+      "hardness": 1.0
+    },
+    {
+      "name": "acacia_wall_hanging_sign",
+      "id": 296,
+      "default_state_id": 8360,
+      "hardness": 1.0
+    },
+    {
+      "name": "cherry_wall_hanging_sign",
+      "id": 297,
+      "default_state_id": 8368,
+      "hardness": 1.0
+    },
+    {
+      "name": "jungle_wall_hanging_sign",
+      "id": 298,
+      "default_state_id": 8376,
+      "hardness": 1.0
+    },
+    {
+      "name": "dark_oak_wall_hanging_sign",
+      "id": 299,
+      "default_state_id": 8384,
+      "hardness": 1.0
+    },
+    {
+      "name": "pale_oak_wall_hanging_sign",
+      "id": 300,
+      "default_state_id": 8392,
+      "hardness": 1.0
+    },
+    {
+      "name": "mangrove_wall_hanging_sign",
+      "id": 301,
+      "default_state_id": 8400,
+      "hardness": 1.0
+    },
+    {
+      "name": "poplar_wall_hanging_sign",
+      "id": 302,
+      "default_state_id": 8408,
+      "hardness": 1.0
+    },
+    {
+      "name": "crimson_wall_hanging_sign",
+      "id": 303,
+      "default_state_id": 8416,
+      "hardness": 1.0
+    },
+    {
+      "name": "warped_wall_hanging_sign",
+      "id": 304,
+      "default_state_id": 8424,
+      "hardness": 1.0
+    },
+    {
+      "name": "bamboo_wall_hanging_sign",
+      "id": 305,
+      "default_state_id": 8432,
+      "hardness": 1.0
+    },
+    {
+      "name": "lever",
+      "id": 306,
+      "default_state_id": 8448,
+      "hardness": 0.5
+    },
+    {
+      "name": "stone_pressure_plate",
+      "id": 307,
+      "default_state_id": 8464,
+      "hardness": 0.5
+    },
+    {
+      "name": "iron_door",
+      "id": 308,
+      "default_state_id": 8476,
+      "hardness": 5.0
+    },
+    {
+      "name": "oak_pressure_plate",
+      "id": 309,
+      "default_state_id": 8530,
+      "hardness": 0.5
+    },
+    {
+      "name": "spruce_pressure_plate",
+      "id": 310,
+      "default_state_id": 8532,
+      "hardness": 0.5
+    },
+    {
+      "name": "birch_pressure_plate",
+      "id": 311,
+      "default_state_id": 8534,
+      "hardness": 0.5
+    },
+    {
+      "name": "jungle_pressure_plate",
+      "id": 312,
+      "default_state_id": 8536,
+      "hardness": 0.5
+    },
+    {
+      "name": "acacia_pressure_plate",
+      "id": 313,
+      "default_state_id": 8538,
+      "hardness": 0.5
+    },
+    {
+      "name": "cherry_pressure_plate",
+      "id": 314,
+      "default_state_id": 8540,
+      "hardness": 0.5
+    },
+    {
+      "name": "dark_oak_pressure_plate",
+      "id": 315,
+      "default_state_id": 8542,
+      "hardness": 0.5
+    },
+    {
+      "name": "pale_oak_pressure_plate",
+      "id": 316,
+      "default_state_id": 8544,
+      "hardness": 0.5
+    },
+    {
+      "name": "mangrove_pressure_plate",
+      "id": 317,
+      "default_state_id": 8546,
+      "hardness": 0.5
+    },
+    {
+      "name": "poplar_pressure_plate",
+      "id": 318,
+      "default_state_id": 8548,
+      "hardness": 0.5
+    },
+    {
+      "name": "bamboo_pressure_plate",
+      "id": 319,
+      "default_state_id": 8550,
+      "hardness": 0.5
+    },
+    {
+      "name": "redstone_ore",
+      "id": 320,
+      "default_state_id": 8552,
+      "hardness": 3.0
+    },
+    {
+      "name": "deepslate_redstone_ore",
+      "id": 321,
+      "default_state_id": 8554,
+      "hardness": 4.5
+    },
+    {
+      "name": "redstone_torch",
+      "id": 322,
+      "default_state_id": 8555,
+      "hardness": 0.0
+    },
+    {
+      "name": "redstone_wall_torch",
+      "id": 323,
+      "default_state_id": 8557,
+      "hardness": 0.0
+    },
+    {
+      "name": "stone_button",
+      "id": 324,
+      "default_state_id": 8574,
+      "hardness": 0.5
+    },
+    {
+      "name": "snow",
+      "id": 325,
+      "default_state_id": 8589,
+      "hardness": 0.1
+    },
+    {
+      "name": "ice",
+      "id": 326,
+      "default_state_id": 8597,
+      "hardness": 0.5
+    },
+    {
+      "name": "snow_block",
+      "id": 327,
+      "default_state_id": 8598,
+      "hardness": 0.2
+    },
+    {
+      "name": "cactus",
+      "id": 328,
+      "default_state_id": 8599,
+      "hardness": 0.4
+    },
+    {
+      "name": "cactus_flower",
+      "id": 329,
+      "default_state_id": 8615,
+      "hardness": 0.0
+    },
+    {
+      "name": "clay",
+      "id": 330,
+      "default_state_id": 8616,
+      "hardness": 0.6
+    },
+    {
+      "name": "sugar_cane",
+      "id": 331,
+      "default_state_id": 8617,
+      "hardness": 0.0
+    },
+    {
+      "name": "jukebox",
+      "id": 332,
+      "default_state_id": 8634,
+      "hardness": 2.0
+    },
+    {
+      "name": "oak_fence",
+      "id": 333,
+      "default_state_id": 8666,
+      "hardness": 2.0
+    },
+    {
+      "name": "netherrack",
+      "id": 334,
+      "default_state_id": 8667,
+      "hardness": 0.4
+    },
+    {
+      "name": "soul_sand",
+      "id": 335,
+      "default_state_id": 8668,
+      "hardness": 0.5
+    },
+    {
+      "name": "soul_soil",
+      "id": 336,
+      "default_state_id": 8669,
+      "hardness": 0.5
+    },
+    {
+      "name": "basalt",
+      "id": 337,
+      "default_state_id": 8671,
+      "hardness": 1.25
+    },
+    {
+      "name": "polished_basalt",
+      "id": 338,
+      "default_state_id": 8674,
+      "hardness": 1.25
+    },
+    {
+      "name": "soul_torch",
+      "id": 339,
+      "default_state_id": 8676,
+      "hardness": 0.0
+    },
+    {
+      "name": "soul_wall_torch",
+      "id": 340,
+      "default_state_id": 8677,
+      "hardness": 0.0
+    },
+    {
+      "name": "copper_torch",
+      "id": 341,
+      "default_state_id": 8681,
+      "hardness": 0.0
+    },
+    {
+      "name": "copper_wall_torch",
+      "id": 342,
+      "default_state_id": 8682,
+      "hardness": 0.0
+    },
+    {
+      "name": "glowstone",
+      "id": 343,
+      "default_state_id": 8686,
+      "hardness": 0.3
+    },
+    {
+      "name": "nether_portal",
+      "id": 344,
+      "default_state_id": 8687,
+      "hardness": -1.0
+    },
+    {
+      "name": "carved_pumpkin",
+      "id": 345,
+      "default_state_id": 8689,
+      "hardness": 1.0
+    },
+    {
+      "name": "jack_o_lantern",
+      "id": 346,
+      "default_state_id": 8693,
+      "hardness": 1.0
+    },
+    {
+      "name": "cake",
+      "id": 347,
+      "default_state_id": 8697,
+      "hardness": 0.5
+    },
+    {
+      "name": "repeater",
+      "id": 348,
+      "default_state_id": 8707,
+      "hardness": 0.0
+    },
+    {
+      "name": "white_stained_glass",
+      "id": 349,
+      "default_state_id": 8768,
+      "hardness": 0.3
+    },
+    {
+      "name": "orange_stained_glass",
+      "id": 350,
+      "default_state_id": 8769,
+      "hardness": 0.3
+    },
+    {
+      "name": "magenta_stained_glass",
+      "id": 351,
+      "default_state_id": 8770,
+      "hardness": 0.3
+    },
+    {
+      "name": "light_blue_stained_glass",
+      "id": 352,
+      "default_state_id": 8771,
+      "hardness": 0.3
+    },
+    {
+      "name": "yellow_stained_glass",
+      "id": 353,
+      "default_state_id": 8772,
+      "hardness": 0.3
+    },
+    {
+      "name": "lime_stained_glass",
+      "id": 354,
+      "default_state_id": 8773,
+      "hardness": 0.3
+    },
+    {
+      "name": "pink_stained_glass",
+      "id": 355,
+      "default_state_id": 8774,
+      "hardness": 0.3
+    },
+    {
+      "name": "gray_stained_glass",
+      "id": 356,
+      "default_state_id": 8775,
+      "hardness": 0.3
+    },
+    {
+      "name": "light_gray_stained_glass",
+      "id": 357,
+      "default_state_id": 8776,
+      "hardness": 0.3
+    },
+    {
+      "name": "cyan_stained_glass",
+      "id": 358,
+      "default_state_id": 8777,
+      "hardness": 0.3
+    },
+    {
+      "name": "purple_stained_glass",
+      "id": 359,
+      "default_state_id": 8778,
+      "hardness": 0.3
+    },
+    {
+      "name": "blue_stained_glass",
+      "id": 360,
+      "default_state_id": 8779,
+      "hardness": 0.3
+    },
+    {
+      "name": "brown_stained_glass",
+      "id": 361,
+      "default_state_id": 8780,
+      "hardness": 0.3
+    },
+    {
+      "name": "green_stained_glass",
+      "id": 362,
+      "default_state_id": 8781,
+      "hardness": 0.3
+    },
+    {
+      "name": "red_stained_glass",
+      "id": 363,
+      "default_state_id": 8782,
+      "hardness": 0.3
+    },
+    {
+      "name": "black_stained_glass",
+      "id": 364,
+      "default_state_id": 8783,
+      "hardness": 0.3
+    },
+    {
+      "name": "oak_trapdoor",
+      "id": 365,
+      "default_state_id": 8799,
+      "hardness": 3.0
+    },
+    {
+      "name": "spruce_trapdoor",
+      "id": 366,
+      "default_state_id": 8863,
+      "hardness": 3.0
+    },
+    {
+      "name": "birch_trapdoor",
+      "id": 367,
+      "default_state_id": 8927,
+      "hardness": 3.0
+    },
+    {
+      "name": "jungle_trapdoor",
+      "id": 368,
+      "default_state_id": 8991,
+      "hardness": 3.0
+    },
+    {
+      "name": "acacia_trapdoor",
+      "id": 369,
+      "default_state_id": 9055,
+      "hardness": 3.0
+    },
+    {
+      "name": "cherry_trapdoor",
+      "id": 370,
+      "default_state_id": 9119,
+      "hardness": 3.0
+    },
+    {
+      "name": "dark_oak_trapdoor",
+      "id": 371,
+      "default_state_id": 9183,
+      "hardness": 3.0
+    },
+    {
+      "name": "pale_oak_trapdoor",
+      "id": 372,
+      "default_state_id": 9247,
+      "hardness": 3.0
+    },
+    {
+      "name": "mangrove_trapdoor",
+      "id": 373,
+      "default_state_id": 9311,
+      "hardness": 3.0
+    },
+    {
+      "name": "poplar_trapdoor",
+      "id": 374,
+      "default_state_id": 9375,
+      "hardness": 3.0
+    },
+    {
+      "name": "bamboo_trapdoor",
+      "id": 375,
+      "default_state_id": 9439,
+      "hardness": 3.0
+    },
+    {
+      "name": "stone_bricks",
+      "id": 376,
+      "default_state_id": 9488,
+      "hardness": 1.5
+    },
+    {
+      "name": "mossy_stone_bricks",
+      "id": 377,
+      "default_state_id": 9489,
+      "hardness": 1.5
+    },
+    {
+      "name": "cracked_stone_bricks",
+      "id": 378,
+      "default_state_id": 9490,
+      "hardness": 1.5
+    },
+    {
+      "name": "chiseled_stone_bricks",
+      "id": 379,
+      "default_state_id": 9491,
+      "hardness": 1.5
+    },
+    {
+      "name": "packed_mud",
+      "id": 380,
+      "default_state_id": 9492,
+      "hardness": 1.0
+    },
+    {
+      "name": "mud_bricks",
+      "id": 381,
+      "default_state_id": 9493,
+      "hardness": 1.5
+    },
+    {
+      "name": "infested_stone",
+      "id": 382,
+      "default_state_id": 9494,
+      "hardness": 0.75
+    },
+    {
+      "name": "infested_cobblestone",
+      "id": 383,
+      "default_state_id": 9495,
+      "hardness": 1.0
+    },
+    {
+      "name": "infested_stone_bricks",
+      "id": 384,
+      "default_state_id": 9496,
+      "hardness": 0.75
+    },
+    {
+      "name": "infested_mossy_stone_bricks",
+      "id": 385,
+      "default_state_id": 9497,
+      "hardness": 0.75
+    },
+    {
+      "name": "infested_cracked_stone_bricks",
+      "id": 386,
+      "default_state_id": 9498,
+      "hardness": 0.75
+    },
+    {
+      "name": "infested_chiseled_stone_bricks",
+      "id": 387,
+      "default_state_id": 9499,
+      "hardness": 0.75
+    },
+    {
+      "name": "brown_mushroom_block",
+      "id": 388,
+      "default_state_id": 9500,
+      "hardness": 0.2
+    },
+    {
+      "name": "red_mushroom_block",
+      "id": 389,
+      "default_state_id": 9564,
+      "hardness": 0.2
+    },
+    {
+      "name": "mushroom_stem",
+      "id": 390,
+      "default_state_id": 9628,
+      "hardness": 0.2
+    },
+    {
+      "name": "iron_bars",
+      "id": 391,
+      "default_state_id": 9723,
+      "hardness": 5.0
+    },
+    {
+      "name": "copper_bars",
+      "id": 392,
+      "default_state_id": 9755,
+      "hardness": 5.0
+    },
+    {
+      "name": "exposed_copper_bars",
+      "id": 393,
+      "default_state_id": 9787,
+      "hardness": 5.0
+    },
+    {
+      "name": "weathered_copper_bars",
+      "id": 394,
+      "default_state_id": 9819,
+      "hardness": 5.0
+    },
+    {
+      "name": "oxidized_copper_bars",
+      "id": 395,
+      "default_state_id": 9851,
+      "hardness": 5.0
+    },
+    {
+      "name": "waxed_copper_bars",
+      "id": 396,
+      "default_state_id": 9883,
+      "hardness": 5.0
+    },
+    {
+      "name": "waxed_exposed_copper_bars",
+      "id": 397,
+      "default_state_id": 9915,
+      "hardness": 5.0
+    },
+    {
+      "name": "waxed_weathered_copper_bars",
+      "id": 398,
+      "default_state_id": 9947,
+      "hardness": 5.0
+    },
+    {
+      "name": "waxed_oxidized_copper_bars",
+      "id": 399,
+      "default_state_id": 9979,
+      "hardness": 5.0
+    },
+    {
+      "name": "iron_chain",
+      "id": 400,
+      "default_state_id": 9983,
+      "hardness": 5.0
+    },
+    {
+      "name": "copper_chain",
+      "id": 401,
+      "default_state_id": 9989,
+      "hardness": 5.0
+    },
+    {
+      "name": "exposed_copper_chain",
+      "id": 402,
+      "default_state_id": 9995,
+      "hardness": 5.0
+    },
+    {
+      "name": "weathered_copper_chain",
+      "id": 403,
+      "default_state_id": 10001,
+      "hardness": 5.0
+    },
+    {
+      "name": "oxidized_copper_chain",
+      "id": 404,
+      "default_state_id": 10007,
+      "hardness": 5.0
+    },
+    {
+      "name": "waxed_copper_chain",
+      "id": 405,
+      "default_state_id": 10013,
+      "hardness": 5.0
+    },
+    {
+      "name": "waxed_exposed_copper_chain",
+      "id": 406,
+      "default_state_id": 10019,
+      "hardness": 5.0
+    },
+    {
+      "name": "waxed_weathered_copper_chain",
+      "id": 407,
+      "default_state_id": 10025,
+      "hardness": 5.0
+    },
+    {
+      "name": "waxed_oxidized_copper_chain",
+      "id": 408,
+      "default_state_id": 10031,
+      "hardness": 5.0
+    },
+    {
+      "name": "glass_pane",
+      "id": 409,
+      "default_state_id": 10065,
+      "hardness": 0.3
+    },
+    {
+      "name": "pumpkin",
+      "id": 410,
+      "default_state_id": 10066,
+      "hardness": 1.0
+    },
+    {
+      "name": "melon",
+      "id": 411,
+      "default_state_id": 10067,
+      "hardness": 1.0
+    },
+    {
+      "name": "attached_pumpkin_stem",
+      "id": 412,
+      "default_state_id": 10068,
+      "hardness": 0.0
+    },
+    {
+      "name": "attached_melon_stem",
+      "id": 413,
+      "default_state_id": 10072,
+      "hardness": 0.0
+    },
+    {
+      "name": "pumpkin_stem",
+      "id": 414,
+      "default_state_id": 10076,
+      "hardness": 0.0
+    },
+    {
+      "name": "melon_stem",
+      "id": 415,
+      "default_state_id": 10084,
+      "hardness": 0.0
+    },
+    {
+      "name": "vine",
+      "id": 416,
+      "default_state_id": 10123,
+      "hardness": 0.2
+    },
+    {
+      "name": "glow_lichen",
+      "id": 417,
+      "default_state_id": 10251,
+      "hardness": 0.2
+    },
+    {
+      "name": "resin_clump",
+      "id": 418,
+      "default_state_id": 10379,
+      "hardness": 0.0
+    },
+    {
+      "name": "oak_fence_gate",
+      "id": 419,
+      "default_state_id": 10387,
+      "hardness": 2.0
+    },
+    {
+      "name": "brick_stairs",
+      "id": 420,
+      "default_state_id": 10423,
+      "hardness": 2.0
+    },
+    {
+      "name": "stone_brick_stairs",
+      "id": 421,
+      "default_state_id": 10503,
+      "hardness": 1.5
+    },
+    {
+      "name": "mud_brick_stairs",
+      "id": 422,
+      "default_state_id": 10583,
+      "hardness": 1.5
+    },
+    {
+      "name": "mycelium",
+      "id": 423,
+      "default_state_id": 10653,
+      "hardness": 0.6
+    },
+    {
+      "name": "lily_pad",
+      "id": 424,
+      "default_state_id": 10654,
+      "hardness": 0.0
+    },
+    {
+      "name": "resin_block",
+      "id": 425,
+      "default_state_id": 10655,
+      "hardness": 0.0
+    },
+    {
+      "name": "resin_bricks",
+      "id": 426,
+      "default_state_id": 10656,
+      "hardness": 1.5
+    },
+    {
+      "name": "resin_brick_stairs",
+      "id": 427,
+      "default_state_id": 10668,
+      "hardness": 1.5
+    },
+    {
+      "name": "resin_brick_slab",
+      "id": 428,
+      "default_state_id": 10740,
+      "hardness": 1.5
+    },
+    {
+      "name": "resin_brick_wall",
+      "id": 429,
+      "default_state_id": 10746,
+      "hardness": 1.5
+    },
+    {
+      "name": "chiseled_resin_bricks",
+      "id": 430,
+      "default_state_id": 11067,
+      "hardness": 1.5
+    },
+    {
+      "name": "nether_bricks",
+      "id": 431,
+      "default_state_id": 11068,
+      "hardness": 2.0
+    },
+    {
+      "name": "nether_brick_fence",
+      "id": 432,
+      "default_state_id": 11100,
+      "hardness": 2.0
+    },
+    {
+      "name": "nether_brick_stairs",
+      "id": 433,
+      "default_state_id": 11112,
+      "hardness": 2.0
+    },
+    {
+      "name": "nether_wart",
+      "id": 434,
+      "default_state_id": 11181,
+      "hardness": 0.0
+    },
+    {
+      "name": "enchanting_table",
+      "id": 435,
+      "default_state_id": 11185,
+      "hardness": 5.0
+    },
+    {
+      "name": "brewing_stand",
+      "id": 436,
+      "default_state_id": 11193,
+      "hardness": 0.5
+    },
+    {
+      "name": "cauldron",
+      "id": 437,
+      "default_state_id": 11194,
+      "hardness": 2.0
+    },
+    {
+      "name": "water_cauldron",
+      "id": 438,
+      "default_state_id": 11195,
+      "hardness": 2.0
+    },
+    {
+      "name": "lava_cauldron",
+      "id": 439,
+      "default_state_id": 11198,
+      "hardness": 2.0
+    },
+    {
+      "name": "powder_snow_cauldron",
+      "id": 440,
+      "default_state_id": 11199,
+      "hardness": 2.0
+    },
+    {
+      "name": "end_portal",
+      "id": 441,
+      "default_state_id": 11202,
+      "hardness": -1.0
+    },
+    {
+      "name": "end_portal_frame",
+      "id": 442,
+      "default_state_id": 11207,
+      "hardness": -1.0
+    },
+    {
+      "name": "end_stone",
+      "id": 443,
+      "default_state_id": 11211,
+      "hardness": 3.0
+    },
+    {
+      "name": "dragon_egg",
+      "id": 444,
+      "default_state_id": 11212,
+      "hardness": 3.0
+    },
+    {
+      "name": "redstone_lamp",
+      "id": 445,
+      "default_state_id": 11214,
+      "hardness": 0.3
+    },
+    {
+      "name": "cocoa",
+      "id": 446,
+      "default_state_id": 11215,
+      "hardness": 0.2
+    },
+    {
+      "name": "shelf_mushroom",
+      "id": 447,
+      "default_state_id": 11227,
+      "hardness": 0.0
+    },
+    {
+      "name": "sandstone_stairs",
+      "id": 448,
+      "default_state_id": 11246,
+      "hardness": 0.8
+    },
+    {
+      "name": "emerald_ore",
+      "id": 449,
+      "default_state_id": 11315,
+      "hardness": 3.0
+    },
+    {
+      "name": "deepslate_emerald_ore",
+      "id": 450,
+      "default_state_id": 11316,
+      "hardness": 4.5
+    },
+    {
+      "name": "ender_chest",
+      "id": 451,
+      "default_state_id": 11318,
+      "hardness": 22.5
+    },
+    {
+      "name": "tripwire_hook",
+      "id": 452,
+      "default_state_id": 11334,
+      "hardness": 0.0
+    },
+    {
+      "name": "tripwire",
+      "id": 453,
+      "default_state_id": 11468,
+      "hardness": 0.0
+    },
+    {
+      "name": "emerald_block",
+      "id": 454,
+      "default_state_id": 11469,
+      "hardness": 5.0
+    },
+    {
+      "name": "spruce_stairs",
+      "id": 455,
+      "default_state_id": 11481,
+      "hardness": 2.0
+    },
+    {
+      "name": "birch_stairs",
+      "id": 456,
+      "default_state_id": 11561,
+      "hardness": 2.0
+    },
+    {
+      "name": "jungle_stairs",
+      "id": 457,
+      "default_state_id": 11641,
+      "hardness": 2.0
+    },
+    {
+      "name": "command_block",
+      "id": 458,
+      "default_state_id": 11716,
+      "hardness": -1.0
+    },
+    {
+      "name": "beacon",
+      "id": 459,
+      "default_state_id": 11722,
+      "hardness": 3.0
+    },
+    {
+      "name": "cobblestone_wall",
+      "id": 460,
+      "default_state_id": 11726,
+      "hardness": 2.0
+    },
+    {
+      "name": "mossy_cobblestone_wall",
+      "id": 461,
+      "default_state_id": 12050,
+      "hardness": 2.0
+    },
+    {
+      "name": "flower_pot",
+      "id": 462,
+      "default_state_id": 12371,
+      "hardness": 0.0
+    },
+    {
+      "name": "potted_torchflower",
+      "id": 463,
+      "default_state_id": 12372,
+      "hardness": 0.0
+    },
+    {
+      "name": "potted_oak_sapling",
+      "id": 464,
+      "default_state_id": 12373,
+      "hardness": 0.0
+    },
+    {
+      "name": "potted_spruce_sapling",
+      "id": 465,
+      "default_state_id": 12374,
+      "hardness": 0.0
+    },
+    {
+      "name": "potted_birch_sapling",
+      "id": 466,
+      "default_state_id": 12375,
+      "hardness": 0.0
+    },
+    {
+      "name": "potted_jungle_sapling",
+      "id": 467,
+      "default_state_id": 12376,
+      "hardness": 0.0
+    },
+    {
+      "name": "potted_acacia_sapling",
+      "id": 468,
+      "default_state_id": 12377,
+      "hardness": 0.0
+    },
+    {
+      "name": "potted_cherry_sapling",
+      "id": 469,
+      "default_state_id": 12378,
+      "hardness": 0.0
+    },
+    {
+      "name": "potted_dark_oak_sapling",
+      "id": 470,
+      "default_state_id": 12379,
+      "hardness": 0.0
+    },
+    {
+      "name": "potted_pale_oak_sapling",
+      "id": 471,
+      "default_state_id": 12380,
+      "hardness": 0.0
+    },
+    {
+      "name": "potted_poplar_sapling",
+      "id": 472,
+      "default_state_id": 12381,
+      "hardness": 0.0
+    },
+    {
+      "name": "potted_mangrove_propagule",
+      "id": 473,
+      "default_state_id": 12382,
+      "hardness": 0.0
+    },
+    {
+      "name": "potted_fern",
+      "id": 474,
+      "default_state_id": 12383,
+      "hardness": 0.0
+    },
+    {
+      "name": "potted_dandelion",
+      "id": 475,
+      "default_state_id": 12384,
+      "hardness": 0.0
+    },
+    {
+      "name": "potted_golden_dandelion",
+      "id": 476,
+      "default_state_id": 12385,
+      "hardness": 0.0
+    },
+    {
+      "name": "potted_poppy",
+      "id": 477,
+      "default_state_id": 12386,
+      "hardness": 0.0
+    },
+    {
+      "name": "potted_blue_orchid",
+      "id": 478,
+      "default_state_id": 12387,
+      "hardness": 0.0
+    },
+    {
+      "name": "potted_allium",
+      "id": 479,
+      "default_state_id": 12388,
+      "hardness": 0.0
+    },
+    {
+      "name": "potted_azure_bluet",
+      "id": 480,
+      "default_state_id": 12389,
+      "hardness": 0.0
+    },
+    {
+      "name": "potted_red_tulip",
+      "id": 481,
+      "default_state_id": 12390,
+      "hardness": 0.0
+    },
+    {
+      "name": "potted_orange_tulip",
+      "id": 482,
+      "default_state_id": 12391,
+      "hardness": 0.0
+    },
+    {
+      "name": "potted_white_tulip",
+      "id": 483,
+      "default_state_id": 12392,
+      "hardness": 0.0
+    },
+    {
+      "name": "potted_pink_tulip",
+      "id": 484,
+      "default_state_id": 12393,
+      "hardness": 0.0
+    },
+    {
+      "name": "potted_oxeye_daisy",
+      "id": 485,
+      "default_state_id": 12394,
+      "hardness": 0.0
+    },
+    {
+      "name": "potted_cornflower",
+      "id": 486,
+      "default_state_id": 12395,
+      "hardness": 0.0
+    },
+    {
+      "name": "potted_lily_of_the_valley",
+      "id": 487,
+      "default_state_id": 12396,
+      "hardness": 0.0
+    },
+    {
+      "name": "potted_wither_rose",
+      "id": 488,
+      "default_state_id": 12397,
+      "hardness": 0.0
+    },
+    {
+      "name": "potted_red_mushroom",
+      "id": 489,
+      "default_state_id": 12398,
+      "hardness": 0.0
+    },
+    {
+      "name": "potted_brown_mushroom",
+      "id": 490,
+      "default_state_id": 12399,
+      "hardness": 0.0
+    },
+    {
+      "name": "potted_dead_bush",
+      "id": 491,
+      "default_state_id": 12400,
+      "hardness": 0.0
+    },
+    {
+      "name": "potted_cactus",
+      "id": 492,
+      "default_state_id": 12401,
+      "hardness": 0.0
+    },
+    {
+      "name": "carrots",
+      "id": 493,
+      "default_state_id": 12402,
+      "hardness": 0.0
+    },
+    {
+      "name": "potatoes",
+      "id": 494,
+      "default_state_id": 12410,
+      "hardness": 0.0
+    },
+    {
+      "name": "oak_button",
+      "id": 495,
+      "default_state_id": 12427,
+      "hardness": 0.5
+    },
+    {
+      "name": "spruce_button",
+      "id": 496,
+      "default_state_id": 12451,
+      "hardness": 0.5
+    },
+    {
+      "name": "birch_button",
+      "id": 497,
+      "default_state_id": 12475,
+      "hardness": 0.5
+    },
+    {
+      "name": "jungle_button",
+      "id": 498,
+      "default_state_id": 12499,
+      "hardness": 0.5
+    },
+    {
+      "name": "acacia_button",
+      "id": 499,
+      "default_state_id": 12523,
+      "hardness": 0.5
+    },
+    {
+      "name": "cherry_button",
+      "id": 500,
+      "default_state_id": 12547,
+      "hardness": 0.5
+    },
+    {
+      "name": "dark_oak_button",
+      "id": 501,
+      "default_state_id": 12571,
+      "hardness": 0.5
+    },
+    {
+      "name": "pale_oak_button",
+      "id": 502,
+      "default_state_id": 12595,
+      "hardness": 0.5
+    },
+    {
+      "name": "mangrove_button",
+      "id": 503,
+      "default_state_id": 12619,
+      "hardness": 0.5
+    },
+    {
+      "name": "poplar_button",
+      "id": 504,
+      "default_state_id": 12643,
+      "hardness": 0.5
+    },
+    {
+      "name": "bamboo_button",
+      "id": 505,
+      "default_state_id": 12667,
+      "hardness": 0.5
+    },
+    {
+      "name": "skeleton_skull",
+      "id": 506,
+      "default_state_id": 12698,
+      "hardness": 1.0
+    },
+    {
+      "name": "skeleton_wall_skull",
+      "id": 507,
+      "default_state_id": 12715,
+      "hardness": 1.0
+    },
+    {
+      "name": "wither_skeleton_skull",
+      "id": 508,
+      "default_state_id": 12738,
+      "hardness": 1.0
+    },
+    {
+      "name": "wither_skeleton_wall_skull",
+      "id": 509,
+      "default_state_id": 12755,
+      "hardness": 1.0
+    },
+    {
+      "name": "zombie_head",
+      "id": 510,
+      "default_state_id": 12778,
+      "hardness": 1.0
+    },
+    {
+      "name": "zombie_wall_head",
+      "id": 511,
+      "default_state_id": 12795,
+      "hardness": 1.0
+    },
+    {
+      "name": "player_head",
+      "id": 512,
+      "default_state_id": 12818,
+      "hardness": 1.0
+    },
+    {
+      "name": "player_wall_head",
+      "id": 513,
+      "default_state_id": 12835,
+      "hardness": 1.0
+    },
+    {
+      "name": "creeper_head",
+      "id": 514,
+      "default_state_id": 12858,
+      "hardness": 1.0
+    },
+    {
+      "name": "creeper_wall_head",
+      "id": 515,
+      "default_state_id": 12875,
+      "hardness": 1.0
+    },
+    {
+      "name": "dragon_head",
+      "id": 516,
+      "default_state_id": 12898,
+      "hardness": 1.0
+    },
+    {
+      "name": "dragon_wall_head",
+      "id": 517,
+      "default_state_id": 12915,
+      "hardness": 1.0
+    },
+    {
+      "name": "piglin_head",
+      "id": 518,
+      "default_state_id": 12938,
+      "hardness": 1.0
+    },
+    {
+      "name": "piglin_wall_head",
+      "id": 519,
+      "default_state_id": 12955,
+      "hardness": 1.0
+    },
+    {
+      "name": "anvil",
+      "id": 520,
+      "default_state_id": 12962,
+      "hardness": 5.0
+    },
+    {
+      "name": "chipped_anvil",
+      "id": 521,
+      "default_state_id": 12966,
+      "hardness": 5.0
+    },
+    {
+      "name": "damaged_anvil",
+      "id": 522,
+      "default_state_id": 12970,
+      "hardness": 5.0
+    },
+    {
+      "name": "trapped_chest",
+      "id": 523,
+      "default_state_id": 12975,
+      "hardness": 2.5
+    },
+    {
+      "name": "light_weighted_pressure_plate",
+      "id": 524,
+      "default_state_id": 12998,
+      "hardness": 0.5
+    },
+    {
+      "name": "heavy_weighted_pressure_plate",
+      "id": 525,
+      "default_state_id": 13014,
+      "hardness": 0.5
+    },
+    {
+      "name": "comparator",
+      "id": 526,
+      "default_state_id": 13031,
+      "hardness": 0.0
+    },
+    {
+      "name": "daylight_detector",
+      "id": 527,
+      "default_state_id": 13062,
+      "hardness": 0.2
+    },
+    {
+      "name": "redstone_block",
+      "id": 528,
+      "default_state_id": 13078,
+      "hardness": 5.0
+    },
+    {
+      "name": "nether_quartz_ore",
+      "id": 529,
+      "default_state_id": 13079,
+      "hardness": 3.0
+    },
+    {
+      "name": "hopper",
+      "id": 530,
+      "default_state_id": 13080,
+      "hardness": 3.0
+    },
+    {
+      "name": "quartz_block",
+      "id": 531,
+      "default_state_id": 13090,
+      "hardness": 0.8
+    },
+    {
+      "name": "chiseled_quartz_block",
+      "id": 532,
+      "default_state_id": 13091,
+      "hardness": 0.8
+    },
+    {
+      "name": "quartz_pillar",
+      "id": 533,
+      "default_state_id": 13093,
+      "hardness": 0.8
+    },
+    {
+      "name": "quartz_stairs",
+      "id": 534,
+      "default_state_id": 13106,
+      "hardness": 0.8
+    },
+    {
+      "name": "activator_rail",
+      "id": 535,
+      "default_state_id": 13188,
+      "hardness": 0.7
+    },
+    {
+      "name": "dropper",
+      "id": 536,
+      "default_state_id": 13200,
+      "hardness": 3.5
+    },
+    {
+      "name": "white_terracotta",
+      "id": 537,
+      "default_state_id": 13211,
+      "hardness": 1.25
+    },
+    {
+      "name": "orange_terracotta",
+      "id": 538,
+      "default_state_id": 13212,
+      "hardness": 1.25
+    },
+    {
+      "name": "magenta_terracotta",
+      "id": 539,
+      "default_state_id": 13213,
+      "hardness": 1.25
+    },
+    {
+      "name": "light_blue_terracotta",
+      "id": 540,
+      "default_state_id": 13214,
+      "hardness": 1.25
+    },
+    {
+      "name": "yellow_terracotta",
+      "id": 541,
+      "default_state_id": 13215,
+      "hardness": 1.25
+    },
+    {
+      "name": "lime_terracotta",
+      "id": 542,
+      "default_state_id": 13216,
+      "hardness": 1.25
+    },
+    {
+      "name": "pink_terracotta",
+      "id": 543,
+      "default_state_id": 13217,
+      "hardness": 1.25
+    },
+    {
+      "name": "gray_terracotta",
+      "id": 544,
+      "default_state_id": 13218,
+      "hardness": 1.25
+    },
+    {
+      "name": "light_gray_terracotta",
+      "id": 545,
+      "default_state_id": 13219,
+      "hardness": 1.25
+    },
+    {
+      "name": "cyan_terracotta",
+      "id": 546,
+      "default_state_id": 13220,
+      "hardness": 1.25
+    },
+    {
+      "name": "purple_terracotta",
+      "id": 547,
+      "default_state_id": 13221,
+      "hardness": 1.25
+    },
+    {
+      "name": "blue_terracotta",
+      "id": 548,
+      "default_state_id": 13222,
+      "hardness": 1.25
+    },
+    {
+      "name": "brown_terracotta",
+      "id": 549,
+      "default_state_id": 13223,
+      "hardness": 1.25
+    },
+    {
+      "name": "green_terracotta",
+      "id": 550,
+      "default_state_id": 13224,
+      "hardness": 1.25
+    },
+    {
+      "name": "red_terracotta",
+      "id": 551,
+      "default_state_id": 13225,
+      "hardness": 1.25
+    },
+    {
+      "name": "black_terracotta",
+      "id": 552,
+      "default_state_id": 13226,
+      "hardness": 1.25
+    },
+    {
+      "name": "white_stained_glass_pane",
+      "id": 553,
+      "default_state_id": 13258,
+      "hardness": 0.3
+    },
+    {
+      "name": "orange_stained_glass_pane",
+      "id": 554,
+      "default_state_id": 13290,
+      "hardness": 0.3
+    },
+    {
+      "name": "magenta_stained_glass_pane",
+      "id": 555,
+      "default_state_id": 13322,
+      "hardness": 0.3
+    },
+    {
+      "name": "light_blue_stained_glass_pane",
+      "id": 556,
+      "default_state_id": 13354,
+      "hardness": 0.3
+    },
+    {
+      "name": "yellow_stained_glass_pane",
+      "id": 557,
+      "default_state_id": 13386,
+      "hardness": 0.3
+    },
+    {
+      "name": "lime_stained_glass_pane",
+      "id": 558,
+      "default_state_id": 13418,
+      "hardness": 0.3
+    },
+    {
+      "name": "pink_stained_glass_pane",
+      "id": 559,
+      "default_state_id": 13450,
+      "hardness": 0.3
+    },
+    {
+      "name": "gray_stained_glass_pane",
+      "id": 560,
+      "default_state_id": 13482,
+      "hardness": 0.3
+    },
+    {
+      "name": "light_gray_stained_glass_pane",
+      "id": 561,
+      "default_state_id": 13514,
+      "hardness": 0.3
+    },
+    {
+      "name": "cyan_stained_glass_pane",
+      "id": 562,
+      "default_state_id": 13546,
+      "hardness": 0.3
+    },
+    {
+      "name": "purple_stained_glass_pane",
+      "id": 563,
+      "default_state_id": 13578,
+      "hardness": 0.3
+    },
+    {
+      "name": "blue_stained_glass_pane",
+      "id": 564,
+      "default_state_id": 13610,
+      "hardness": 0.3
+    },
+    {
+      "name": "brown_stained_glass_pane",
+      "id": 565,
+      "default_state_id": 13642,
+      "hardness": 0.3
+    },
+    {
+      "name": "green_stained_glass_pane",
+      "id": 566,
+      "default_state_id": 13674,
+      "hardness": 0.3
+    },
+    {
+      "name": "red_stained_glass_pane",
+      "id": 567,
+      "default_state_id": 13706,
+      "hardness": 0.3
+    },
+    {
+      "name": "black_stained_glass_pane",
+      "id": 568,
+      "default_state_id": 13738,
+      "hardness": 0.3
+    },
+    {
+      "name": "acacia_stairs",
+      "id": 569,
+      "default_state_id": 13750,
+      "hardness": 2.0
+    },
+    {
+      "name": "cherry_stairs",
+      "id": 570,
+      "default_state_id": 13830,
+      "hardness": 2.0
+    },
+    {
+      "name": "dark_oak_stairs",
+      "id": 571,
+      "default_state_id": 13910,
+      "hardness": 2.0
+    },
+    {
+      "name": "pale_oak_stairs",
+      "id": 572,
+      "default_state_id": 13990,
+      "hardness": 2.0
+    },
+    {
+      "name": "mangrove_stairs",
+      "id": 573,
+      "default_state_id": 14070,
+      "hardness": 2.0
+    },
+    {
+      "name": "poplar_stairs",
+      "id": 574,
+      "default_state_id": 14150,
+      "hardness": 2.0
+    },
+    {
+      "name": "bamboo_stairs",
+      "id": 575,
+      "default_state_id": 14230,
+      "hardness": 2.0
+    },
+    {
+      "name": "bamboo_mosaic_stairs",
+      "id": 576,
+      "default_state_id": 14310,
+      "hardness": 2.0
+    },
+    {
+      "name": "slime_block",
+      "id": 577,
+      "default_state_id": 14379,
+      "hardness": 0.0
+    },
+    {
+      "name": "barrier",
+      "id": 578,
+      "default_state_id": 14381,
+      "hardness": -1.0
+    },
+    {
+      "name": "light",
+      "id": 579,
+      "default_state_id": 14413,
+      "hardness": -1.0
+    },
+    {
+      "name": "iron_trapdoor",
+      "id": 580,
+      "default_state_id": 14429,
+      "hardness": 5.0
+    },
+    {
+      "name": "prismarine",
+      "id": 581,
+      "default_state_id": 14478,
+      "hardness": 1.5
+    },
+    {
+      "name": "prismarine_bricks",
+      "id": 582,
+      "default_state_id": 14479,
+      "hardness": 1.5
+    },
+    {
+      "name": "dark_prismarine",
+      "id": 583,
+      "default_state_id": 14480,
+      "hardness": 1.5
+    },
+    {
+      "name": "prismarine_stairs",
+      "id": 584,
+      "default_state_id": 14492,
+      "hardness": 1.5
+    },
+    {
+      "name": "prismarine_brick_stairs",
+      "id": 585,
+      "default_state_id": 14572,
+      "hardness": 1.5
+    },
+    {
+      "name": "dark_prismarine_stairs",
+      "id": 586,
+      "default_state_id": 14652,
+      "hardness": 1.5
+    },
+    {
+      "name": "prismarine_slab",
+      "id": 587,
+      "default_state_id": 14724,
+      "hardness": 1.5
+    },
+    {
+      "name": "prismarine_brick_slab",
+      "id": 588,
+      "default_state_id": 14730,
+      "hardness": 1.5
+    },
+    {
+      "name": "dark_prismarine_slab",
+      "id": 589,
+      "default_state_id": 14736,
+      "hardness": 1.5
+    },
+    {
+      "name": "sea_lantern",
+      "id": 590,
+      "default_state_id": 14739,
+      "hardness": 0.3
+    },
+    {
+      "name": "hay_block",
+      "id": 591,
+      "default_state_id": 14741,
+      "hardness": 0.5
+    },
+    {
+      "name": "white_carpet",
+      "id": 592,
+      "default_state_id": 14743,
+      "hardness": 0.1
+    },
+    {
+      "name": "orange_carpet",
+      "id": 593,
+      "default_state_id": 14744,
+      "hardness": 0.1
+    },
+    {
+      "name": "magenta_carpet",
+      "id": 594,
+      "default_state_id": 14745,
+      "hardness": 0.1
+    },
+    {
+      "name": "light_blue_carpet",
+      "id": 595,
+      "default_state_id": 14746,
+      "hardness": 0.1
+    },
+    {
+      "name": "yellow_carpet",
+      "id": 596,
+      "default_state_id": 14747,
+      "hardness": 0.1
+    },
+    {
+      "name": "lime_carpet",
+      "id": 597,
+      "default_state_id": 14748,
+      "hardness": 0.1
+    },
+    {
+      "name": "pink_carpet",
+      "id": 598,
+      "default_state_id": 14749,
+      "hardness": 0.1
+    },
+    {
+      "name": "gray_carpet",
+      "id": 599,
+      "default_state_id": 14750,
+      "hardness": 0.1
+    },
+    {
+      "name": "light_gray_carpet",
+      "id": 600,
+      "default_state_id": 14751,
+      "hardness": 0.1
+    },
+    {
+      "name": "cyan_carpet",
+      "id": 601,
+      "default_state_id": 14752,
+      "hardness": 0.1
+    },
+    {
+      "name": "purple_carpet",
+      "id": 602,
+      "default_state_id": 14753,
+      "hardness": 0.1
+    },
+    {
+      "name": "blue_carpet",
+      "id": 603,
+      "default_state_id": 14754,
+      "hardness": 0.1
+    },
+    {
+      "name": "brown_carpet",
+      "id": 604,
+      "default_state_id": 14755,
+      "hardness": 0.1
+    },
+    {
+      "name": "green_carpet",
+      "id": 605,
+      "default_state_id": 14756,
+      "hardness": 0.1
+    },
+    {
+      "name": "red_carpet",
+      "id": 606,
+      "default_state_id": 14757,
+      "hardness": 0.1
+    },
+    {
+      "name": "black_carpet",
+      "id": 607,
+      "default_state_id": 14758,
+      "hardness": 0.1
+    },
+    {
+      "name": "terracotta",
+      "id": 608,
+      "default_state_id": 14759,
+      "hardness": 1.25
+    },
+    {
+      "name": "coal_block",
+      "id": 609,
+      "default_state_id": 14760,
+      "hardness": 5.0
+    },
+    {
+      "name": "packed_ice",
+      "id": 610,
+      "default_state_id": 14761,
+      "hardness": 0.5
+    },
+    {
+      "name": "sunflower",
+      "id": 611,
+      "default_state_id": 14763,
+      "hardness": 0.0
+    },
+    {
+      "name": "lilac",
+      "id": 612,
+      "default_state_id": 14765,
+      "hardness": 0.0
+    },
+    {
+      "name": "rose_bush",
+      "id": 613,
+      "default_state_id": 14767,
+      "hardness": 0.0
+    },
+    {
+      "name": "peony",
+      "id": 614,
+      "default_state_id": 14769,
+      "hardness": 0.0
+    },
+    {
+      "name": "tall_grass",
+      "id": 615,
+      "default_state_id": 14771,
+      "hardness": 0.0
+    },
+    {
+      "name": "large_fern",
+      "id": 616,
+      "default_state_id": 14773,
+      "hardness": 0.0
+    },
+    {
+      "name": "white_banner",
+      "id": 617,
+      "default_state_id": 14782,
+      "hardness": 1.0
+    },
+    {
+      "name": "orange_banner",
+      "id": 618,
+      "default_state_id": 14798,
+      "hardness": 1.0
+    },
+    {
+      "name": "magenta_banner",
+      "id": 619,
+      "default_state_id": 14814,
+      "hardness": 1.0
+    },
+    {
+      "name": "light_blue_banner",
+      "id": 620,
+      "default_state_id": 14830,
+      "hardness": 1.0
+    },
+    {
+      "name": "yellow_banner",
+      "id": 621,
+      "default_state_id": 14846,
+      "hardness": 1.0
+    },
+    {
+      "name": "lime_banner",
+      "id": 622,
+      "default_state_id": 14862,
+      "hardness": 1.0
+    },
+    {
+      "name": "pink_banner",
+      "id": 623,
+      "default_state_id": 14878,
+      "hardness": 1.0
+    },
+    {
+      "name": "gray_banner",
+      "id": 624,
+      "default_state_id": 14894,
+      "hardness": 1.0
+    },
+    {
+      "name": "light_gray_banner",
+      "id": 625,
+      "default_state_id": 14910,
+      "hardness": 1.0
+    },
+    {
+      "name": "cyan_banner",
+      "id": 626,
+      "default_state_id": 14926,
+      "hardness": 1.0
+    },
+    {
+      "name": "purple_banner",
+      "id": 627,
+      "default_state_id": 14942,
+      "hardness": 1.0
+    },
+    {
+      "name": "blue_banner",
+      "id": 628,
+      "default_state_id": 14958,
+      "hardness": 1.0
+    },
+    {
+      "name": "brown_banner",
+      "id": 629,
+      "default_state_id": 14974,
+      "hardness": 1.0
+    },
+    {
+      "name": "green_banner",
+      "id": 630,
+      "default_state_id": 14990,
+      "hardness": 1.0
+    },
+    {
+      "name": "red_banner",
+      "id": 631,
+      "default_state_id": 15006,
+      "hardness": 1.0
+    },
+    {
+      "name": "black_banner",
+      "id": 632,
+      "default_state_id": 15022,
+      "hardness": 1.0
+    },
+    {
+      "name": "white_wall_banner",
+      "id": 633,
+      "default_state_id": 15030,
+      "hardness": 1.0
+    },
+    {
+      "name": "orange_wall_banner",
+      "id": 634,
+      "default_state_id": 15034,
+      "hardness": 1.0
+    },
+    {
+      "name": "magenta_wall_banner",
+      "id": 635,
+      "default_state_id": 15038,
+      "hardness": 1.0
+    },
+    {
+      "name": "light_blue_wall_banner",
+      "id": 636,
+      "default_state_id": 15042,
+      "hardness": 1.0
+    },
+    {
+      "name": "yellow_wall_banner",
+      "id": 637,
+      "default_state_id": 15046,
+      "hardness": 1.0
+    },
+    {
+      "name": "lime_wall_banner",
+      "id": 638,
+      "default_state_id": 15050,
+      "hardness": 1.0
+    },
+    {
+      "name": "pink_wall_banner",
+      "id": 639,
+      "default_state_id": 15054,
+      "hardness": 1.0
+    },
+    {
+      "name": "gray_wall_banner",
+      "id": 640,
+      "default_state_id": 15058,
+      "hardness": 1.0
+    },
+    {
+      "name": "light_gray_wall_banner",
+      "id": 641,
+      "default_state_id": 15062,
+      "hardness": 1.0
+    },
+    {
+      "name": "cyan_wall_banner",
+      "id": 642,
+      "default_state_id": 15066,
+      "hardness": 1.0
+    },
+    {
+      "name": "purple_wall_banner",
+      "id": 643,
+      "default_state_id": 15070,
+      "hardness": 1.0
+    },
+    {
+      "name": "blue_wall_banner",
+      "id": 644,
+      "default_state_id": 15074,
+      "hardness": 1.0
+    },
+    {
+      "name": "brown_wall_banner",
+      "id": 645,
+      "default_state_id": 15078,
+      "hardness": 1.0
+    },
+    {
+      "name": "green_wall_banner",
+      "id": 646,
+      "default_state_id": 15082,
+      "hardness": 1.0
+    },
+    {
+      "name": "red_wall_banner",
+      "id": 647,
+      "default_state_id": 15086,
+      "hardness": 1.0
+    },
+    {
+      "name": "black_wall_banner",
+      "id": 648,
+      "default_state_id": 15090,
+      "hardness": 1.0
+    },
+    {
+      "name": "red_sandstone",
+      "id": 649,
+      "default_state_id": 15094,
+      "hardness": 0.8
+    },
+    {
+      "name": "chiseled_red_sandstone",
+      "id": 650,
+      "default_state_id": 15095,
+      "hardness": 0.8
+    },
+    {
+      "name": "cut_red_sandstone",
+      "id": 651,
+      "default_state_id": 15096,
+      "hardness": 0.8
+    },
+    {
+      "name": "red_sandstone_stairs",
+      "id": 652,
+      "default_state_id": 15108,
+      "hardness": 0.8
+    },
+    {
+      "name": "oak_slab",
+      "id": 653,
+      "default_state_id": 15180,
+      "hardness": 2.0
+    },
+    {
+      "name": "spruce_slab",
+      "id": 654,
+      "default_state_id": 15186,
+      "hardness": 2.0
+    },
+    {
+      "name": "birch_slab",
+      "id": 655,
+      "default_state_id": 15192,
+      "hardness": 2.0
+    },
+    {
+      "name": "jungle_slab",
+      "id": 656,
+      "default_state_id": 15198,
+      "hardness": 2.0
+    },
+    {
+      "name": "acacia_slab",
+      "id": 657,
+      "default_state_id": 15204,
+      "hardness": 2.0
+    },
+    {
+      "name": "cherry_slab",
+      "id": 658,
+      "default_state_id": 15210,
+      "hardness": 2.0
+    },
+    {
+      "name": "dark_oak_slab",
+      "id": 659,
+      "default_state_id": 15216,
+      "hardness": 2.0
+    },
+    {
+      "name": "pale_oak_slab",
+      "id": 660,
+      "default_state_id": 15222,
+      "hardness": 2.0
+    },
+    {
+      "name": "mangrove_slab",
+      "id": 661,
+      "default_state_id": 15228,
+      "hardness": 2.0
+    },
+    {
+      "name": "poplar_slab",
+      "id": 662,
+      "default_state_id": 15234,
+      "hardness": 2.0
+    },
+    {
+      "name": "bamboo_slab",
+      "id": 663,
+      "default_state_id": 15240,
+      "hardness": 2.0
+    },
+    {
+      "name": "bamboo_mosaic_slab",
+      "id": 664,
+      "default_state_id": 15246,
+      "hardness": 2.0
+    },
+    {
+      "name": "stone_slab",
+      "id": 665,
+      "default_state_id": 15252,
+      "hardness": 2.0
+    },
+    {
+      "name": "sandstone_slab",
+      "id": 666,
+      "default_state_id": 15258,
+      "hardness": 2.0
+    },
+    {
+      "name": "cut_sandstone_slab",
+      "id": 667,
+      "default_state_id": 15264,
+      "hardness": 2.0
+    },
+    {
+      "name": "petrified_oak_slab",
+      "id": 668,
+      "default_state_id": 15270,
+      "hardness": 2.0
+    },
+    {
+      "name": "cobblestone_slab",
+      "id": 669,
+      "default_state_id": 15276,
+      "hardness": 2.0
+    },
+    {
+      "name": "brick_slab",
+      "id": 670,
+      "default_state_id": 15282,
+      "hardness": 2.0
+    },
+    {
+      "name": "stone_brick_slab",
+      "id": 671,
+      "default_state_id": 15288,
+      "hardness": 2.0
+    },
+    {
+      "name": "mud_brick_slab",
+      "id": 672,
+      "default_state_id": 15294,
+      "hardness": 1.5
+    },
+    {
+      "name": "nether_brick_slab",
+      "id": 673,
+      "default_state_id": 15300,
+      "hardness": 2.0
+    },
+    {
+      "name": "quartz_slab",
+      "id": 674,
+      "default_state_id": 15306,
+      "hardness": 2.0
+    },
+    {
+      "name": "red_sandstone_slab",
+      "id": 675,
+      "default_state_id": 15312,
+      "hardness": 2.0
+    },
+    {
+      "name": "cut_red_sandstone_slab",
+      "id": 676,
+      "default_state_id": 15318,
+      "hardness": 2.0
+    },
+    {
+      "name": "smooth_stone",
+      "id": 677,
+      "default_state_id": 15321,
+      "hardness": 2.0
+    },
+    {
+      "name": "smooth_stone_slab",
+      "id": 678,
+      "default_state_id": 15325,
+      "hardness": 2.0
+    },
+    {
+      "name": "smooth_sandstone",
+      "id": 679,
+      "default_state_id": 15328,
+      "hardness": 2.0
+    },
+    {
+      "name": "smooth_quartz",
+      "id": 680,
+      "default_state_id": 15329,
+      "hardness": 2.0
+    },
+    {
+      "name": "smooth_red_sandstone",
+      "id": 681,
+      "default_state_id": 15330,
+      "hardness": 2.0
+    },
+    {
+      "name": "spruce_fence_gate",
+      "id": 682,
+      "default_state_id": 15338,
+      "hardness": 2.0
+    },
+    {
+      "name": "birch_fence_gate",
+      "id": 683,
+      "default_state_id": 15370,
+      "hardness": 2.0
+    },
+    {
+      "name": "jungle_fence_gate",
+      "id": 684,
+      "default_state_id": 15402,
+      "hardness": 2.0
+    },
+    {
+      "name": "acacia_fence_gate",
+      "id": 685,
+      "default_state_id": 15434,
+      "hardness": 2.0
+    },
+    {
+      "name": "cherry_fence_gate",
+      "id": 686,
+      "default_state_id": 15466,
+      "hardness": 2.0
+    },
+    {
+      "name": "dark_oak_fence_gate",
+      "id": 687,
+      "default_state_id": 15498,
+      "hardness": 2.0
+    },
+    {
+      "name": "pale_oak_fence_gate",
+      "id": 688,
+      "default_state_id": 15530,
+      "hardness": 2.0
+    },
+    {
+      "name": "mangrove_fence_gate",
+      "id": 689,
+      "default_state_id": 15562,
+      "hardness": 2.0
+    },
+    {
+      "name": "poplar_fence_gate",
+      "id": 690,
+      "default_state_id": 15594,
+      "hardness": 2.0
+    },
+    {
+      "name": "bamboo_fence_gate",
+      "id": 691,
+      "default_state_id": 15626,
+      "hardness": 2.0
+    },
+    {
+      "name": "spruce_fence",
+      "id": 692,
+      "default_state_id": 15682,
+      "hardness": 2.0
+    },
+    {
+      "name": "birch_fence",
+      "id": 693,
+      "default_state_id": 15714,
+      "hardness": 2.0
+    },
+    {
+      "name": "jungle_fence",
+      "id": 694,
+      "default_state_id": 15746,
+      "hardness": 2.0
+    },
+    {
+      "name": "acacia_fence",
+      "id": 695,
+      "default_state_id": 15778,
+      "hardness": 2.0
+    },
+    {
+      "name": "cherry_fence",
+      "id": 696,
+      "default_state_id": 15810,
+      "hardness": 2.0
+    },
+    {
+      "name": "dark_oak_fence",
+      "id": 697,
+      "default_state_id": 15842,
+      "hardness": 2.0
+    },
+    {
+      "name": "pale_oak_fence",
+      "id": 698,
+      "default_state_id": 15874,
+      "hardness": 2.0
+    },
+    {
+      "name": "mangrove_fence",
+      "id": 699,
+      "default_state_id": 15906,
+      "hardness": 2.0
+    },
+    {
+      "name": "poplar_fence",
+      "id": 700,
+      "default_state_id": 15938,
+      "hardness": 2.0
+    },
+    {
+      "name": "bamboo_fence",
+      "id": 701,
+      "default_state_id": 15970,
+      "hardness": 2.0
+    },
+    {
+      "name": "spruce_door",
+      "id": 702,
+      "default_state_id": 15982,
+      "hardness": 3.0
+    },
+    {
+      "name": "birch_door",
+      "id": 703,
+      "default_state_id": 16046,
+      "hardness": 3.0
+    },
+    {
+      "name": "jungle_door",
+      "id": 704,
+      "default_state_id": 16110,
+      "hardness": 3.0
+    },
+    {
+      "name": "acacia_door",
+      "id": 705,
+      "default_state_id": 16174,
+      "hardness": 3.0
+    },
+    {
+      "name": "cherry_door",
+      "id": 706,
+      "default_state_id": 16238,
+      "hardness": 3.0
+    },
+    {
+      "name": "dark_oak_door",
+      "id": 707,
+      "default_state_id": 16302,
+      "hardness": 3.0
+    },
+    {
+      "name": "pale_oak_door",
+      "id": 708,
+      "default_state_id": 16366,
+      "hardness": 3.0
+    },
+    {
+      "name": "mangrove_door",
+      "id": 709,
+      "default_state_id": 16430,
+      "hardness": 3.0
+    },
+    {
+      "name": "poplar_door",
+      "id": 710,
+      "default_state_id": 16494,
+      "hardness": 3.0
+    },
+    {
+      "name": "bamboo_door",
+      "id": 711,
+      "default_state_id": 16558,
+      "hardness": 3.0
+    },
+    {
+      "name": "end_rod",
+      "id": 712,
+      "default_state_id": 16615,
+      "hardness": 0.0
+    },
+    {
+      "name": "chorus_plant",
+      "id": 713,
+      "default_state_id": 16680,
+      "hardness": 0.4
+    },
+    {
+      "name": "chorus_flower",
+      "id": 714,
+      "default_state_id": 16681,
+      "hardness": 0.4
+    },
+    {
+      "name": "purpur_block",
+      "id": 715,
+      "default_state_id": 16687,
+      "hardness": 1.5
+    },
+    {
+      "name": "purpur_slab",
+      "id": 716,
+      "default_state_id": 16691,
+      "hardness": 2.0
+    },
+    {
+      "name": "purpur_pillar",
+      "id": 717,
+      "default_state_id": 16695,
+      "hardness": 1.5
+    },
+    {
+      "name": "purpur_stairs",
+      "id": 718,
+      "default_state_id": 16708,
+      "hardness": 1.5
+    },
+    {
+      "name": "end_stone_bricks",
+      "id": 719,
+      "default_state_id": 16777,
+      "hardness": 3.0
+    },
+    {
+      "name": "torchflower_crop",
+      "id": 720,
+      "default_state_id": 16778,
+      "hardness": 0.0
+    },
+    {
+      "name": "pitcher_crop",
+      "id": 721,
+      "default_state_id": 16781,
+      "hardness": 0.0
+    },
+    {
+      "name": "pitcher_plant",
+      "id": 722,
+      "default_state_id": 16791,
+      "hardness": 0.0
+    },
+    {
+      "name": "beetroots",
+      "id": 723,
+      "default_state_id": 16792,
+      "hardness": 0.0
+    },
+    {
+      "name": "dirt_path",
+      "id": 724,
+      "default_state_id": 16796,
+      "hardness": 0.65
+    },
+    {
+      "name": "end_gateway",
+      "id": 725,
+      "default_state_id": 16797,
+      "hardness": -1.0
+    },
+    {
+      "name": "repeating_command_block",
+      "id": 726,
+      "default_state_id": 16804,
+      "hardness": -1.0
+    },
+    {
+      "name": "chain_command_block",
+      "id": 727,
+      "default_state_id": 16816,
+      "hardness": -1.0
+    },
+    {
+      "name": "frosted_ice",
+      "id": 728,
+      "default_state_id": 16822,
+      "hardness": 0.5
+    },
+    {
+      "name": "magma_block",
+      "id": 729,
+      "default_state_id": 16826,
+      "hardness": 0.5
+    },
+    {
+      "name": "nether_wart_block",
+      "id": 730,
+      "default_state_id": 16827,
+      "hardness": 1.0
+    },
+    {
+      "name": "red_nether_bricks",
+      "id": 731,
+      "default_state_id": 16828,
+      "hardness": 2.0
+    },
+    {
+      "name": "bone_block",
+      "id": 732,
+      "default_state_id": 16830,
+      "hardness": 2.0
+    },
+    {
+      "name": "structure_void",
+      "id": 733,
+      "default_state_id": 16832,
+      "hardness": 0.0
+    },
+    {
+      "name": "observer",
+      "id": 734,
+      "default_state_id": 16838,
+      "hardness": 3.0
+    },
+    {
+      "name": "shulker_box",
+      "id": 735,
+      "default_state_id": 16849,
+      "hardness": 2.0
+    },
+    {
+      "name": "white_shulker_box",
+      "id": 736,
+      "default_state_id": 16855,
+      "hardness": 2.0
+    },
+    {
+      "name": "orange_shulker_box",
+      "id": 737,
+      "default_state_id": 16861,
+      "hardness": 2.0
+    },
+    {
+      "name": "magenta_shulker_box",
+      "id": 738,
+      "default_state_id": 16867,
+      "hardness": 2.0
+    },
+    {
+      "name": "light_blue_shulker_box",
+      "id": 739,
+      "default_state_id": 16873,
+      "hardness": 2.0
+    },
+    {
+      "name": "yellow_shulker_box",
+      "id": 740,
+      "default_state_id": 16879,
+      "hardness": 2.0
+    },
+    {
+      "name": "lime_shulker_box",
+      "id": 741,
+      "default_state_id": 16885,
+      "hardness": 2.0
+    },
+    {
+      "name": "pink_shulker_box",
+      "id": 742,
+      "default_state_id": 16891,
+      "hardness": 2.0
+    },
+    {
+      "name": "gray_shulker_box",
+      "id": 743,
+      "default_state_id": 16897,
+      "hardness": 2.0
+    },
+    {
+      "name": "light_gray_shulker_box",
+      "id": 744,
+      "default_state_id": 16903,
+      "hardness": 2.0
+    },
+    {
+      "name": "cyan_shulker_box",
+      "id": 745,
+      "default_state_id": 16909,
+      "hardness": 2.0
+    },
+    {
+      "name": "purple_shulker_box",
+      "id": 746,
+      "default_state_id": 16915,
+      "hardness": 2.0
+    },
+    {
+      "name": "blue_shulker_box",
+      "id": 747,
+      "default_state_id": 16921,
+      "hardness": 2.0
+    },
+    {
+      "name": "brown_shulker_box",
+      "id": 748,
+      "default_state_id": 16927,
+      "hardness": 2.0
+    },
+    {
+      "name": "green_shulker_box",
+      "id": 749,
+      "default_state_id": 16933,
+      "hardness": 2.0
+    },
+    {
+      "name": "red_shulker_box",
+      "id": 750,
+      "default_state_id": 16939,
+      "hardness": 2.0
+    },
+    {
+      "name": "black_shulker_box",
+      "id": 751,
+      "default_state_id": 16945,
+      "hardness": 2.0
+    },
+    {
+      "name": "white_glazed_terracotta",
+      "id": 752,
+      "default_state_id": 16947,
+      "hardness": 1.4
+    },
+    {
+      "name": "orange_glazed_terracotta",
+      "id": 753,
+      "default_state_id": 16951,
+      "hardness": 1.4
+    },
+    {
+      "name": "magenta_glazed_terracotta",
+      "id": 754,
+      "default_state_id": 16955,
+      "hardness": 1.4
+    },
+    {
+      "name": "light_blue_glazed_terracotta",
+      "id": 755,
+      "default_state_id": 16959,
+      "hardness": 1.4
+    },
+    {
+      "name": "yellow_glazed_terracotta",
+      "id": 756,
+      "default_state_id": 16963,
+      "hardness": 1.4
+    },
+    {
+      "name": "lime_glazed_terracotta",
+      "id": 757,
+      "default_state_id": 16967,
+      "hardness": 1.4
+    },
+    {
+      "name": "pink_glazed_terracotta",
+      "id": 758,
+      "default_state_id": 16971,
+      "hardness": 1.4
+    },
+    {
+      "name": "gray_glazed_terracotta",
+      "id": 759,
+      "default_state_id": 16975,
+      "hardness": 1.4
+    },
+    {
+      "name": "light_gray_glazed_terracotta",
+      "id": 760,
+      "default_state_id": 16979,
+      "hardness": 1.4
+    },
+    {
+      "name": "cyan_glazed_terracotta",
+      "id": 761,
+      "default_state_id": 16983,
+      "hardness": 1.4
+    },
+    {
+      "name": "purple_glazed_terracotta",
+      "id": 762,
+      "default_state_id": 16987,
+      "hardness": 1.4
+    },
+    {
+      "name": "blue_glazed_terracotta",
+      "id": 763,
+      "default_state_id": 16991,
+      "hardness": 1.4
+    },
+    {
+      "name": "brown_glazed_terracotta",
+      "id": 764,
+      "default_state_id": 16995,
+      "hardness": 1.4
+    },
+    {
+      "name": "green_glazed_terracotta",
+      "id": 765,
+      "default_state_id": 16999,
+      "hardness": 1.4
+    },
+    {
+      "name": "red_glazed_terracotta",
+      "id": 766,
+      "default_state_id": 17003,
+      "hardness": 1.4
+    },
+    {
+      "name": "black_glazed_terracotta",
+      "id": 767,
+      "default_state_id": 17007,
+      "hardness": 1.4
+    },
+    {
+      "name": "white_concrete",
+      "id": 768,
+      "default_state_id": 17011,
+      "hardness": 1.8
+    },
+    {
+      "name": "orange_concrete",
+      "id": 769,
+      "default_state_id": 17012,
+      "hardness": 1.8
+    },
+    {
+      "name": "magenta_concrete",
+      "id": 770,
+      "default_state_id": 17013,
+      "hardness": 1.8
+    },
+    {
+      "name": "light_blue_concrete",
+      "id": 771,
+      "default_state_id": 17014,
+      "hardness": 1.8
+    },
+    {
+      "name": "yellow_concrete",
+      "id": 772,
+      "default_state_id": 17015,
+      "hardness": 1.8
+    },
+    {
+      "name": "lime_concrete",
+      "id": 773,
+      "default_state_id": 17016,
+      "hardness": 1.8
+    },
+    {
+      "name": "pink_concrete",
+      "id": 774,
+      "default_state_id": 17017,
+      "hardness": 1.8
+    },
+    {
+      "name": "gray_concrete",
+      "id": 775,
+      "default_state_id": 17018,
+      "hardness": 1.8
+    },
+    {
+      "name": "light_gray_concrete",
+      "id": 776,
+      "default_state_id": 17019,
+      "hardness": 1.8
+    },
+    {
+      "name": "cyan_concrete",
+      "id": 777,
+      "default_state_id": 17020,
+      "hardness": 1.8
+    },
+    {
+      "name": "purple_concrete",
+      "id": 778,
+      "default_state_id": 17021,
+      "hardness": 1.8
+    },
+    {
+      "name": "blue_concrete",
+      "id": 779,
+      "default_state_id": 17022,
+      "hardness": 1.8
+    },
+    {
+      "name": "brown_concrete",
+      "id": 780,
+      "default_state_id": 17023,
+      "hardness": 1.8
+    },
+    {
+      "name": "green_concrete",
+      "id": 781,
+      "default_state_id": 17024,
+      "hardness": 1.8
+    },
+    {
+      "name": "red_concrete",
+      "id": 782,
+      "default_state_id": 17025,
+      "hardness": 1.8
+    },
+    {
+      "name": "black_concrete",
+      "id": 783,
+      "default_state_id": 17026,
+      "hardness": 1.8
+    },
+    {
+      "name": "white_concrete_stairs",
+      "id": 784,
+      "default_state_id": 17038,
+      "hardness": 1.8
+    },
+    {
+      "name": "orange_concrete_stairs",
+      "id": 785,
+      "default_state_id": 17118,
+      "hardness": 1.8
+    },
+    {
+      "name": "magenta_concrete_stairs",
+      "id": 786,
+      "default_state_id": 17198,
+      "hardness": 1.8
+    },
+    {
+      "name": "light_blue_concrete_stairs",
+      "id": 787,
+      "default_state_id": 17278,
+      "hardness": 1.8
+    },
+    {
+      "name": "yellow_concrete_stairs",
+      "id": 788,
+      "default_state_id": 17358,
+      "hardness": 1.8
+    },
+    {
+      "name": "lime_concrete_stairs",
+      "id": 789,
+      "default_state_id": 17438,
+      "hardness": 1.8
+    },
+    {
+      "name": "pink_concrete_stairs",
+      "id": 790,
+      "default_state_id": 17518,
+      "hardness": 1.8
+    },
+    {
+      "name": "gray_concrete_stairs",
+      "id": 791,
+      "default_state_id": 17598,
+      "hardness": 1.8
+    },
+    {
+      "name": "light_gray_concrete_stairs",
+      "id": 792,
+      "default_state_id": 17678,
+      "hardness": 1.8
+    },
+    {
+      "name": "cyan_concrete_stairs",
+      "id": 793,
+      "default_state_id": 17758,
+      "hardness": 1.8
+    },
+    {
+      "name": "purple_concrete_stairs",
+      "id": 794,
+      "default_state_id": 17838,
+      "hardness": 1.8
+    },
+    {
+      "name": "blue_concrete_stairs",
+      "id": 795,
+      "default_state_id": 17918,
+      "hardness": 1.8
+    },
+    {
+      "name": "brown_concrete_stairs",
+      "id": 796,
+      "default_state_id": 17998,
+      "hardness": 1.8
+    },
+    {
+      "name": "green_concrete_stairs",
+      "id": 797,
+      "default_state_id": 18078,
+      "hardness": 1.8
+    },
+    {
+      "name": "red_concrete_stairs",
+      "id": 798,
+      "default_state_id": 18158,
+      "hardness": 1.8
+    },
+    {
+      "name": "black_concrete_stairs",
+      "id": 799,
+      "default_state_id": 18238,
+      "hardness": 1.8
+    },
+    {
+      "name": "white_concrete_slab",
+      "id": 800,
+      "default_state_id": 18310,
+      "hardness": 1.8
+    },
+    {
+      "name": "orange_concrete_slab",
+      "id": 801,
+      "default_state_id": 18316,
+      "hardness": 1.8
+    },
+    {
+      "name": "magenta_concrete_slab",
+      "id": 802,
+      "default_state_id": 18322,
+      "hardness": 1.8
+    },
+    {
+      "name": "light_blue_concrete_slab",
+      "id": 803,
+      "default_state_id": 18328,
+      "hardness": 1.8
+    },
+    {
+      "name": "yellow_concrete_slab",
+      "id": 804,
+      "default_state_id": 18334,
+      "hardness": 1.8
+    },
+    {
+      "name": "lime_concrete_slab",
+      "id": 805,
+      "default_state_id": 18340,
+      "hardness": 1.8
+    },
+    {
+      "name": "pink_concrete_slab",
+      "id": 806,
+      "default_state_id": 18346,
+      "hardness": 1.8
+    },
+    {
+      "name": "gray_concrete_slab",
+      "id": 807,
+      "default_state_id": 18352,
+      "hardness": 1.8
+    },
+    {
+      "name": "light_gray_concrete_slab",
+      "id": 808,
+      "default_state_id": 18358,
+      "hardness": 1.8
+    },
+    {
+      "name": "cyan_concrete_slab",
+      "id": 809,
+      "default_state_id": 18364,
+      "hardness": 1.8
+    },
+    {
+      "name": "purple_concrete_slab",
+      "id": 810,
+      "default_state_id": 18370,
+      "hardness": 1.8
+    },
+    {
+      "name": "blue_concrete_slab",
+      "id": 811,
+      "default_state_id": 18376,
+      "hardness": 1.8
+    },
+    {
+      "name": "brown_concrete_slab",
+      "id": 812,
+      "default_state_id": 18382,
+      "hardness": 1.8
+    },
+    {
+      "name": "green_concrete_slab",
+      "id": 813,
+      "default_state_id": 18388,
+      "hardness": 1.8
+    },
+    {
+      "name": "red_concrete_slab",
+      "id": 814,
+      "default_state_id": 18394,
+      "hardness": 1.8
+    },
+    {
+      "name": "black_concrete_slab",
+      "id": 815,
+      "default_state_id": 18400,
+      "hardness": 1.8
+    },
+    {
+      "name": "white_concrete_powder",
+      "id": 816,
+      "default_state_id": 18403,
+      "hardness": 0.5
+    },
+    {
+      "name": "orange_concrete_powder",
+      "id": 817,
+      "default_state_id": 18404,
+      "hardness": 0.5
+    },
+    {
+      "name": "magenta_concrete_powder",
+      "id": 818,
+      "default_state_id": 18405,
+      "hardness": 0.5
+    },
+    {
+      "name": "light_blue_concrete_powder",
+      "id": 819,
+      "default_state_id": 18406,
+      "hardness": 0.5
+    },
+    {
+      "name": "yellow_concrete_powder",
+      "id": 820,
+      "default_state_id": 18407,
+      "hardness": 0.5
+    },
+    {
+      "name": "lime_concrete_powder",
+      "id": 821,
+      "default_state_id": 18408,
+      "hardness": 0.5
+    },
+    {
+      "name": "pink_concrete_powder",
+      "id": 822,
+      "default_state_id": 18409,
+      "hardness": 0.5
+    },
+    {
+      "name": "gray_concrete_powder",
+      "id": 823,
+      "default_state_id": 18410,
+      "hardness": 0.5
+    },
+    {
+      "name": "light_gray_concrete_powder",
+      "id": 824,
+      "default_state_id": 18411,
+      "hardness": 0.5
+    },
+    {
+      "name": "cyan_concrete_powder",
+      "id": 825,
+      "default_state_id": 18412,
+      "hardness": 0.5
+    },
+    {
+      "name": "purple_concrete_powder",
+      "id": 826,
+      "default_state_id": 18413,
+      "hardness": 0.5
+    },
+    {
+      "name": "blue_concrete_powder",
+      "id": 827,
+      "default_state_id": 18414,
+      "hardness": 0.5
+    },
+    {
+      "name": "brown_concrete_powder",
+      "id": 828,
+      "default_state_id": 18415,
+      "hardness": 0.5
+    },
+    {
+      "name": "green_concrete_powder",
+      "id": 829,
+      "default_state_id": 18416,
+      "hardness": 0.5
+    },
+    {
+      "name": "red_concrete_powder",
+      "id": 830,
+      "default_state_id": 18417,
+      "hardness": 0.5
+    },
+    {
+      "name": "black_concrete_powder",
+      "id": 831,
+      "default_state_id": 18418,
+      "hardness": 0.5
+    },
+    {
+      "name": "kelp",
+      "id": 832,
+      "default_state_id": 18419,
+      "hardness": 0.0
+    },
+    {
+      "name": "kelp_plant",
+      "id": 833,
+      "default_state_id": 18445,
+      "hardness": 0.0
+    },
+    {
+      "name": "dried_kelp_block",
+      "id": 834,
+      "default_state_id": 18446,
+      "hardness": 0.5
+    },
+    {
+      "name": "turtle_egg",
+      "id": 835,
+      "default_state_id": 18447,
+      "hardness": 0.5
+    },
+    {
+      "name": "sniffer_egg",
+      "id": 836,
+      "default_state_id": 18459,
+      "hardness": 0.5
+    },
+    {
+      "name": "dried_ghast",
+      "id": 837,
+      "default_state_id": 18463,
+      "hardness": 0.0
+    },
+    {
+      "name": "dead_tube_coral_block",
+      "id": 838,
+      "default_state_id": 18494,
+      "hardness": 1.5
+    },
+    {
+      "name": "dead_brain_coral_block",
+      "id": 839,
+      "default_state_id": 18495,
+      "hardness": 1.5
+    },
+    {
+      "name": "dead_bubble_coral_block",
+      "id": 840,
+      "default_state_id": 18496,
+      "hardness": 1.5
+    },
+    {
+      "name": "dead_fire_coral_block",
+      "id": 841,
+      "default_state_id": 18497,
+      "hardness": 1.5
+    },
+    {
+      "name": "dead_horn_coral_block",
+      "id": 842,
+      "default_state_id": 18498,
+      "hardness": 1.5
+    },
+    {
+      "name": "tube_coral_block",
+      "id": 843,
+      "default_state_id": 18499,
+      "hardness": 1.5
+    },
+    {
+      "name": "brain_coral_block",
+      "id": 844,
+      "default_state_id": 18500,
+      "hardness": 1.5
+    },
+    {
+      "name": "bubble_coral_block",
+      "id": 845,
+      "default_state_id": 18501,
+      "hardness": 1.5
+    },
+    {
+      "name": "fire_coral_block",
+      "id": 846,
+      "default_state_id": 18502,
+      "hardness": 1.5
+    },
+    {
+      "name": "horn_coral_block",
+      "id": 847,
+      "default_state_id": 18503,
+      "hardness": 1.5
+    },
+    {
+      "name": "dead_tube_coral",
+      "id": 848,
+      "default_state_id": 18504,
+      "hardness": 0.0
+    },
+    {
+      "name": "dead_brain_coral",
+      "id": 849,
+      "default_state_id": 18506,
+      "hardness": 0.0
+    },
+    {
+      "name": "dead_bubble_coral",
+      "id": 850,
+      "default_state_id": 18508,
+      "hardness": 0.0
+    },
+    {
+      "name": "dead_fire_coral",
+      "id": 851,
+      "default_state_id": 18510,
+      "hardness": 0.0
+    },
+    {
+      "name": "dead_horn_coral",
+      "id": 852,
+      "default_state_id": 18512,
+      "hardness": 0.0
+    },
+    {
+      "name": "tube_coral",
+      "id": 853,
+      "default_state_id": 18514,
+      "hardness": 0.0
+    },
+    {
+      "name": "brain_coral",
+      "id": 854,
+      "default_state_id": 18516,
+      "hardness": 0.0
+    },
+    {
+      "name": "bubble_coral",
+      "id": 855,
+      "default_state_id": 18518,
+      "hardness": 0.0
+    },
+    {
+      "name": "fire_coral",
+      "id": 856,
+      "default_state_id": 18520,
+      "hardness": 0.0
+    },
+    {
+      "name": "horn_coral",
+      "id": 857,
+      "default_state_id": 18522,
+      "hardness": 0.0
+    },
+    {
+      "name": "dead_tube_coral_fan",
+      "id": 858,
+      "default_state_id": 18524,
+      "hardness": 0.0
+    },
+    {
+      "name": "dead_brain_coral_fan",
+      "id": 859,
+      "default_state_id": 18526,
+      "hardness": 0.0
+    },
+    {
+      "name": "dead_bubble_coral_fan",
+      "id": 860,
+      "default_state_id": 18528,
+      "hardness": 0.0
+    },
+    {
+      "name": "dead_fire_coral_fan",
+      "id": 861,
+      "default_state_id": 18530,
+      "hardness": 0.0
+    },
+    {
+      "name": "dead_horn_coral_fan",
+      "id": 862,
+      "default_state_id": 18532,
+      "hardness": 0.0
+    },
+    {
+      "name": "tube_coral_fan",
+      "id": 863,
+      "default_state_id": 18534,
+      "hardness": 0.0
+    },
+    {
+      "name": "brain_coral_fan",
+      "id": 864,
+      "default_state_id": 18536,
+      "hardness": 0.0
+    },
+    {
+      "name": "bubble_coral_fan",
+      "id": 865,
+      "default_state_id": 18538,
+      "hardness": 0.0
+    },
+    {
+      "name": "fire_coral_fan",
+      "id": 866,
+      "default_state_id": 18540,
+      "hardness": 0.0
+    },
+    {
+      "name": "horn_coral_fan",
+      "id": 867,
+      "default_state_id": 18542,
+      "hardness": 0.0
+    },
+    {
+      "name": "dead_tube_coral_wall_fan",
+      "id": 868,
+      "default_state_id": 18544,
+      "hardness": 0.0
+    },
+    {
+      "name": "dead_brain_coral_wall_fan",
+      "id": 869,
+      "default_state_id": 18552,
+      "hardness": 0.0
+    },
+    {
+      "name": "dead_bubble_coral_wall_fan",
+      "id": 870,
+      "default_state_id": 18560,
+      "hardness": 0.0
+    },
+    {
+      "name": "dead_fire_coral_wall_fan",
+      "id": 871,
+      "default_state_id": 18568,
+      "hardness": 0.0
+    },
+    {
+      "name": "dead_horn_coral_wall_fan",
+      "id": 872,
+      "default_state_id": 18576,
+      "hardness": 0.0
+    },
+    {
+      "name": "tube_coral_wall_fan",
+      "id": 873,
+      "default_state_id": 18584,
+      "hardness": 0.0
+    },
+    {
+      "name": "brain_coral_wall_fan",
+      "id": 874,
+      "default_state_id": 18592,
+      "hardness": 0.0
+    },
+    {
+      "name": "bubble_coral_wall_fan",
+      "id": 875,
+      "default_state_id": 18600,
+      "hardness": 0.0
+    },
+    {
+      "name": "fire_coral_wall_fan",
+      "id": 876,
+      "default_state_id": 18608,
+      "hardness": 0.0
+    },
+    {
+      "name": "horn_coral_wall_fan",
+      "id": 877,
+      "default_state_id": 18616,
+      "hardness": 0.0
+    },
+    {
+      "name": "sea_pickle",
+      "id": 878,
+      "default_state_id": 18624,
+      "hardness": 0.0
+    },
+    {
+      "name": "blue_ice",
+      "id": 879,
+      "default_state_id": 18632,
+      "hardness": 2.8
+    },
+    {
+      "name": "conduit",
+      "id": 880,
+      "default_state_id": 18633,
+      "hardness": 3.0
+    },
+    {
+      "name": "bamboo_sapling",
+      "id": 881,
+      "default_state_id": 18635,
+      "hardness": 1.0
+    },
+    {
+      "name": "bamboo",
+      "id": 882,
+      "default_state_id": 18636,
+      "hardness": 1.0
+    },
+    {
+      "name": "potted_bamboo",
+      "id": 883,
+      "default_state_id": 18648,
+      "hardness": 0.0
+    },
+    {
+      "name": "void_air",
+      "id": 884,
+      "default_state_id": 18649,
+      "hardness": 0.0
+    },
+    {
+      "name": "cave_air",
+      "id": 885,
+      "default_state_id": 18650,
+      "hardness": 0.0
+    },
+    {
+      "name": "bubble_column",
+      "id": 886,
+      "default_state_id": 18651,
+      "hardness": 0.0
+    },
+    {
+      "name": "polished_granite_stairs",
+      "id": 887,
+      "default_state_id": 18664,
+      "hardness": 1.5
+    },
+    {
+      "name": "smooth_red_sandstone_stairs",
+      "id": 888,
+      "default_state_id": 18744,
+      "hardness": 2.0
+    },
+    {
+      "name": "mossy_stone_brick_stairs",
+      "id": 889,
+      "default_state_id": 18824,
+      "hardness": 1.5
+    },
+    {
+      "name": "polished_diorite_stairs",
+      "id": 890,
+      "default_state_id": 18904,
+      "hardness": 1.5
+    },
+    {
+      "name": "mossy_cobblestone_stairs",
+      "id": 891,
+      "default_state_id": 18984,
+      "hardness": 2.0
+    },
+    {
+      "name": "end_stone_brick_stairs",
+      "id": 892,
+      "default_state_id": 19064,
+      "hardness": 3.0
+    },
+    {
+      "name": "stone_stairs",
+      "id": 893,
+      "default_state_id": 19144,
+      "hardness": 1.5
+    },
+    {
+      "name": "smooth_sandstone_stairs",
+      "id": 894,
+      "default_state_id": 19224,
+      "hardness": 2.0
+    },
+    {
+      "name": "smooth_quartz_stairs",
+      "id": 895,
+      "default_state_id": 19304,
+      "hardness": 2.0
+    },
+    {
+      "name": "granite_stairs",
+      "id": 896,
+      "default_state_id": 19384,
+      "hardness": 1.5
+    },
+    {
+      "name": "andesite_stairs",
+      "id": 897,
+      "default_state_id": 19464,
+      "hardness": 1.5
+    },
+    {
+      "name": "red_nether_brick_stairs",
+      "id": 898,
+      "default_state_id": 19544,
+      "hardness": 2.0
+    },
+    {
+      "name": "polished_andesite_stairs",
+      "id": 899,
+      "default_state_id": 19624,
+      "hardness": 1.5
+    },
+    {
+      "name": "diorite_stairs",
+      "id": 900,
+      "default_state_id": 19704,
+      "hardness": 1.5
+    },
+    {
+      "name": "polished_granite_slab",
+      "id": 901,
+      "default_state_id": 19776,
+      "hardness": 1.5
+    },
+    {
+      "name": "smooth_red_sandstone_slab",
+      "id": 902,
+      "default_state_id": 19782,
+      "hardness": 2.0
+    },
+    {
+      "name": "mossy_stone_brick_slab",
+      "id": 903,
+      "default_state_id": 19788,
+      "hardness": 1.5
+    },
+    {
+      "name": "polished_diorite_slab",
+      "id": 904,
+      "default_state_id": 19794,
+      "hardness": 1.5
+    },
+    {
+      "name": "mossy_cobblestone_slab",
+      "id": 905,
+      "default_state_id": 19800,
+      "hardness": 2.0
+    },
+    {
+      "name": "end_stone_brick_slab",
+      "id": 906,
+      "default_state_id": 19806,
+      "hardness": 3.0
+    },
+    {
+      "name": "smooth_sandstone_slab",
+      "id": 907,
+      "default_state_id": 19812,
+      "hardness": 2.0
+    },
+    {
+      "name": "smooth_quartz_slab",
+      "id": 908,
+      "default_state_id": 19818,
+      "hardness": 2.0
+    },
+    {
+      "name": "granite_slab",
+      "id": 909,
+      "default_state_id": 19824,
+      "hardness": 1.5
+    },
+    {
+      "name": "andesite_slab",
+      "id": 910,
+      "default_state_id": 19830,
+      "hardness": 1.5
+    },
+    {
+      "name": "red_nether_brick_slab",
+      "id": 911,
+      "default_state_id": 19836,
+      "hardness": 2.0
+    },
+    {
+      "name": "polished_andesite_slab",
+      "id": 912,
+      "default_state_id": 19842,
+      "hardness": 1.5
+    },
+    {
+      "name": "diorite_slab",
+      "id": 913,
+      "default_state_id": 19848,
+      "hardness": 1.5
+    },
+    {
+      "name": "brick_wall",
+      "id": 914,
+      "default_state_id": 19854,
+      "hardness": 2.0
+    },
+    {
+      "name": "prismarine_wall",
+      "id": 915,
+      "default_state_id": 20178,
+      "hardness": 1.5
+    },
+    {
+      "name": "red_sandstone_wall",
+      "id": 916,
+      "default_state_id": 20502,
+      "hardness": 0.8
+    },
+    {
+      "name": "mossy_stone_brick_wall",
+      "id": 917,
+      "default_state_id": 20826,
+      "hardness": 1.5
+    },
+    {
+      "name": "granite_wall",
+      "id": 918,
+      "default_state_id": 21150,
+      "hardness": 1.5
+    },
+    {
+      "name": "stone_brick_wall",
+      "id": 919,
+      "default_state_id": 21474,
+      "hardness": 1.5
+    },
+    {
+      "name": "mud_brick_wall",
+      "id": 920,
+      "default_state_id": 21798,
+      "hardness": 1.5
+    },
+    {
+      "name": "nether_brick_wall",
+      "id": 921,
+      "default_state_id": 22122,
+      "hardness": 2.0
+    },
+    {
+      "name": "andesite_wall",
+      "id": 922,
+      "default_state_id": 22446,
+      "hardness": 1.5
+    },
+    {
+      "name": "red_nether_brick_wall",
+      "id": 923,
+      "default_state_id": 22770,
+      "hardness": 2.0
+    },
+    {
+      "name": "sandstone_wall",
+      "id": 924,
+      "default_state_id": 23094,
+      "hardness": 0.8
+    },
+    {
+      "name": "end_stone_brick_wall",
+      "id": 925,
+      "default_state_id": 23418,
+      "hardness": 3.0
+    },
+    {
+      "name": "diorite_wall",
+      "id": 926,
+      "default_state_id": 23742,
+      "hardness": 1.5
+    },
+    {
+      "name": "scaffolding",
+      "id": 927,
+      "default_state_id": 24094,
+      "hardness": 0.0
+    },
+    {
+      "name": "loom",
+      "id": 928,
+      "default_state_id": 24095,
+      "hardness": 2.5
+    },
+    {
+      "name": "barrel",
+      "id": 929,
+      "default_state_id": 24100,
+      "hardness": 2.5
+    },
+    {
+      "name": "smoker",
+      "id": 930,
+      "default_state_id": 24112,
+      "hardness": 3.5
+    },
+    {
+      "name": "blast_furnace",
+      "id": 931,
+      "default_state_id": 24120,
+      "hardness": 3.5
+    },
+    {
+      "name": "cartography_table",
+      "id": 932,
+      "default_state_id": 24127,
+      "hardness": 2.5
+    },
+    {
+      "name": "fletching_table",
+      "id": 933,
+      "default_state_id": 24128,
+      "hardness": 2.5
+    },
+    {
+      "name": "grindstone",
+      "id": 934,
+      "default_state_id": 24133,
+      "hardness": 2.0
+    },
+    {
+      "name": "lectern",
+      "id": 935,
+      "default_state_id": 24144,
+      "hardness": 2.5
+    },
+    {
+      "name": "smithing_table",
+      "id": 936,
+      "default_state_id": 24157,
+      "hardness": 2.5
+    },
+    {
+      "name": "stonecutter",
+      "id": 937,
+      "default_state_id": 24158,
+      "hardness": 3.5
+    },
+    {
+      "name": "bell",
+      "id": 938,
+      "default_state_id": 24163,
+      "hardness": 5.0
+    },
+    {
+      "name": "lantern",
+      "id": 939,
+      "default_state_id": 24197,
+      "hardness": 3.5
+    },
+    {
+      "name": "soul_lantern",
+      "id": 940,
+      "default_state_id": 24201,
+      "hardness": 3.5
+    },
+    {
+      "name": "copper_lantern",
+      "id": 941,
+      "default_state_id": 24205,
+      "hardness": 3.5
+    },
+    {
+      "name": "exposed_copper_lantern",
+      "id": 942,
+      "default_state_id": 24209,
+      "hardness": 3.5
+    },
+    {
+      "name": "weathered_copper_lantern",
+      "id": 943,
+      "default_state_id": 24213,
+      "hardness": 3.5
+    },
+    {
+      "name": "oxidized_copper_lantern",
+      "id": 944,
+      "default_state_id": 24217,
+      "hardness": 3.5
+    },
+    {
+      "name": "waxed_copper_lantern",
+      "id": 945,
+      "default_state_id": 24221,
+      "hardness": 3.5
+    },
+    {
+      "name": "waxed_exposed_copper_lantern",
+      "id": 946,
+      "default_state_id": 24225,
+      "hardness": 3.5
+    },
+    {
+      "name": "waxed_weathered_copper_lantern",
+      "id": 947,
+      "default_state_id": 24229,
+      "hardness": 3.5
+    },
+    {
+      "name": "waxed_oxidized_copper_lantern",
+      "id": 948,
+      "default_state_id": 24233,
+      "hardness": 3.5
+    },
+    {
+      "name": "campfire",
+      "id": 949,
+      "default_state_id": 24237,
+      "hardness": 2.0
+    },
+    {
+      "name": "soul_campfire",
+      "id": 950,
+      "default_state_id": 24269,
+      "hardness": 2.0
+    },
+    {
+      "name": "sweet_berry_bush",
+      "id": 951,
+      "default_state_id": 24298,
+      "hardness": 0.0
+    },
+    {
+      "name": "warped_stem",
+      "id": 952,
+      "default_state_id": 24303,
+      "hardness": 2.0
+    },
+    {
+      "name": "stripped_warped_stem",
+      "id": 953,
+      "default_state_id": 24306,
+      "hardness": 2.0
+    },
+    {
+      "name": "warped_hyphae",
+      "id": 954,
+      "default_state_id": 24309,
+      "hardness": 2.0
+    },
+    {
+      "name": "stripped_warped_hyphae",
+      "id": 955,
+      "default_state_id": 24312,
+      "hardness": 2.0
+    },
+    {
+      "name": "warped_nylium",
+      "id": 956,
+      "default_state_id": 24314,
+      "hardness": 0.4
+    },
+    {
+      "name": "warped_fungus",
+      "id": 957,
+      "default_state_id": 24315,
+      "hardness": 0.0
+    },
+    {
+      "name": "warped_wart_block",
+      "id": 958,
+      "default_state_id": 24316,
+      "hardness": 1.0
+    },
+    {
+      "name": "warped_roots",
+      "id": 959,
+      "default_state_id": 24317,
+      "hardness": 0.0
+    },
+    {
+      "name": "nether_sprouts",
+      "id": 960,
+      "default_state_id": 24318,
+      "hardness": 0.0
+    },
+    {
+      "name": "crimson_stem",
+      "id": 961,
+      "default_state_id": 24320,
+      "hardness": 2.0
+    },
+    {
+      "name": "stripped_crimson_stem",
+      "id": 962,
+      "default_state_id": 24323,
+      "hardness": 2.0
+    },
+    {
+      "name": "crimson_hyphae",
+      "id": 963,
+      "default_state_id": 24326,
+      "hardness": 2.0
+    },
+    {
+      "name": "stripped_crimson_hyphae",
+      "id": 964,
+      "default_state_id": 24329,
+      "hardness": 2.0
+    },
+    {
+      "name": "crimson_nylium",
+      "id": 965,
+      "default_state_id": 24331,
+      "hardness": 0.4
+    },
+    {
+      "name": "crimson_fungus",
+      "id": 966,
+      "default_state_id": 24332,
+      "hardness": 0.0
+    },
+    {
+      "name": "shroomlight",
+      "id": 967,
+      "default_state_id": 24333,
+      "hardness": 1.0
+    },
+    {
+      "name": "weeping_vines",
+      "id": 968,
+      "default_state_id": 24334,
+      "hardness": 0.0
+    },
+    {
+      "name": "weeping_vines_plant",
+      "id": 969,
+      "default_state_id": 24360,
+      "hardness": 0.0
+    },
+    {
+      "name": "twisting_vines",
+      "id": 970,
+      "default_state_id": 24361,
+      "hardness": 0.0
+    },
+    {
+      "name": "twisting_vines_plant",
+      "id": 971,
+      "default_state_id": 24387,
+      "hardness": 0.0
+    },
+    {
+      "name": "crimson_roots",
+      "id": 972,
+      "default_state_id": 24388,
+      "hardness": 0.0
+    },
+    {
+      "name": "crimson_planks",
+      "id": 973,
+      "default_state_id": 24389,
+      "hardness": 2.0
+    },
+    {
+      "name": "warped_planks",
+      "id": 974,
+      "default_state_id": 24390,
+      "hardness": 2.0
+    },
+    {
+      "name": "crimson_slab",
+      "id": 975,
+      "default_state_id": 24394,
+      "hardness": 2.0
+    },
+    {
+      "name": "warped_slab",
+      "id": 976,
+      "default_state_id": 24400,
+      "hardness": 2.0
+    },
+    {
+      "name": "crimson_pressure_plate",
+      "id": 977,
+      "default_state_id": 24404,
+      "hardness": 0.5
+    },
+    {
+      "name": "warped_pressure_plate",
+      "id": 978,
+      "default_state_id": 24406,
+      "hardness": 0.5
+    },
+    {
+      "name": "crimson_fence",
+      "id": 979,
+      "default_state_id": 24438,
+      "hardness": 2.0
+    },
+    {
+      "name": "warped_fence",
+      "id": 980,
+      "default_state_id": 24470,
+      "hardness": 2.0
+    },
+    {
+      "name": "crimson_trapdoor",
+      "id": 981,
+      "default_state_id": 24486,
+      "hardness": 3.0
+    },
+    {
+      "name": "warped_trapdoor",
+      "id": 982,
+      "default_state_id": 24550,
+      "hardness": 3.0
+    },
+    {
+      "name": "crimson_fence_gate",
+      "id": 983,
+      "default_state_id": 24606,
+      "hardness": 2.0
+    },
+    {
+      "name": "warped_fence_gate",
+      "id": 984,
+      "default_state_id": 24638,
+      "hardness": 2.0
+    },
+    {
+      "name": "crimson_stairs",
+      "id": 985,
+      "default_state_id": 24674,
+      "hardness": 2.0
+    },
+    {
+      "name": "warped_stairs",
+      "id": 986,
+      "default_state_id": 24754,
+      "hardness": 2.0
+    },
+    {
+      "name": "crimson_button",
+      "id": 987,
+      "default_state_id": 24832,
+      "hardness": 0.5
+    },
+    {
+      "name": "warped_button",
+      "id": 988,
+      "default_state_id": 24856,
+      "hardness": 0.5
+    },
+    {
+      "name": "crimson_door",
+      "id": 989,
+      "default_state_id": 24882,
+      "hardness": 3.0
+    },
+    {
+      "name": "warped_door",
+      "id": 990,
+      "default_state_id": 24946,
+      "hardness": 3.0
+    },
+    {
+      "name": "crimson_sign",
+      "id": 991,
+      "default_state_id": 25016,
+      "hardness": 1.0
+    },
+    {
+      "name": "warped_sign",
+      "id": 992,
+      "default_state_id": 25048,
+      "hardness": 1.0
+    },
+    {
+      "name": "crimson_wall_sign",
+      "id": 993,
+      "default_state_id": 25064,
+      "hardness": 1.0
+    },
+    {
+      "name": "warped_wall_sign",
+      "id": 994,
+      "default_state_id": 25072,
+      "hardness": 1.0
+    },
+    {
+      "name": "structure_block",
+      "id": 995,
+      "default_state_id": 25080,
+      "hardness": -1.0
+    },
+    {
+      "name": "jigsaw",
+      "id": 996,
+      "default_state_id": 25093,
+      "hardness": -1.0
+    },
+    {
+      "name": "test_block",
+      "id": 997,
+      "default_state_id": 25095,
+      "hardness": -1.0
+    },
+    {
+      "name": "test_instance_block",
+      "id": 998,
+      "default_state_id": 25099,
+      "hardness": -1.0
+    },
+    {
+      "name": "composter",
+      "id": 999,
+      "default_state_id": 25100,
+      "hardness": 0.6
+    },
+    {
+      "name": "target",
+      "id": 1000,
+      "default_state_id": 25109,
+      "hardness": 0.5
+    },
+    {
+      "name": "bee_nest",
+      "id": 1001,
+      "default_state_id": 25125,
+      "hardness": 0.3
+    },
+    {
+      "name": "beehive",
+      "id": 1002,
+      "default_state_id": 25149,
+      "hardness": 0.6
+    },
+    {
+      "name": "honey_block",
+      "id": 1003,
+      "default_state_id": 25173,
+      "hardness": 0.0
+    },
+    {
+      "name": "honeycomb_block",
+      "id": 1004,
+      "default_state_id": 25174,
+      "hardness": 0.6
+    },
+    {
+      "name": "netherite_block",
+      "id": 1005,
+      "default_state_id": 25175,
+      "hardness": 50.0
+    },
+    {
+      "name": "ancient_debris",
+      "id": 1006,
+      "default_state_id": 25176,
+      "hardness": 30.0
+    },
+    {
+      "name": "crying_obsidian",
+      "id": 1007,
+      "default_state_id": 25177,
+      "hardness": 50.0
+    },
+    {
+      "name": "respawn_anchor",
+      "id": 1008,
+      "default_state_id": 25178,
+      "hardness": 50.0
+    },
+    {
+      "name": "potted_crimson_fungus",
+      "id": 1009,
+      "default_state_id": 25183,
+      "hardness": 0.0
+    },
+    {
+      "name": "potted_warped_fungus",
+      "id": 1010,
+      "default_state_id": 25184,
+      "hardness": 0.0
+    },
+    {
+      "name": "potted_crimson_roots",
+      "id": 1011,
+      "default_state_id": 25185,
+      "hardness": 0.0
+    },
+    {
+      "name": "potted_warped_roots",
+      "id": 1012,
+      "default_state_id": 25186,
+      "hardness": 0.0
+    },
+    {
+      "name": "lodestone",
+      "id": 1013,
+      "default_state_id": 25187,
+      "hardness": 3.5
+    },
+    {
+      "name": "blackstone",
+      "id": 1014,
+      "default_state_id": 25188,
+      "hardness": 1.5
+    },
+    {
+      "name": "blackstone_stairs",
+      "id": 1015,
+      "default_state_id": 25200,
+      "hardness": 1.5
+    },
+    {
+      "name": "blackstone_wall",
+      "id": 1016,
+      "default_state_id": 25272,
+      "hardness": 1.5
+    },
+    {
+      "name": "blackstone_slab",
+      "id": 1017,
+      "default_state_id": 25596,
+      "hardness": 2.0
+    },
+    {
+      "name": "polished_blackstone",
+      "id": 1018,
+      "default_state_id": 25599,
+      "hardness": 2.0
+    },
+    {
+      "name": "polished_blackstone_bricks",
+      "id": 1019,
+      "default_state_id": 25600,
+      "hardness": 1.5
+    },
+    {
+      "name": "cracked_polished_blackstone_bricks",
+      "id": 1020,
+      "default_state_id": 25601,
+      "hardness": 1.5
+    },
+    {
+      "name": "chiseled_polished_blackstone",
+      "id": 1021,
+      "default_state_id": 25602,
+      "hardness": 1.5
+    },
+    {
+      "name": "polished_blackstone_brick_slab",
+      "id": 1022,
+      "default_state_id": 25606,
+      "hardness": 2.0
+    },
+    {
+      "name": "polished_blackstone_brick_stairs",
+      "id": 1023,
+      "default_state_id": 25620,
+      "hardness": 1.5
+    },
+    {
+      "name": "polished_blackstone_brick_wall",
+      "id": 1024,
+      "default_state_id": 25692,
+      "hardness": 1.5
+    },
+    {
+      "name": "gilded_blackstone",
+      "id": 1025,
+      "default_state_id": 26013,
+      "hardness": 1.5
+    },
+    {
+      "name": "polished_blackstone_stairs",
+      "id": 1026,
+      "default_state_id": 26025,
+      "hardness": 2.0
+    },
+    {
+      "name": "polished_blackstone_slab",
+      "id": 1027,
+      "default_state_id": 26097,
+      "hardness": 2.0
+    },
+    {
+      "name": "polished_blackstone_pressure_plate",
+      "id": 1028,
+      "default_state_id": 26101,
+      "hardness": 0.5
+    },
+    {
+      "name": "polished_blackstone_button",
+      "id": 1029,
+      "default_state_id": 26111,
+      "hardness": 0.5
+    },
+    {
+      "name": "polished_blackstone_wall",
+      "id": 1030,
+      "default_state_id": 26129,
+      "hardness": 2.0
+    },
+    {
+      "name": "chiseled_nether_bricks",
+      "id": 1031,
+      "default_state_id": 26450,
+      "hardness": 2.0
+    },
+    {
+      "name": "cracked_nether_bricks",
+      "id": 1032,
+      "default_state_id": 26451,
+      "hardness": 2.0
+    },
+    {
+      "name": "quartz_bricks",
+      "id": 1033,
+      "default_state_id": 26452,
+      "hardness": 0.8
+    },
+    {
+      "name": "candle",
+      "id": 1034,
+      "default_state_id": 26456,
+      "hardness": 0.1
+    },
+    {
+      "name": "white_candle",
+      "id": 1035,
+      "default_state_id": 26472,
+      "hardness": 0.1
+    },
+    {
+      "name": "orange_candle",
+      "id": 1036,
+      "default_state_id": 26488,
+      "hardness": 0.1
+    },
+    {
+      "name": "magenta_candle",
+      "id": 1037,
+      "default_state_id": 26504,
+      "hardness": 0.1
+    },
+    {
+      "name": "light_blue_candle",
+      "id": 1038,
+      "default_state_id": 26520,
+      "hardness": 0.1
+    },
+    {
+      "name": "yellow_candle",
+      "id": 1039,
+      "default_state_id": 26536,
+      "hardness": 0.1
+    },
+    {
+      "name": "lime_candle",
+      "id": 1040,
+      "default_state_id": 26552,
+      "hardness": 0.1
+    },
+    {
+      "name": "pink_candle",
+      "id": 1041,
+      "default_state_id": 26568,
+      "hardness": 0.1
+    },
+    {
+      "name": "gray_candle",
+      "id": 1042,
+      "default_state_id": 26584,
+      "hardness": 0.1
+    },
+    {
+      "name": "light_gray_candle",
+      "id": 1043,
+      "default_state_id": 26600,
+      "hardness": 0.1
+    },
+    {
+      "name": "cyan_candle",
+      "id": 1044,
+      "default_state_id": 26616,
+      "hardness": 0.1
+    },
+    {
+      "name": "purple_candle",
+      "id": 1045,
+      "default_state_id": 26632,
+      "hardness": 0.1
+    },
+    {
+      "name": "blue_candle",
+      "id": 1046,
+      "default_state_id": 26648,
+      "hardness": 0.1
+    },
+    {
+      "name": "brown_candle",
+      "id": 1047,
+      "default_state_id": 26664,
+      "hardness": 0.1
+    },
+    {
+      "name": "green_candle",
+      "id": 1048,
+      "default_state_id": 26680,
+      "hardness": 0.1
+    },
+    {
+      "name": "red_candle",
+      "id": 1049,
+      "default_state_id": 26696,
+      "hardness": 0.1
+    },
+    {
+      "name": "black_candle",
+      "id": 1050,
+      "default_state_id": 26712,
+      "hardness": 0.1
+    },
+    {
+      "name": "candle_cake",
+      "id": 1051,
+      "default_state_id": 26726,
+      "hardness": 0.5
+    },
+    {
+      "name": "white_candle_cake",
+      "id": 1052,
+      "default_state_id": 26728,
+      "hardness": 0.5
+    },
+    {
+      "name": "orange_candle_cake",
+      "id": 1053,
+      "default_state_id": 26730,
+      "hardness": 0.5
+    },
+    {
+      "name": "magenta_candle_cake",
+      "id": 1054,
+      "default_state_id": 26732,
+      "hardness": 0.5
+    },
+    {
+      "name": "light_blue_candle_cake",
+      "id": 1055,
+      "default_state_id": 26734,
+      "hardness": 0.5
+    },
+    {
+      "name": "yellow_candle_cake",
+      "id": 1056,
+      "default_state_id": 26736,
+      "hardness": 0.5
+    },
+    {
+      "name": "lime_candle_cake",
+      "id": 1057,
+      "default_state_id": 26738,
+      "hardness": 0.5
+    },
+    {
+      "name": "pink_candle_cake",
+      "id": 1058,
+      "default_state_id": 26740,
+      "hardness": 0.5
+    },
+    {
+      "name": "gray_candle_cake",
+      "id": 1059,
+      "default_state_id": 26742,
+      "hardness": 0.5
+    },
+    {
+      "name": "light_gray_candle_cake",
+      "id": 1060,
+      "default_state_id": 26744,
+      "hardness": 0.5
+    },
+    {
+      "name": "cyan_candle_cake",
+      "id": 1061,
+      "default_state_id": 26746,
+      "hardness": 0.5
+    },
+    {
+      "name": "purple_candle_cake",
+      "id": 1062,
+      "default_state_id": 26748,
+      "hardness": 0.5
+    },
+    {
+      "name": "blue_candle_cake",
+      "id": 1063,
+      "default_state_id": 26750,
+      "hardness": 0.5
+    },
+    {
+      "name": "brown_candle_cake",
+      "id": 1064,
+      "default_state_id": 26752,
+      "hardness": 0.5
+    },
+    {
+      "name": "green_candle_cake",
+      "id": 1065,
+      "default_state_id": 26754,
+      "hardness": 0.5
+    },
+    {
+      "name": "red_candle_cake",
+      "id": 1066,
+      "default_state_id": 26756,
+      "hardness": 0.5
+    },
+    {
+      "name": "black_candle_cake",
+      "id": 1067,
+      "default_state_id": 26758,
+      "hardness": 0.5
+    },
+    {
+      "name": "amethyst_block",
+      "id": 1068,
+      "default_state_id": 26759,
+      "hardness": 1.5
+    },
+    {
+      "name": "budding_amethyst",
+      "id": 1069,
+      "default_state_id": 26760,
+      "hardness": 1.5
+    },
+    {
+      "name": "amethyst_cluster",
+      "id": 1070,
+      "default_state_id": 26770,
+      "hardness": 1.5
+    },
+    {
+      "name": "large_amethyst_bud",
+      "id": 1071,
+      "default_state_id": 26782,
+      "hardness": 1.5
+    },
+    {
+      "name": "medium_amethyst_bud",
+      "id": 1072,
+      "default_state_id": 26794,
+      "hardness": 1.5
+    },
+    {
+      "name": "small_amethyst_bud",
+      "id": 1073,
+      "default_state_id": 26806,
+      "hardness": 1.5
+    },
+    {
+      "name": "tuff",
+      "id": 1074,
+      "default_state_id": 26809,
+      "hardness": 1.5
+    },
+    {
+      "name": "tuff_slab",
+      "id": 1075,
+      "default_state_id": 26813,
+      "hardness": 1.5
+    },
+    {
+      "name": "tuff_stairs",
+      "id": 1076,
+      "default_state_id": 26827,
+      "hardness": 1.5
+    },
+    {
+      "name": "tuff_wall",
+      "id": 1077,
+      "default_state_id": 26899,
+      "hardness": 1.5
+    },
+    {
+      "name": "polished_tuff",
+      "id": 1078,
+      "default_state_id": 27220,
+      "hardness": 1.5
+    },
+    {
+      "name": "polished_tuff_slab",
+      "id": 1079,
+      "default_state_id": 27224,
+      "hardness": 1.5
+    },
+    {
+      "name": "polished_tuff_stairs",
+      "id": 1080,
+      "default_state_id": 27238,
+      "hardness": 1.5
+    },
+    {
+      "name": "polished_tuff_wall",
+      "id": 1081,
+      "default_state_id": 27310,
+      "hardness": 1.5
+    },
+    {
+      "name": "chiseled_tuff",
+      "id": 1082,
+      "default_state_id": 27631,
+      "hardness": 1.5
+    },
+    {
+      "name": "tuff_bricks",
+      "id": 1083,
+      "default_state_id": 27632,
+      "hardness": 1.5
+    },
+    {
+      "name": "tuff_brick_slab",
+      "id": 1084,
+      "default_state_id": 27636,
+      "hardness": 1.5
+    },
+    {
+      "name": "tuff_brick_stairs",
+      "id": 1085,
+      "default_state_id": 27650,
+      "hardness": 1.5
+    },
+    {
+      "name": "tuff_brick_wall",
+      "id": 1086,
+      "default_state_id": 27722,
+      "hardness": 1.5
+    },
+    {
+      "name": "chiseled_tuff_bricks",
+      "id": 1087,
+      "default_state_id": 28043,
+      "hardness": 1.5
+    },
+    {
+      "name": "sulfur",
+      "id": 1088,
+      "default_state_id": 28044,
+      "hardness": 1.5
+    },
+    {
+      "name": "potent_sulfur",
+      "id": 1089,
+      "default_state_id": 28045,
+      "hardness": 1.5
+    },
+    {
+      "name": "sulfur_slab",
+      "id": 1090,
+      "default_state_id": 28053,
+      "hardness": 1.5
+    },
+    {
+      "name": "sulfur_stairs",
+      "id": 1091,
+      "default_state_id": 28067,
+      "hardness": 1.5
+    },
+    {
+      "name": "sulfur_wall",
+      "id": 1092,
+      "default_state_id": 28139,
+      "hardness": 1.5
+    },
+    {
+      "name": "polished_sulfur",
+      "id": 1093,
+      "default_state_id": 28460,
+      "hardness": 1.5
+    },
+    {
+      "name": "polished_sulfur_slab",
+      "id": 1094,
+      "default_state_id": 28464,
+      "hardness": 1.5
+    },
+    {
+      "name": "polished_sulfur_stairs",
+      "id": 1095,
+      "default_state_id": 28478,
+      "hardness": 1.5
+    },
+    {
+      "name": "polished_sulfur_wall",
+      "id": 1096,
+      "default_state_id": 28550,
+      "hardness": 1.5
+    },
+    {
+      "name": "sulfur_bricks",
+      "id": 1097,
+      "default_state_id": 28871,
+      "hardness": 1.5
+    },
+    {
+      "name": "sulfur_brick_slab",
+      "id": 1098,
+      "default_state_id": 28875,
+      "hardness": 1.5
+    },
+    {
+      "name": "sulfur_brick_stairs",
+      "id": 1099,
+      "default_state_id": 28889,
+      "hardness": 1.5
+    },
+    {
+      "name": "sulfur_brick_wall",
+      "id": 1100,
+      "default_state_id": 28961,
+      "hardness": 1.5
+    },
+    {
+      "name": "chiseled_sulfur",
+      "id": 1101,
+      "default_state_id": 29282,
+      "hardness": 1.5
+    },
+    {
+      "name": "cinnabar",
+      "id": 1102,
+      "default_state_id": 29283,
+      "hardness": 1.5
+    },
+    {
+      "name": "cinnabar_slab",
+      "id": 1103,
+      "default_state_id": 29287,
+      "hardness": 1.5
+    },
+    {
+      "name": "cinnabar_stairs",
+      "id": 1104,
+      "default_state_id": 29301,
+      "hardness": 1.5
+    },
+    {
+      "name": "cinnabar_wall",
+      "id": 1105,
+      "default_state_id": 29373,
+      "hardness": 1.5
+    },
+    {
+      "name": "polished_cinnabar",
+      "id": 1106,
+      "default_state_id": 29694,
+      "hardness": 1.5
+    },
+    {
+      "name": "polished_cinnabar_slab",
+      "id": 1107,
+      "default_state_id": 29698,
+      "hardness": 1.5
+    },
+    {
+      "name": "polished_cinnabar_stairs",
+      "id": 1108,
+      "default_state_id": 29712,
+      "hardness": 1.5
+    },
+    {
+      "name": "polished_cinnabar_wall",
+      "id": 1109,
+      "default_state_id": 29784,
+      "hardness": 1.5
+    },
+    {
+      "name": "cinnabar_bricks",
+      "id": 1110,
+      "default_state_id": 30105,
+      "hardness": 1.5
+    },
+    {
+      "name": "cinnabar_brick_slab",
+      "id": 1111,
+      "default_state_id": 30109,
+      "hardness": 1.5
+    },
+    {
+      "name": "cinnabar_brick_stairs",
+      "id": 1112,
+      "default_state_id": 30123,
+      "hardness": 1.5
+    },
+    {
+      "name": "cinnabar_brick_wall",
+      "id": 1113,
+      "default_state_id": 30195,
+      "hardness": 1.5
+    },
+    {
+      "name": "chiseled_cinnabar",
+      "id": 1114,
+      "default_state_id": 30516,
+      "hardness": 1.5
+    },
+    {
+      "name": "calcite",
+      "id": 1115,
+      "default_state_id": 30517,
+      "hardness": 0.75
+    },
+    {
+      "name": "tinted_glass",
+      "id": 1116,
+      "default_state_id": 30518,
+      "hardness": 0.3
+    },
+    {
+      "name": "powder_snow",
+      "id": 1117,
+      "default_state_id": 30519,
+      "hardness": 0.25
+    },
+    {
+      "name": "sculk_sensor",
+      "id": 1118,
+      "default_state_id": 30521,
+      "hardness": 1.5
+    },
+    {
+      "name": "calibrated_sculk_sensor",
+      "id": 1119,
+      "default_state_id": 30617,
+      "hardness": 1.5
+    },
+    {
+      "name": "sculk",
+      "id": 1120,
+      "default_state_id": 31000,
+      "hardness": 0.2
+    },
+    {
+      "name": "sculk_vein",
+      "id": 1121,
+      "default_state_id": 31128,
+      "hardness": 0.2
+    },
+    {
+      "name": "sculk_catalyst",
+      "id": 1122,
+      "default_state_id": 31130,
+      "hardness": 3.0
+    },
+    {
+      "name": "sculk_shrieker",
+      "id": 1123,
+      "default_state_id": 31138,
+      "hardness": 3.0
+    },
+    {
+      "name": "copper_block",
+      "id": 1124,
+      "default_state_id": 31139,
+      "hardness": 3.0
+    },
+    {
+      "name": "exposed_copper",
+      "id": 1125,
+      "default_state_id": 31140,
+      "hardness": 3.0
+    },
+    {
+      "name": "weathered_copper",
+      "id": 1126,
+      "default_state_id": 31141,
+      "hardness": 3.0
+    },
+    {
+      "name": "oxidized_copper",
+      "id": 1127,
+      "default_state_id": 31142,
+      "hardness": 3.0
+    },
+    {
+      "name": "waxed_copper_block",
+      "id": 1128,
+      "default_state_id": 31143,
+      "hardness": 3.0
+    },
+    {
+      "name": "waxed_exposed_copper",
+      "id": 1129,
+      "default_state_id": 31144,
+      "hardness": 3.0
+    },
+    {
+      "name": "waxed_weathered_copper",
+      "id": 1130,
+      "default_state_id": 31145,
+      "hardness": 3.0
+    },
+    {
+      "name": "waxed_oxidized_copper",
+      "id": 1131,
+      "default_state_id": 31146,
+      "hardness": 3.0
+    },
+    {
+      "name": "copper_ore",
+      "id": 1132,
+      "default_state_id": 31147,
+      "hardness": 3.0
+    },
+    {
+      "name": "deepslate_copper_ore",
+      "id": 1133,
+      "default_state_id": 31148,
+      "hardness": 4.5
+    },
+    {
+      "name": "cut_copper",
+      "id": 1134,
+      "default_state_id": 31149,
+      "hardness": 3.0
+    },
+    {
+      "name": "exposed_cut_copper",
+      "id": 1135,
+      "default_state_id": 31150,
+      "hardness": 3.0
+    },
+    {
+      "name": "weathered_cut_copper",
+      "id": 1136,
+      "default_state_id": 31151,
+      "hardness": 3.0
+    },
+    {
+      "name": "oxidized_cut_copper",
+      "id": 1137,
+      "default_state_id": 31152,
+      "hardness": 3.0
+    },
+    {
+      "name": "waxed_cut_copper",
+      "id": 1138,
+      "default_state_id": 31153,
+      "hardness": 3.0
+    },
+    {
+      "name": "waxed_exposed_cut_copper",
+      "id": 1139,
+      "default_state_id": 31154,
+      "hardness": 3.0
+    },
+    {
+      "name": "waxed_weathered_cut_copper",
+      "id": 1140,
+      "default_state_id": 31155,
+      "hardness": 3.0
+    },
+    {
+      "name": "waxed_oxidized_cut_copper",
+      "id": 1141,
+      "default_state_id": 31156,
+      "hardness": 3.0
+    },
+    {
+      "name": "chiseled_copper",
+      "id": 1142,
+      "default_state_id": 31157,
+      "hardness": 3.0
+    },
+    {
+      "name": "exposed_chiseled_copper",
+      "id": 1143,
+      "default_state_id": 31158,
+      "hardness": 3.0
+    },
+    {
+      "name": "weathered_chiseled_copper",
+      "id": 1144,
+      "default_state_id": 31159,
+      "hardness": 3.0
+    },
+    {
+      "name": "oxidized_chiseled_copper",
+      "id": 1145,
+      "default_state_id": 31160,
+      "hardness": 3.0
+    },
+    {
+      "name": "waxed_chiseled_copper",
+      "id": 1146,
+      "default_state_id": 31161,
+      "hardness": 3.0
+    },
+    {
+      "name": "waxed_exposed_chiseled_copper",
+      "id": 1147,
+      "default_state_id": 31162,
+      "hardness": 3.0
+    },
+    {
+      "name": "waxed_weathered_chiseled_copper",
+      "id": 1148,
+      "default_state_id": 31163,
+      "hardness": 3.0
+    },
+    {
+      "name": "waxed_oxidized_chiseled_copper",
+      "id": 1149,
+      "default_state_id": 31164,
+      "hardness": 3.0
+    },
+    {
+      "name": "cut_copper_stairs",
+      "id": 1150,
+      "default_state_id": 31176,
+      "hardness": 3.0
+    },
+    {
+      "name": "exposed_cut_copper_stairs",
+      "id": 1151,
+      "default_state_id": 31256,
+      "hardness": 3.0
+    },
+    {
+      "name": "weathered_cut_copper_stairs",
+      "id": 1152,
+      "default_state_id": 31336,
+      "hardness": 3.0
+    },
+    {
+      "name": "oxidized_cut_copper_stairs",
+      "id": 1153,
+      "default_state_id": 31416,
+      "hardness": 3.0
+    },
+    {
+      "name": "waxed_cut_copper_stairs",
+      "id": 1154,
+      "default_state_id": 31496,
+      "hardness": 3.0
+    },
+    {
+      "name": "waxed_exposed_cut_copper_stairs",
+      "id": 1155,
+      "default_state_id": 31576,
+      "hardness": 3.0
+    },
+    {
+      "name": "waxed_weathered_cut_copper_stairs",
+      "id": 1156,
+      "default_state_id": 31656,
+      "hardness": 3.0
+    },
+    {
+      "name": "waxed_oxidized_cut_copper_stairs",
+      "id": 1157,
+      "default_state_id": 31736,
+      "hardness": 3.0
+    },
+    {
+      "name": "cut_copper_slab",
+      "id": 1158,
+      "default_state_id": 31808,
+      "hardness": 3.0
+    },
+    {
+      "name": "exposed_cut_copper_slab",
+      "id": 1159,
+      "default_state_id": 31814,
+      "hardness": 3.0
+    },
+    {
+      "name": "weathered_cut_copper_slab",
+      "id": 1160,
+      "default_state_id": 31820,
+      "hardness": 3.0
+    },
+    {
+      "name": "oxidized_cut_copper_slab",
+      "id": 1161,
+      "default_state_id": 31826,
+      "hardness": 3.0
+    },
+    {
+      "name": "waxed_cut_copper_slab",
+      "id": 1162,
+      "default_state_id": 31832,
+      "hardness": 3.0
+    },
+    {
+      "name": "waxed_exposed_cut_copper_slab",
+      "id": 1163,
+      "default_state_id": 31838,
+      "hardness": 3.0
+    },
+    {
+      "name": "waxed_weathered_cut_copper_slab",
+      "id": 1164,
+      "default_state_id": 31844,
+      "hardness": 3.0
+    },
+    {
+      "name": "waxed_oxidized_cut_copper_slab",
+      "id": 1165,
+      "default_state_id": 31850,
+      "hardness": 3.0
+    },
+    {
+      "name": "copper_door",
+      "id": 1166,
+      "default_state_id": 31864,
+      "hardness": 3.0
+    },
+    {
+      "name": "exposed_copper_door",
+      "id": 1167,
+      "default_state_id": 31928,
+      "hardness": 3.0
+    },
+    {
+      "name": "weathered_copper_door",
+      "id": 1168,
+      "default_state_id": 31992,
+      "hardness": 3.0
+    },
+    {
+      "name": "oxidized_copper_door",
+      "id": 1169,
+      "default_state_id": 32056,
+      "hardness": 3.0
+    },
+    {
+      "name": "waxed_copper_door",
+      "id": 1170,
+      "default_state_id": 32120,
+      "hardness": 3.0
+    },
+    {
+      "name": "waxed_exposed_copper_door",
+      "id": 1171,
+      "default_state_id": 32184,
+      "hardness": 3.0
+    },
+    {
+      "name": "waxed_weathered_copper_door",
+      "id": 1172,
+      "default_state_id": 32248,
+      "hardness": 3.0
+    },
+    {
+      "name": "waxed_oxidized_copper_door",
+      "id": 1173,
+      "default_state_id": 32312,
+      "hardness": 3.0
+    },
+    {
+      "name": "copper_trapdoor",
+      "id": 1174,
+      "default_state_id": 32380,
+      "hardness": 3.0
+    },
+    {
+      "name": "exposed_copper_trapdoor",
+      "id": 1175,
+      "default_state_id": 32444,
+      "hardness": 3.0
+    },
+    {
+      "name": "weathered_copper_trapdoor",
+      "id": 1176,
+      "default_state_id": 32508,
+      "hardness": 3.0
+    },
+    {
+      "name": "oxidized_copper_trapdoor",
+      "id": 1177,
+      "default_state_id": 32572,
+      "hardness": 3.0
+    },
+    {
+      "name": "waxed_copper_trapdoor",
+      "id": 1178,
+      "default_state_id": 32636,
+      "hardness": 3.0
+    },
+    {
+      "name": "waxed_exposed_copper_trapdoor",
+      "id": 1179,
+      "default_state_id": 32700,
+      "hardness": 3.0
+    },
+    {
+      "name": "waxed_weathered_copper_trapdoor",
+      "id": 1180,
+      "default_state_id": 32764,
+      "hardness": 3.0
+    },
+    {
+      "name": "waxed_oxidized_copper_trapdoor",
+      "id": 1181,
+      "default_state_id": 32828,
+      "hardness": 3.0
+    },
+    {
+      "name": "copper_grate",
+      "id": 1182,
+      "default_state_id": 32878,
+      "hardness": 3.0
+    },
+    {
+      "name": "exposed_copper_grate",
+      "id": 1183,
+      "default_state_id": 32880,
+      "hardness": 3.0
+    },
+    {
+      "name": "weathered_copper_grate",
+      "id": 1184,
+      "default_state_id": 32882,
+      "hardness": 3.0
+    },
+    {
+      "name": "oxidized_copper_grate",
+      "id": 1185,
+      "default_state_id": 32884,
+      "hardness": 3.0
+    },
+    {
+      "name": "waxed_copper_grate",
+      "id": 1186,
+      "default_state_id": 32886,
+      "hardness": 3.0
+    },
+    {
+      "name": "waxed_exposed_copper_grate",
+      "id": 1187,
+      "default_state_id": 32888,
+      "hardness": 3.0
+    },
+    {
+      "name": "waxed_weathered_copper_grate",
+      "id": 1188,
+      "default_state_id": 32890,
+      "hardness": 3.0
+    },
+    {
+      "name": "waxed_oxidized_copper_grate",
+      "id": 1189,
+      "default_state_id": 32892,
+      "hardness": 3.0
+    },
+    {
+      "name": "copper_bulb",
+      "id": 1190,
+      "default_state_id": 32896,
+      "hardness": 3.0
+    },
+    {
+      "name": "exposed_copper_bulb",
+      "id": 1191,
+      "default_state_id": 32900,
+      "hardness": 3.0
+    },
+    {
+      "name": "weathered_copper_bulb",
+      "id": 1192,
+      "default_state_id": 32904,
+      "hardness": 3.0
+    },
+    {
+      "name": "oxidized_copper_bulb",
+      "id": 1193,
+      "default_state_id": 32908,
+      "hardness": 3.0
+    },
+    {
+      "name": "waxed_copper_bulb",
+      "id": 1194,
+      "default_state_id": 32912,
+      "hardness": 3.0
+    },
+    {
+      "name": "waxed_exposed_copper_bulb",
+      "id": 1195,
+      "default_state_id": 32916,
+      "hardness": 3.0
+    },
+    {
+      "name": "waxed_weathered_copper_bulb",
+      "id": 1196,
+      "default_state_id": 32920,
+      "hardness": 3.0
+    },
+    {
+      "name": "waxed_oxidized_copper_bulb",
+      "id": 1197,
+      "default_state_id": 32924,
+      "hardness": 3.0
+    },
+    {
+      "name": "copper_chest",
+      "id": 1198,
+      "default_state_id": 32926,
+      "hardness": 3.0
+    },
+    {
+      "name": "exposed_copper_chest",
+      "id": 1199,
+      "default_state_id": 32950,
+      "hardness": 3.0
+    },
+    {
+      "name": "weathered_copper_chest",
+      "id": 1200,
+      "default_state_id": 32974,
+      "hardness": 3.0
+    },
+    {
+      "name": "oxidized_copper_chest",
+      "id": 1201,
+      "default_state_id": 32998,
+      "hardness": 3.0
+    },
+    {
+      "name": "waxed_copper_chest",
+      "id": 1202,
+      "default_state_id": 33022,
+      "hardness": 3.0
+    },
+    {
+      "name": "waxed_exposed_copper_chest",
+      "id": 1203,
+      "default_state_id": 33046,
+      "hardness": 3.0
+    },
+    {
+      "name": "waxed_weathered_copper_chest",
+      "id": 1204,
+      "default_state_id": 33070,
+      "hardness": 3.0
+    },
+    {
+      "name": "waxed_oxidized_copper_chest",
+      "id": 1205,
+      "default_state_id": 33094,
+      "hardness": 3.0
+    },
+    {
+      "name": "copper_golem_statue",
+      "id": 1206,
+      "default_state_id": 33118,
+      "hardness": 3.0
+    },
+    {
+      "name": "exposed_copper_golem_statue",
+      "id": 1207,
+      "default_state_id": 33150,
+      "hardness": 3.0
+    },
+    {
+      "name": "weathered_copper_golem_statue",
+      "id": 1208,
+      "default_state_id": 33182,
+      "hardness": 3.0
+    },
+    {
+      "name": "oxidized_copper_golem_statue",
+      "id": 1209,
+      "default_state_id": 33214,
+      "hardness": 3.0
+    },
+    {
+      "name": "waxed_copper_golem_statue",
+      "id": 1210,
+      "default_state_id": 33246,
+      "hardness": 3.0
+    },
+    {
+      "name": "waxed_exposed_copper_golem_statue",
+      "id": 1211,
+      "default_state_id": 33278,
+      "hardness": 3.0
+    },
+    {
+      "name": "waxed_weathered_copper_golem_statue",
+      "id": 1212,
+      "default_state_id": 33310,
+      "hardness": 3.0
+    },
+    {
+      "name": "waxed_oxidized_copper_golem_statue",
+      "id": 1213,
+      "default_state_id": 33342,
+      "hardness": 3.0
+    },
+    {
+      "name": "lightning_rod",
+      "id": 1214,
+      "default_state_id": 33392,
+      "hardness": 3.0
+    },
+    {
+      "name": "exposed_lightning_rod",
+      "id": 1215,
+      "default_state_id": 33416,
+      "hardness": 3.0
+    },
+    {
+      "name": "weathered_lightning_rod",
+      "id": 1216,
+      "default_state_id": 33440,
+      "hardness": 3.0
+    },
+    {
+      "name": "oxidized_lightning_rod",
+      "id": 1217,
+      "default_state_id": 33464,
+      "hardness": 3.0
+    },
+    {
+      "name": "waxed_lightning_rod",
+      "id": 1218,
+      "default_state_id": 33488,
+      "hardness": 3.0
+    },
+    {
+      "name": "waxed_exposed_lightning_rod",
+      "id": 1219,
+      "default_state_id": 33512,
+      "hardness": 3.0
+    },
+    {
+      "name": "waxed_weathered_lightning_rod",
+      "id": 1220,
+      "default_state_id": 33536,
+      "hardness": 3.0
+    },
+    {
+      "name": "waxed_oxidized_lightning_rod",
+      "id": 1221,
+      "default_state_id": 33560,
+      "hardness": 3.0
+    },
+    {
+      "name": "dripstone_block",
+      "id": 1222,
+      "default_state_id": 33565,
+      "hardness": 1.5
+    },
+    {
+      "name": "pointed_dripstone",
+      "id": 1223,
+      "default_state_id": 33571,
+      "hardness": 1.5
+    },
+    {
+      "name": "sulfur_spike",
+      "id": 1224,
+      "default_state_id": 33591,
+      "hardness": 1.5
+    },
+    {
+      "name": "cave_vines",
+      "id": 1225,
+      "default_state_id": 33607,
+      "hardness": 0.0
+    },
+    {
+      "name": "cave_vines_plant",
+      "id": 1226,
+      "default_state_id": 33659,
+      "hardness": 0.0
+    },
+    {
+      "name": "spore_blossom",
+      "id": 1227,
+      "default_state_id": 33660,
+      "hardness": 0.0
+    },
+    {
+      "name": "azalea",
+      "id": 1228,
+      "default_state_id": 33661,
+      "hardness": 0.0
+    },
+    {
+      "name": "flowering_azalea",
+      "id": 1229,
+      "default_state_id": 33662,
+      "hardness": 0.0
+    },
+    {
+      "name": "moss_carpet",
+      "id": 1230,
+      "default_state_id": 33663,
+      "hardness": 0.1
+    },
+    {
+      "name": "pink_petals",
+      "id": 1231,
+      "default_state_id": 33664,
+      "hardness": 0.0
+    },
+    {
+      "name": "wildflowers",
+      "id": 1232,
+      "default_state_id": 33680,
+      "hardness": 0.0
+    },
+    {
+      "name": "leaf_litter",
+      "id": 1233,
+      "default_state_id": 33696,
+      "hardness": 0.0
+    },
+    {
+      "name": "moss_block",
+      "id": 1234,
+      "default_state_id": 33712,
+      "hardness": 0.1
+    },
+    {
+      "name": "big_dripleaf",
+      "id": 1235,
+      "default_state_id": 33714,
+      "hardness": 0.1
+    },
+    {
+      "name": "big_dripleaf_stem",
+      "id": 1236,
+      "default_state_id": 33746,
+      "hardness": 0.1
+    },
+    {
+      "name": "small_dripleaf",
+      "id": 1237,
+      "default_state_id": 33756,
+      "hardness": 0.0
+    },
+    {
+      "name": "hanging_roots",
+      "id": 1238,
+      "default_state_id": 33770,
+      "hardness": 0.0
+    },
+    {
+      "name": "rooted_dirt",
+      "id": 1239,
+      "default_state_id": 33771,
+      "hardness": 0.5
+    },
+    {
+      "name": "mud",
+      "id": 1240,
+      "default_state_id": 33772,
+      "hardness": 0.5
+    },
+    {
+      "name": "deepslate",
+      "id": 1241,
+      "default_state_id": 33774,
+      "hardness": 3.0
+    },
+    {
+      "name": "cobbled_deepslate",
+      "id": 1242,
+      "default_state_id": 33776,
+      "hardness": 3.5
+    },
+    {
+      "name": "cobbled_deepslate_stairs",
+      "id": 1243,
+      "default_state_id": 33788,
+      "hardness": 3.5
+    },
+    {
+      "name": "cobbled_deepslate_slab",
+      "id": 1244,
+      "default_state_id": 33860,
+      "hardness": 3.5
+    },
+    {
+      "name": "cobbled_deepslate_wall",
+      "id": 1245,
+      "default_state_id": 33866,
+      "hardness": 3.5
+    },
+    {
+      "name": "polished_deepslate",
+      "id": 1246,
+      "default_state_id": 34187,
+      "hardness": 3.5
+    },
+    {
+      "name": "polished_deepslate_stairs",
+      "id": 1247,
+      "default_state_id": 34199,
+      "hardness": 3.5
+    },
+    {
+      "name": "polished_deepslate_slab",
+      "id": 1248,
+      "default_state_id": 34271,
+      "hardness": 3.5
+    },
+    {
+      "name": "polished_deepslate_wall",
+      "id": 1249,
+      "default_state_id": 34277,
+      "hardness": 3.5
+    },
+    {
+      "name": "deepslate_tiles",
+      "id": 1250,
+      "default_state_id": 34598,
+      "hardness": 3.5
+    },
+    {
+      "name": "deepslate_tile_stairs",
+      "id": 1251,
+      "default_state_id": 34610,
+      "hardness": 3.5
+    },
+    {
+      "name": "deepslate_tile_slab",
+      "id": 1252,
+      "default_state_id": 34682,
+      "hardness": 3.5
+    },
+    {
+      "name": "deepslate_tile_wall",
+      "id": 1253,
+      "default_state_id": 34688,
+      "hardness": 3.5
+    },
+    {
+      "name": "deepslate_bricks",
+      "id": 1254,
+      "default_state_id": 35009,
+      "hardness": 3.5
+    },
+    {
+      "name": "deepslate_brick_stairs",
+      "id": 1255,
+      "default_state_id": 35021,
+      "hardness": 3.5
+    },
+    {
+      "name": "deepslate_brick_slab",
+      "id": 1256,
+      "default_state_id": 35093,
+      "hardness": 3.5
+    },
+    {
+      "name": "deepslate_brick_wall",
+      "id": 1257,
+      "default_state_id": 35099,
+      "hardness": 3.5
+    },
+    {
+      "name": "chiseled_deepslate",
+      "id": 1258,
+      "default_state_id": 35420,
+      "hardness": 3.5
+    },
+    {
+      "name": "cracked_deepslate_bricks",
+      "id": 1259,
+      "default_state_id": 35421,
+      "hardness": 3.5
+    },
+    {
+      "name": "cracked_deepslate_tiles",
+      "id": 1260,
+      "default_state_id": 35422,
+      "hardness": 3.5
+    },
+    {
+      "name": "infested_deepslate",
+      "id": 1261,
+      "default_state_id": 35424,
+      "hardness": 1.5
+    },
+    {
+      "name": "smooth_basalt",
+      "id": 1262,
+      "default_state_id": 35426,
+      "hardness": 1.25
+    },
+    {
+      "name": "raw_iron_block",
+      "id": 1263,
+      "default_state_id": 35427,
+      "hardness": 5.0
+    },
+    {
+      "name": "raw_copper_block",
+      "id": 1264,
+      "default_state_id": 35428,
+      "hardness": 5.0
+    },
+    {
+      "name": "raw_gold_block",
+      "id": 1265,
+      "default_state_id": 35429,
+      "hardness": 5.0
+    },
+    {
+      "name": "potted_azalea_bush",
+      "id": 1266,
+      "default_state_id": 35430,
+      "hardness": 0.0
+    },
+    {
+      "name": "potted_flowering_azalea_bush",
+      "id": 1267,
+      "default_state_id": 35431,
+      "hardness": 0.0
+    },
+    {
+      "name": "ochre_froglight",
+      "id": 1268,
+      "default_state_id": 35433,
+      "hardness": 0.3
+    },
+    {
+      "name": "verdant_froglight",
+      "id": 1269,
+      "default_state_id": 35436,
+      "hardness": 0.3
+    },
+    {
+      "name": "pearlescent_froglight",
+      "id": 1270,
+      "default_state_id": 35439,
+      "hardness": 0.3
+    },
+    {
+      "name": "frogspawn",
+      "id": 1271,
+      "default_state_id": 35441,
+      "hardness": 0.0
+    },
+    {
+      "name": "reinforced_deepslate",
+      "id": 1272,
+      "default_state_id": 35442,
+      "hardness": 55.0
+    },
+    {
+      "name": "decorated_pot",
+      "id": 1273,
+      "default_state_id": 35452,
+      "hardness": 0.0
+    },
+    {
+      "name": "crafter",
+      "id": 1274,
+      "default_state_id": 35504,
+      "hardness": 1.5
+    },
+    {
+      "name": "trial_spawner",
+      "id": 1275,
+      "default_state_id": 35513,
+      "hardness": 50.0
+    },
+    {
+      "name": "vault",
+      "id": 1276,
+      "default_state_id": 35523,
+      "hardness": 50.0
+    },
+    {
+      "name": "heavy_core",
+      "id": 1277,
+      "default_state_id": 35552,
+      "hardness": 10.0
+    },
+    {
+      "name": "pale_moss_block",
+      "id": 1278,
+      "default_state_id": 35553,
+      "hardness": 0.1
+    },
+    {
+      "name": "pale_moss_carpet",
+      "id": 1279,
+      "default_state_id": 35554,
+      "hardness": 0.1
+    },
+    {
+      "name": "pale_hanging_moss",
+      "id": 1280,
+      "default_state_id": 35716,
+      "hardness": 0.0
+    },
+    {
+      "name": "open_eyeblossom",
+      "id": 1281,
+      "default_state_id": 35718,
+      "hardness": 0.0
+    },
+    {
+      "name": "closed_eyeblossom",
+      "id": 1282,
+      "default_state_id": 35719,
+      "hardness": 0.0
+    },
+    {
+      "name": "potted_open_eyeblossom",
+      "id": 1283,
+      "default_state_id": 35720,
+      "hardness": 0.0
+    },
+    {
+      "name": "potted_closed_eyeblossom",
+      "id": 1284,
+      "default_state_id": 35721,
+      "hardness": 0.0
+    },
+    {
+      "name": "firefly_bush",
+      "id": 1285,
+      "default_state_id": 35722,
+      "hardness": 0.0
+    }
+  ]
+}

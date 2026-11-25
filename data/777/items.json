@@ -1,0 +1,4976 @@
+{
+  "air": {
+    "id": 0
+  },
+  "stone": {
+    "id": 1
+  },
+  "granite": {
+    "id": 2
+  },
+  "polished_granite": {
+    "id": 3
+  },
+  "diorite": {
+    "id": 4
+  },
+  "polished_diorite": {
+    "id": 5
+  },
+  "andesite": {
+    "id": 6
+  },
+  "polished_andesite": {
+    "id": 7
+  },
+  "deepslate": {
+    "id": 8
+  },
+  "cobbled_deepslate": {
+    "id": 9
+  },
+  "polished_deepslate": {
+    "id": 10
+  },
+  "calcite": {
+    "id": 11
+  },
+  "tuff": {
+    "id": 12
+  },
+  "tuff_slab": {
+    "id": 13
+  },
+  "tuff_stairs": {
+    "id": 14
+  },
+  "tuff_wall": {
+    "id": 15
+  },
+  "chiseled_tuff": {
+    "id": 16
+  },
+  "polished_tuff": {
+    "id": 17
+  },
+  "polished_tuff_slab": {
+    "id": 18
+  },
+  "polished_tuff_stairs": {
+    "id": 19
+  },
+  "polished_tuff_wall": {
+    "id": 20
+  },
+  "tuff_bricks": {
+    "id": 21
+  },
+  "tuff_brick_slab": {
+    "id": 22
+  },
+  "tuff_brick_stairs": {
+    "id": 23
+  },
+  "tuff_brick_wall": {
+    "id": 24
+  },
+  "chiseled_tuff_bricks": {
+    "id": 25
+  },
+  "sulfur": {
+    "id": 26
+  },
+  "potent_sulfur": {
+    "id": 27
+  },
+  "sulfur_slab": {
+    "id": 28
+  },
+  "sulfur_stairs": {
+    "id": 29
+  },
+  "sulfur_wall": {
+    "id": 30
+  },
+  "polished_sulfur": {
+    "id": 31
+  },
+  "polished_sulfur_slab": {
+    "id": 32
+  },
+  "polished_sulfur_stairs": {
+    "id": 33
+  },
+  "polished_sulfur_wall": {
+    "id": 34
+  },
+  "sulfur_bricks": {
+    "id": 35
+  },
+  "sulfur_brick_slab": {
+    "id": 36
+  },
+  "sulfur_brick_stairs": {
+    "id": 37
+  },
+  "sulfur_brick_wall": {
+    "id": 38
+  },
+  "chiseled_sulfur": {
+    "id": 39
+  },
+  "cinnabar": {
+    "id": 40
+  },
+  "cinnabar_slab": {
+    "id": 41
+  },
+  "cinnabar_stairs": {
+    "id": 42
+  },
+  "cinnabar_wall": {
+    "id": 43
+  },
+  "polished_cinnabar": {
+    "id": 44
+  },
+  "polished_cinnabar_slab": {
+    "id": 45
+  },
+  "polished_cinnabar_stairs": {
+    "id": 46
+  },
+  "polished_cinnabar_wall": {
+    "id": 47
+  },
+  "cinnabar_bricks": {
+    "id": 48
+  },
+  "cinnabar_brick_slab": {
+    "id": 49
+  },
+  "cinnabar_brick_stairs": {
+    "id": 50
+  },
+  "cinnabar_brick_wall": {
+    "id": 51
+  },
+  "chiseled_cinnabar": {
+    "id": 52
+  },
+  "dripstone_block": {
+    "id": 53
+  },
+  "grass_block": {
+    "id": 54
+  },
+  "dirt": {
+    "id": 55
+  },
+  "coarse_dirt": {
+    "id": 56
+  },
+  "podzol": {
+    "id": 57
+  },
+  "rooted_dirt": {
+    "id": 58
+  },
+  "mud": {
+    "id": 59
+  },
+  "crimson_nylium": {
+    "id": 60
+  },
+  "warped_nylium": {
+    "id": 61
+  },
+  "cobblestone": {
+    "id": 62
+  },
+  "oak_planks": {
+    "id": 63
+  },
+  "spruce_planks": {
+    "id": 64
+  },
+  "birch_planks": {
+    "id": 65
+  },
+  "jungle_planks": {
+    "id": 66
+  },
+  "acacia_planks": {
+    "id": 67
+  },
+  "cherry_planks": {
+    "id": 68
+  },
+  "dark_oak_planks": {
+    "id": 69
+  },
+  "pale_oak_planks": {
+    "id": 70
+  },
+  "mangrove_planks": {
+    "id": 71
+  },
+  "poplar_planks": {
+    "id": 72
+  },
+  "bamboo_planks": {
+    "id": 73
+  },
+  "crimson_planks": {
+    "id": 74
+  },
+  "warped_planks": {
+    "id": 75
+  },
+  "bamboo_mosaic": {
+    "id": 76
+  },
+  "oak_sapling": {
+    "id": 77
+  },
+  "spruce_sapling": {
+    "id": 78
+  },
+  "birch_sapling": {
+    "id": 79
+  },
+  "jungle_sapling": {
+    "id": 80
+  },
+  "acacia_sapling": {
+    "id": 81
+  },
+  "cherry_sapling": {
+    "id": 82
+  },
+  "dark_oak_sapling": {
+    "id": 83
+  },
+  "pale_oak_sapling": {
+    "id": 84
+  },
+  "mangrove_propagule": {
+    "id": 85
+  },
+  "poplar_sapling": {
+    "id": 86
+  },
+  "bedrock": {
+    "id": 87
+  },
+  "sand": {
+    "id": 88
+  },
+  "suspicious_sand": {
+    "id": 89
+  },
+  "suspicious_gravel": {
+    "id": 90
+  },
+  "red_sand": {
+    "id": 91
+  },
+  "gravel": {
+    "id": 92
+  },
+  "coal_ore": {
+    "id": 93
+  },
+  "deepslate_coal_ore": {
+    "id": 94
+  },
+  "iron_ore": {
+    "id": 95
+  },
+  "deepslate_iron_ore": {
+    "id": 96
+  },
+  "copper_ore": {
+    "id": 97
+  },
+  "deepslate_copper_ore": {
+    "id": 98
+  },
+  "gold_ore": {
+    "id": 99
+  },
+  "deepslate_gold_ore": {
+    "id": 100
+  },
+  "redstone_ore": {
+    "id": 101
+  },
+  "deepslate_redstone_ore": {
+    "id": 102
+  },
+  "emerald_ore": {
+    "id": 103
+  },
+  "deepslate_emerald_ore": {
+    "id": 104
+  },
+  "lapis_ore": {
+    "id": 105
+  },
+  "deepslate_lapis_ore": {
+    "id": 106
+  },
+  "diamond_ore": {
+    "id": 107
+  },
+  "deepslate_diamond_ore": {
+    "id": 108
+  },
+  "nether_gold_ore": {
+    "id": 109
+  },
+  "nether_quartz_ore": {
+    "id": 110
+  },
+  "ancient_debris": {
+    "id": 111
+  },
+  "coal_block": {
+    "id": 112
+  },
+  "raw_iron_block": {
+    "id": 113
+  },
+  "raw_copper_block": {
+    "id": 114
+  },
+  "raw_gold_block": {
+    "id": 115
+  },
+  "heavy_core": {
+    "id": 116
+  },
+  "amethyst_block": {
+    "id": 117
+  },
+  "budding_amethyst": {
+    "id": 118
+  },
+  "iron_block": {
+    "id": 119
+  },
+  "copper_block": {
+    "id": 120
+  },
+  "exposed_copper": {
+    "id": 121
+  },
+  "weathered_copper": {
+    "id": 122
+  },
+  "oxidized_copper": {
+    "id": 123
+  },
+  "waxed_copper_block": {
+    "id": 124
+  },
+  "waxed_exposed_copper": {
+    "id": 125
+  },
+  "waxed_weathered_copper": {
+    "id": 126
+  },
+  "waxed_oxidized_copper": {
+    "id": 127
+  },
+  "gold_block": {
+    "id": 128
+  },
+  "diamond_block": {
+    "id": 129
+  },
+  "netherite_block": {
+    "id": 130
+  },
+  "chiseled_copper": {
+    "id": 131
+  },
+  "exposed_chiseled_copper": {
+    "id": 132
+  },
+  "weathered_chiseled_copper": {
+    "id": 133
+  },
+  "oxidized_chiseled_copper": {
+    "id": 134
+  },
+  "waxed_chiseled_copper": {
+    "id": 135
+  },
+  "waxed_exposed_chiseled_copper": {
+    "id": 136
+  },
+  "waxed_weathered_chiseled_copper": {
+    "id": 137
+  },
+  "waxed_oxidized_chiseled_copper": {
+    "id": 138
+  },
+  "cut_copper": {
+    "id": 139
+  },
+  "exposed_cut_copper": {
+    "id": 140
+  },
+  "weathered_cut_copper": {
+    "id": 141
+  },
+  "oxidized_cut_copper": {
+    "id": 142
+  },
+  "waxed_cut_copper": {
+    "id": 143
+  },
+  "waxed_exposed_cut_copper": {
+    "id": 144
+  },
+  "waxed_weathered_cut_copper": {
+    "id": 145
+  },
+  "waxed_oxidized_cut_copper": {
+    "id": 146
+  },
+  "cut_copper_stairs": {
+    "id": 147
+  },
+  "exposed_cut_copper_stairs": {
+    "id": 148
+  },
+  "weathered_cut_copper_stairs": {
+    "id": 149
+  },
+  "oxidized_cut_copper_stairs": {
+    "id": 150
+  },
+  "waxed_cut_copper_stairs": {
+    "id": 151
+  },
+  "waxed_exposed_cut_copper_stairs": {
+    "id": 152
+  },
+  "waxed_weathered_cut_copper_stairs": {
+    "id": 153
+  },
+  "waxed_oxidized_cut_copper_stairs": {
+    "id": 154
+  },
+  "cut_copper_slab": {
+    "id": 155
+  },
+  "exposed_cut_copper_slab": {
+    "id": 156
+  },
+  "weathered_cut_copper_slab": {
+    "id": 157
+  },
+  "oxidized_cut_copper_slab": {
+    "id": 158
+  },
+  "waxed_cut_copper_slab": {
+    "id": 159
+  },
+  "waxed_exposed_cut_copper_slab": {
+    "id": 160
+  },
+  "waxed_weathered_cut_copper_slab": {
+    "id": 161
+  },
+  "waxed_oxidized_cut_copper_slab": {
+    "id": 162
+  },
+  "oak_log": {
+    "id": 163
+  },
+  "spruce_log": {
+    "id": 164
+  },
+  "birch_log": {
+    "id": 165
+  },
+  "jungle_log": {
+    "id": 166
+  },
+  "acacia_log": {
+    "id": 167
+  },
+  "cherry_log": {
+    "id": 168
+  },
+  "pale_oak_log": {
+    "id": 169
+  },
+  "dark_oak_log": {
+    "id": 170
+  },
+  "mangrove_log": {
+    "id": 171
+  },
+  "poplar_log": {
+    "id": 172
+  },
+  "mangrove_roots": {
+    "id": 173
+  },
+  "muddy_mangrove_roots": {
+    "id": 174
+  },
+  "crimson_stem": {
+    "id": 175
+  },
+  "warped_stem": {
+    "id": 176
+  },
+  "bamboo_block": {
+    "id": 177
+  },
+  "stripped_oak_log": {
+    "id": 178
+  },
+  "stripped_spruce_log": {
+    "id": 179
+  },
+  "stripped_birch_log": {
+    "id": 180
+  },
+  "stripped_jungle_log": {
+    "id": 181
+  },
+  "stripped_acacia_log": {
+    "id": 182
+  },
+  "stripped_cherry_log": {
+    "id": 183
+  },
+  "stripped_dark_oak_log": {
+    "id": 184
+  },
+  "stripped_pale_oak_log": {
+    "id": 185
+  },
+  "stripped_mangrove_log": {
+    "id": 186
+  },
+  "stripped_poplar_log": {
+    "id": 187
+  },
+  "stripped_crimson_stem": {
+    "id": 188
+  },
+  "stripped_warped_stem": {
+    "id": 189
+  },
+  "stripped_oak_wood": {
+    "id": 190
+  },
+  "stripped_spruce_wood": {
+    "id": 191
+  },
+  "stripped_birch_wood": {
+    "id": 192
+  },
+  "stripped_jungle_wood": {
+    "id": 193
+  },
+  "stripped_acacia_wood": {
+    "id": 194
+  },
+  "stripped_cherry_wood": {
+    "id": 195
+  },
+  "stripped_dark_oak_wood": {
+    "id": 196
+  },
+  "stripped_pale_oak_wood": {
+    "id": 197
+  },
+  "stripped_mangrove_wood": {
+    "id": 198
+  },
+  "stripped_poplar_wood": {
+    "id": 199
+  },
+  "stripped_crimson_hyphae": {
+    "id": 200
+  },
+  "stripped_warped_hyphae": {
+    "id": 201
+  },
+  "stripped_bamboo_block": {
+    "id": 202
+  },
+  "oak_wood": {
+    "id": 203
+  },
+  "spruce_wood": {
+    "id": 204
+  },
+  "birch_wood": {
+    "id": 205
+  },
+  "jungle_wood": {
+    "id": 206
+  },
+  "acacia_wood": {
+    "id": 207
+  },
+  "cherry_wood": {
+    "id": 208
+  },
+  "pale_oak_wood": {
+    "id": 209
+  },
+  "dark_oak_wood": {
+    "id": 210
+  },
+  "mangrove_wood": {
+    "id": 211
+  },
+  "poplar_wood": {
+    "id": 212
+  },
+  "crimson_hyphae": {
+    "id": 213
+  },
+  "warped_hyphae": {
+    "id": 214
+  },
+  "oak_leaves": {
+    "id": 215
+  },
+  "spruce_leaves": {
+    "id": 216
+  },
+  "birch_leaves": {
+    "id": 217
+  },
+  "jungle_leaves": {
+    "id": 218
+  },
+  "acacia_leaves": {
+    "id": 219
+  },
+  "cherry_leaves": {
+    "id": 220
+  },
+  "dark_oak_leaves": {
+    "id": 221
+  },
+  "pale_oak_leaves": {
+    "id": 222
+  },
+  "mangrove_leaves": {
+    "id": 223
+  },
+  "red_poplar_leaves": {
+    "id": 224
+  },
+  "orange_poplar_leaves": {
+    "id": 225
+  },
+  "yellow_poplar_leaves": {
+    "id": 226
+  },
+  "azalea_leaves": {
+    "id": 227
+  },
+  "flowering_azalea_leaves": {
+    "id": 228
+  },
+  "sponge": {
+    "id": 229
+  },
+  "wet_sponge": {
+    "id": 230
+  },
+  "glass": {
+    "id": 231
+  },
+  "tinted_glass": {
+    "id": 232
+  },
+  "lapis_block": {
+    "id": 233
+  },
+  "sandstone": {
+    "id": 234
+  },
+  "chiseled_sandstone": {
+    "id": 235
+  },
+  "cut_sandstone": {
+    "id": 236
+  },
+  "cobweb": {
+    "id": 237
+  },
+  "short_grass": {
+    "id": 238
+  },
+  "fern": {
+    "id": 239
+  },
+  "bush": {
+    "id": 240
+  },
+  "red_shrub": {
+    "id": 241
+  },
+  "azalea": {
+    "id": 242
+  },
+  "flowering_azalea": {
+    "id": 243
+  },
+  "dead_bush": {
+    "id": 244
+  },
+  "firefly_bush": {
+    "id": 245
+  },
+  "short_dry_grass": {
+    "id": 246
+  },
+  "tall_dry_grass": {
+    "id": 247
+  },
+  "seagrass": {
+    "id": 248
+  },
+  "sea_pickle": {
+    "id": 249
+  },
+  "white_wool": {
+    "id": 250
+  },
+  "orange_wool": {
+    "id": 251
+  },
+  "magenta_wool": {
+    "id": 252
+  },
+  "light_blue_wool": {
+    "id": 253
+  },
+  "yellow_wool": {
+    "id": 254
+  },
+  "lime_wool": {
+    "id": 255
+  },
+  "pink_wool": {
+    "id": 256
+  },
+  "gray_wool": {
+    "id": 257
+  },
+  "light_gray_wool": {
+    "id": 258
+  },
+  "cyan_wool": {
+    "id": 259
+  },
+  "purple_wool": {
+    "id": 260
+  },
+  "blue_wool": {
+    "id": 261
+  },
+  "brown_wool": {
+    "id": 262
+  },
+  "green_wool": {
+    "id": 263
+  },
+  "red_wool": {
+    "id": 264
+  },
+  "black_wool": {
+    "id": 265
+  },
+  "white_wool_stairs": {
+    "id": 266
+  },
+  "orange_wool_stairs": {
+    "id": 267
+  },
+  "magenta_wool_stairs": {
+    "id": 268
+  },
+  "light_blue_wool_stairs": {
+    "id": 269
+  },
+  "yellow_wool_stairs": {
+    "id": 270
+  },
+  "lime_wool_stairs": {
+    "id": 271
+  },
+  "pink_wool_stairs": {
+    "id": 272
+  },
+  "gray_wool_stairs": {
+    "id": 273
+  },
+  "light_gray_wool_stairs": {
+    "id": 274
+  },
+  "cyan_wool_stairs": {
+    "id": 275
+  },
+  "purple_wool_stairs": {
+    "id": 276
+  },
+  "blue_wool_stairs": {
+    "id": 277
+  },
+  "brown_wool_stairs": {
+    "id": 278
+  },
+  "green_wool_stairs": {
+    "id": 279
+  },
+  "red_wool_stairs": {
+    "id": 280
+  },
+  "black_wool_stairs": {
+    "id": 281
+  },
+  "white_wool_slab": {
+    "id": 282
+  },
+  "orange_wool_slab": {
+    "id": 283
+  },
+  "magenta_wool_slab": {
+    "id": 284
+  },
+  "light_blue_wool_slab": {
+    "id": 285
+  },
+  "yellow_wool_slab": {
+    "id": 286
+  },
+  "lime_wool_slab": {
+    "id": 287
+  },
+  "pink_wool_slab": {
+    "id": 288
+  },
+  "gray_wool_slab": {
+    "id": 289
+  },
+  "light_gray_wool_slab": {
+    "id": 290
+  },
+  "cyan_wool_slab": {
+    "id": 291
+  },
+  "purple_wool_slab": {
+    "id": 292
+  },
+  "blue_wool_slab": {
+    "id": 293
+  },
+  "brown_wool_slab": {
+    "id": 294
+  },
+  "green_wool_slab": {
+    "id": 295
+  },
+  "red_wool_slab": {
+    "id": 296
+  },
+  "black_wool_slab": {
+    "id": 297
+  },
+  "dandelion": {
+    "id": 298
+  },
+  "golden_dandelion": {
+    "id": 299
+  },
+  "open_eyeblossom": {
+    "id": 300
+  },
+  "closed_eyeblossom": {
+    "id": 301
+  },
+  "poppy": {
+    "id": 302
+  },
+  "blue_orchid": {
+    "id": 303
+  },
+  "allium": {
+    "id": 304
+  },
+  "azure_bluet": {
+    "id": 305
+  },
+  "red_tulip": {
+    "id": 306
+  },
+  "orange_tulip": {
+    "id": 307
+  },
+  "white_tulip": {
+    "id": 308
+  },
+  "pink_tulip": {
+    "id": 309
+  },
+  "oxeye_daisy": {
+    "id": 310
+  },
+  "cornflower": {
+    "id": 311
+  },
+  "lily_of_the_valley": {
+    "id": 312
+  },
+  "wither_rose": {
+    "id": 313
+  },
+  "torchflower": {
+    "id": 314
+  },
+  "pitcher_plant": {
+    "id": 315
+  },
+  "spore_blossom": {
+    "id": 316
+  },
+  "brown_mushroom": {
+    "id": 317
+  },
+  "red_mushroom": {
+    "id": 318
+  },
+  "shelf_mushroom": {
+    "id": 319
+  },
+  "crimson_fungus": {
+    "id": 320
+  },
+  "warped_fungus": {
+    "id": 321
+  },
+  "crimson_roots": {
+    "id": 322
+  },
+  "warped_roots": {
+    "id": 323
+  },
+  "nether_sprouts": {
+    "id": 324
+  },
+  "weeping_vines": {
+    "id": 325
+  },
+  "twisting_vines": {
+    "id": 326
+  },
+  "sugar_cane": {
+    "id": 327
+  },
+  "kelp": {
+    "id": 328
+  },
+  "pink_petals": {
+    "id": 329
+  },
+  "wildflowers": {
+    "id": 330
+  },
+  "leaf_litter": {
+    "id": 331
+  },
+  "moss_carpet": {
+    "id": 332
+  },
+  "moss_block": {
+    "id": 333
+  },
+  "pale_moss_carpet": {
+    "id": 334
+  },
+  "pale_hanging_moss": {
+    "id": 335
+  },
+  "pale_moss_block": {
+    "id": 336
+  },
+  "hanging_roots": {
+    "id": 337
+  },
+  "big_dripleaf": {
+    "id": 338
+  },
+  "small_dripleaf": {
+    "id": 339
+  },
+  "bamboo": {
+    "id": 340
+  },
+  "oak_slab": {
+    "id": 341
+  },
+  "spruce_slab": {
+    "id": 342
+  },
+  "birch_slab": {
+    "id": 343
+  },
+  "jungle_slab": {
+    "id": 344
+  },
+  "acacia_slab": {
+    "id": 345
+  },
+  "cherry_slab": {
+    "id": 346
+  },
+  "dark_oak_slab": {
+    "id": 347
+  },
+  "pale_oak_slab": {
+    "id": 348
+  },
+  "mangrove_slab": {
+    "id": 349
+  },
+  "poplar_slab": {
+    "id": 350
+  },
+  "bamboo_slab": {
+    "id": 351
+  },
+  "bamboo_mosaic_slab": {
+    "id": 352
+  },
+  "crimson_slab": {
+    "id": 353
+  },
+  "warped_slab": {
+    "id": 354
+  },
+  "stone_slab": {
+    "id": 355
+  },
+  "smooth_stone_slab": {
+    "id": 356
+  },
+  "sandstone_slab": {
+    "id": 357
+  },
+  "cut_sandstone_slab": {
+    "id": 358
+  },
+  "petrified_oak_slab": {
+    "id": 359
+  },
+  "cobblestone_slab": {
+    "id": 360
+  },
+  "brick_slab": {
+    "id": 361
+  },
+  "stone_brick_slab": {
+    "id": 362
+  },
+  "mud_brick_slab": {
+    "id": 363
+  },
+  "nether_brick_slab": {
+    "id": 364
+  },
+  "quartz_slab": {
+    "id": 365
+  },
+  "red_sandstone_slab": {
+    "id": 366
+  },
+  "cut_red_sandstone_slab": {
+    "id": 367
+  },
+  "purpur_slab": {
+    "id": 368
+  },
+  "prismarine_slab": {
+    "id": 369
+  },
+  "prismarine_brick_slab": {
+    "id": 370
+  },
+  "dark_prismarine_slab": {
+    "id": 371
+  },
+  "smooth_quartz": {
+    "id": 372
+  },
+  "smooth_red_sandstone": {
+    "id": 373
+  },
+  "smooth_sandstone": {
+    "id": 374
+  },
+  "smooth_stone": {
+    "id": 375
+  },
+  "bricks": {
+    "id": 376
+  },
+  "acacia_shelf": {
+    "id": 377
+  },
+  "bamboo_shelf": {
+    "id": 378
+  },
+  "birch_shelf": {
+    "id": 379
+  },
+  "cherry_shelf": {
+    "id": 380
+  },
+  "crimson_shelf": {
+    "id": 381
+  },
+  "dark_oak_shelf": {
+    "id": 382
+  },
+  "jungle_shelf": {
+    "id": 383
+  },
+  "mangrove_shelf": {
+    "id": 384
+  },
+  "poplar_shelf": {
+    "id": 385
+  },
+  "oak_shelf": {
+    "id": 386
+  },
+  "pale_oak_shelf": {
+    "id": 387
+  },
+  "spruce_shelf": {
+    "id": 388
+  },
+  "warped_shelf": {
+    "id": 389
+  },
+  "bookshelf": {
+    "id": 390
+  },
+  "chiseled_bookshelf": {
+    "id": 391
+  },
+  "decorated_pot": {
+    "id": 392
+  },
+  "mossy_cobblestone": {
+    "id": 393
+  },
+  "obsidian": {
+    "id": 394
+  },
+  "torch": {
+    "id": 395
+  },
+  "end_rod": {
+    "id": 396
+  },
+  "chorus_plant": {
+    "id": 397
+  },
+  "chorus_flower": {
+    "id": 398
+  },
+  "purpur_block": {
+    "id": 399
+  },
+  "purpur_pillar": {
+    "id": 400
+  },
+  "purpur_stairs": {
+    "id": 401
+  },
+  "spawner": {
+    "id": 402
+  },
+  "creaking_heart": {
+    "id": 403
+  },
+  "chest": {
+    "id": 404
+  },
+  "crafting_table": {
+    "id": 405
+  },
+  "farmland": {
+    "id": 406
+  },
+  "furnace": {
+    "id": 407
+  },
+  "ladder": {
+    "id": 408
+  },
+  "cobblestone_stairs": {
+    "id": 409
+  },
+  "snow": {
+    "id": 410
+  },
+  "ice": {
+    "id": 411
+  },
+  "snow_block": {
+    "id": 412
+  },
+  "cactus": {
+    "id": 413
+  },
+  "cactus_flower": {
+    "id": 414
+  },
+  "clay": {
+    "id": 415
+  },
+  "jukebox": {
+    "id": 416
+  },
+  "oak_fence": {
+    "id": 417
+  },
+  "spruce_fence": {
+    "id": 418
+  },
+  "birch_fence": {
+    "id": 419
+  },
+  "jungle_fence": {
+    "id": 420
+  },
+  "acacia_fence": {
+    "id": 421
+  },
+  "cherry_fence": {
+    "id": 422
+  },
+  "dark_oak_fence": {
+    "id": 423
+  },
+  "pale_oak_fence": {
+    "id": 424
+  },
+  "mangrove_fence": {
+    "id": 425
+  },
+  "poplar_fence": {
+    "id": 426
+  },
+  "bamboo_fence": {
+    "id": 427
+  },
+  "crimson_fence": {
+    "id": 428
+  },
+  "warped_fence": {
+    "id": 429
+  },
+  "pumpkin": {
+    "id": 430
+  },
+  "carved_pumpkin": {
+    "id": 431
+  },
+  "jack_o_lantern": {
+    "id": 432
+  },
+  "netherrack": {
+    "id": 433
+  },
+  "soul_sand": {
+    "id": 434
+  },
+  "soul_soil": {
+    "id": 435
+  },
+  "basalt": {
+    "id": 436
+  },
+  "polished_basalt": {
+    "id": 437
+  },
+  "smooth_basalt": {
+    "id": 438
+  },
+  "soul_torch": {
+    "id": 439
+  },
+  "copper_torch": {
+    "id": 440
+  },
+  "glowstone": {
+    "id": 441
+  },
+  "infested_stone": {
+    "id": 442
+  },
+  "infested_cobblestone": {
+    "id": 443
+  },
+  "infested_stone_bricks": {
+    "id": 444
+  },
+  "infested_mossy_stone_bricks": {
+    "id": 445
+  },
+  "infested_cracked_stone_bricks": {
+    "id": 446
+  },
+  "infested_chiseled_stone_bricks": {
+    "id": 447
+  },
+  "infested_deepslate": {
+    "id": 448
+  },
+  "stone_bricks": {
+    "id": 449
+  },
+  "mossy_stone_bricks": {
+    "id": 450
+  },
+  "cracked_stone_bricks": {
+    "id": 451
+  },
+  "chiseled_stone_bricks": {
+    "id": 452
+  },
+  "packed_mud": {
+    "id": 453
+  },
+  "mud_bricks": {
+    "id": 454
+  },
+  "deepslate_bricks": {
+    "id": 455
+  },
+  "cracked_deepslate_bricks": {
+    "id": 456
+  },
+  "deepslate_tiles": {
+    "id": 457
+  },
+  "cracked_deepslate_tiles": {
+    "id": 458
+  },
+  "chiseled_deepslate": {
+    "id": 459
+  },
+  "reinforced_deepslate": {
+    "id": 460
+  },
+  "brown_mushroom_block": {
+    "id": 461
+  },
+  "red_mushroom_block": {
+    "id": 462
+  },
+  "mushroom_stem": {
+    "id": 463
+  },
+  "iron_bars": {
+    "id": 464
+  },
+  "copper_bars": {
+    "id": 465
+  },
+  "exposed_copper_bars": {
+    "id": 466
+  },
+  "weathered_copper_bars": {
+    "id": 467
+  },
+  "oxidized_copper_bars": {
+    "id": 468
+  },
+  "waxed_copper_bars": {
+    "id": 469
+  },
+  "waxed_exposed_copper_bars": {
+    "id": 470
+  },
+  "waxed_weathered_copper_bars": {
+    "id": 471
+  },
+  "waxed_oxidized_copper_bars": {
+    "id": 472
+  },
+  "iron_chain": {
+    "id": 473
+  },
+  "copper_chain": {
+    "id": 474
+  },
+  "exposed_copper_chain": {
+    "id": 475
+  },
+  "weathered_copper_chain": {
+    "id": 476
+  },
+  "oxidized_copper_chain": {
+    "id": 477
+  },
+  "waxed_copper_chain": {
+    "id": 478
+  },
+  "waxed_exposed_copper_chain": {
+    "id": 479
+  },
+  "waxed_weathered_copper_chain": {
+    "id": 480
+  },
+  "waxed_oxidized_copper_chain": {
+    "id": 481
+  },
+  "glass_pane": {
+    "id": 482
+  },
+  "melon": {
+    "id": 483
+  },
+  "vine": {
+    "id": 484
+  },
+  "glow_lichen": {
+    "id": 485
+  },
+  "resin_clump": {
+    "id": 486
+  },
+  "resin_block": {
+    "id": 487
+  },
+  "resin_bricks": {
+    "id": 488
+  },
+  "resin_brick_stairs": {
+    "id": 489
+  },
+  "resin_brick_slab": {
+    "id": 490
+  },
+  "resin_brick_wall": {
+    "id": 491
+  },
+  "chiseled_resin_bricks": {
+    "id": 492
+  },
+  "brick_stairs": {
+    "id": 493
+  },
+  "stone_brick_stairs": {
+    "id": 494
+  },
+  "mud_brick_stairs": {
+    "id": 495
+  },
+  "mycelium": {
+    "id": 496
+  },
+  "lily_pad": {
+    "id": 497
+  },
+  "nether_bricks": {
+    "id": 498
+  },
+  "cracked_nether_bricks": {
+    "id": 499
+  },
+  "chiseled_nether_bricks": {
+    "id": 500
+  },
+  "nether_brick_fence": {
+    "id": 501
+  },
+  "nether_brick_stairs": {
+    "id": 502
+  },
+  "sculk": {
+    "id": 503
+  },
+  "sculk_vein": {
+    "id": 504
+  },
+  "sculk_catalyst": {
+    "id": 505
+  },
+  "sculk_shrieker": {
+    "id": 506
+  },
+  "enchanting_table": {
+    "id": 507
+  },
+  "end_portal_frame": {
+    "id": 508
+  },
+  "end_stone": {
+    "id": 509
+  },
+  "end_stone_bricks": {
+    "id": 510
+  },
+  "dragon_egg": {
+    "id": 511
+  },
+  "sandstone_stairs": {
+    "id": 512
+  },
+  "ender_chest": {
+    "id": 513
+  },
+  "emerald_block": {
+    "id": 514
+  },
+  "oak_stairs": {
+    "id": 515
+  },
+  "spruce_stairs": {
+    "id": 516
+  },
+  "birch_stairs": {
+    "id": 517
+  },
+  "jungle_stairs": {
+    "id": 518
+  },
+  "acacia_stairs": {
+    "id": 519
+  },
+  "cherry_stairs": {
+    "id": 520
+  },
+  "dark_oak_stairs": {
+    "id": 521
+  },
+  "pale_oak_stairs": {
+    "id": 522
+  },
+  "mangrove_stairs": {
+    "id": 523
+  },
+  "poplar_stairs": {
+    "id": 524
+  },
+  "bamboo_stairs": {
+    "id": 525
+  },
+  "bamboo_mosaic_stairs": {
+    "id": 526
+  },
+  "crimson_stairs": {
+    "id": 527
+  },
+  "warped_stairs": {
+    "id": 528
+  },
+  "command_block": {
+    "id": 529
+  },
+  "beacon": {
+    "id": 530
+  },
+  "cobblestone_wall": {
+    "id": 531
+  },
+  "mossy_cobblestone_wall": {
+    "id": 532
+  },
+  "brick_wall": {
+    "id": 533
+  },
+  "prismarine_wall": {
+    "id": 534
+  },
+  "red_sandstone_wall": {
+    "id": 535
+  },
+  "mossy_stone_brick_wall": {
+    "id": 536
+  },
+  "granite_wall": {
+    "id": 537
+  },
+  "stone_brick_wall": {
+    "id": 538
+  },
+  "mud_brick_wall": {
+    "id": 539
+  },
+  "nether_brick_wall": {
+    "id": 540
+  },
+  "andesite_wall": {
+    "id": 541
+  },
+  "red_nether_brick_wall": {
+    "id": 542
+  },
+  "sandstone_wall": {
+    "id": 543
+  },
+  "end_stone_brick_wall": {
+    "id": 544
+  },
+  "diorite_wall": {
+    "id": 545
+  },
+  "blackstone_wall": {
+    "id": 546
+  },
+  "polished_blackstone_wall": {
+    "id": 547
+  },
+  "polished_blackstone_brick_wall": {
+    "id": 548
+  },
+  "cobbled_deepslate_wall": {
+    "id": 549
+  },
+  "polished_deepslate_wall": {
+    "id": 550
+  },
+  "deepslate_brick_wall": {
+    "id": 551
+  },
+  "deepslate_tile_wall": {
+    "id": 552
+  },
+  "anvil": {
+    "id": 553
+  },
+  "chipped_anvil": {
+    "id": 554
+  },
+  "damaged_anvil": {
+    "id": 555
+  },
+  "chiseled_quartz_block": {
+    "id": 556
+  },
+  "quartz_block": {
+    "id": 557
+  },
+  "quartz_bricks": {
+    "id": 558
+  },
+  "quartz_pillar": {
+    "id": 559
+  },
+  "quartz_stairs": {
+    "id": 560
+  },
+  "white_terracotta": {
+    "id": 561
+  },
+  "orange_terracotta": {
+    "id": 562
+  },
+  "magenta_terracotta": {
+    "id": 563
+  },
+  "light_blue_terracotta": {
+    "id": 564
+  },
+  "yellow_terracotta": {
+    "id": 565
+  },
+  "lime_terracotta": {
+    "id": 566
+  },
+  "pink_terracotta": {
+    "id": 567
+  },
+  "gray_terracotta": {
+    "id": 568
+  },
+  "light_gray_terracotta": {
+    "id": 569
+  },
+  "cyan_terracotta": {
+    "id": 570
+  },
+  "purple_terracotta": {
+    "id": 571
+  },
+  "blue_terracotta": {
+    "id": 572
+  },
+  "brown_terracotta": {
+    "id": 573
+  },
+  "green_terracotta": {
+    "id": 574
+  },
+  "red_terracotta": {
+    "id": 575
+  },
+  "black_terracotta": {
+    "id": 576
+  },
+  "barrier": {
+    "id": 577
+  },
+  "light": {
+    "id": 578
+  },
+  "hay_block": {
+    "id": 579
+  },
+  "white_carpet": {
+    "id": 580
+  },
+  "orange_carpet": {
+    "id": 581
+  },
+  "magenta_carpet": {
+    "id": 582
+  },
+  "light_blue_carpet": {
+    "id": 583
+  },
+  "yellow_carpet": {
+    "id": 584
+  },
+  "lime_carpet": {
+    "id": 585
+  },
+  "pink_carpet": {
+    "id": 586
+  },
+  "gray_carpet": {
+    "id": 587
+  },
+  "light_gray_carpet": {
+    "id": 588
+  },
+  "cyan_carpet": {
+    "id": 589
+  },
+  "purple_carpet": {
+    "id": 590
+  },
+  "blue_carpet": {
+    "id": 591
+  },
+  "brown_carpet": {
+    "id": 592
+  },
+  "green_carpet": {
+    "id": 593
+  },
+  "red_carpet": {
+    "id": 594
+  },
+  "black_carpet": {
+    "id": 595
+  },
+  "terracotta": {
+    "id": 596
+  },
+  "packed_ice": {
+    "id": 597
+  },
+  "dirt_path": {
+    "id": 598
+  },
+  "sunflower": {
+    "id": 599
+  },
+  "lilac": {
+    "id": 600
+  },
+  "rose_bush": {
+    "id": 601
+  },
+  "peony": {
+    "id": 602
+  },
+  "tall_grass": {
+    "id": 603
+  },
+  "large_fern": {
+    "id": 604
+  },
+  "white_stained_glass": {
+    "id": 605
+  },
+  "orange_stained_glass": {
+    "id": 606
+  },
+  "magenta_stained_glass": {
+    "id": 607
+  },
+  "light_blue_stained_glass": {
+    "id": 608
+  },
+  "yellow_stained_glass": {
+    "id": 609
+  },
+  "lime_stained_glass": {
+    "id": 610
+  },
+  "pink_stained_glass": {
+    "id": 611
+  },
+  "gray_stained_glass": {
+    "id": 612
+  },
+  "light_gray_stained_glass": {
+    "id": 613
+  },
+  "cyan_stained_glass": {
+    "id": 614
+  },
+  "purple_stained_glass": {
+    "id": 615
+  },
+  "blue_stained_glass": {
+    "id": 616
+  },
+  "brown_stained_glass": {
+    "id": 617
+  },
+  "green_stained_glass": {
+    "id": 618
+  },
+  "red_stained_glass": {
+    "id": 619
+  },
+  "black_stained_glass": {
+    "id": 620
+  },
+  "white_stained_glass_pane": {
+    "id": 621
+  },
+  "orange_stained_glass_pane": {
+    "id": 622
+  },
+  "magenta_stained_glass_pane": {
+    "id": 623
+  },
+  "light_blue_stained_glass_pane": {
+    "id": 624
+  },
+  "yellow_stained_glass_pane": {
+    "id": 625
+  },
+  "lime_stained_glass_pane": {
+    "id": 626
+  },
+  "pink_stained_glass_pane": {
+    "id": 627
+  },
+  "gray_stained_glass_pane": {
+    "id": 628
+  },
+  "light_gray_stained_glass_pane": {
+    "id": 629
+  },
+  "cyan_stained_glass_pane": {
+    "id": 630
+  },
+  "purple_stained_glass_pane": {
+    "id": 631
+  },
+  "blue_stained_glass_pane": {
+    "id": 632
+  },
+  "brown_stained_glass_pane": {
+    "id": 633
+  },
+  "green_stained_glass_pane": {
+    "id": 634
+  },
+  "red_stained_glass_pane": {
+    "id": 635
+  },
+  "black_stained_glass_pane": {
+    "id": 636
+  },
+  "prismarine": {
+    "id": 637
+  },
+  "prismarine_bricks": {
+    "id": 638
+  },
+  "dark_prismarine": {
+    "id": 639
+  },
+  "prismarine_stairs": {
+    "id": 640
+  },
+  "prismarine_brick_stairs": {
+    "id": 641
+  },
+  "dark_prismarine_stairs": {
+    "id": 642
+  },
+  "sea_lantern": {
+    "id": 643
+  },
+  "red_sandstone": {
+    "id": 644
+  },
+  "chiseled_red_sandstone": {
+    "id": 645
+  },
+  "cut_red_sandstone": {
+    "id": 646
+  },
+  "red_sandstone_stairs": {
+    "id": 647
+  },
+  "repeating_command_block": {
+    "id": 648
+  },
+  "chain_command_block": {
+    "id": 649
+  },
+  "magma_block": {
+    "id": 650
+  },
+  "nether_wart_block": {
+    "id": 651
+  },
+  "warped_wart_block": {
+    "id": 652
+  },
+  "red_nether_bricks": {
+    "id": 653
+  },
+  "bone_block": {
+    "id": 654
+  },
+  "structure_void": {
+    "id": 655
+  },
+  "shulker_box": {
+    "id": 656
+  },
+  "white_shulker_box": {
+    "id": 657
+  },
+  "orange_shulker_box": {
+    "id": 658
+  },
+  "magenta_shulker_box": {
+    "id": 659
+  },
+  "light_blue_shulker_box": {
+    "id": 660
+  },
+  "yellow_shulker_box": {
+    "id": 661
+  },
+  "lime_shulker_box": {
+    "id": 662
+  },
+  "pink_shulker_box": {
+    "id": 663
+  },
+  "gray_shulker_box": {
+    "id": 664
+  },
+  "light_gray_shulker_box": {
+    "id": 665
+  },
+  "cyan_shulker_box": {
+    "id": 666
+  },
+  "purple_shulker_box": {
+    "id": 667
+  },
+  "blue_shulker_box": {
+    "id": 668
+  },
+  "brown_shulker_box": {
+    "id": 669
+  },
+  "green_shulker_box": {
+    "id": 670
+  },
+  "red_shulker_box": {
+    "id": 671
+  },
+  "black_shulker_box": {
+    "id": 672
+  },
+  "white_glazed_terracotta": {
+    "id": 673
+  },
+  "orange_glazed_terracotta": {
+    "id": 674
+  },
+  "magenta_glazed_terracotta": {
+    "id": 675
+  },
+  "light_blue_glazed_terracotta": {
+    "id": 676
+  },
+  "yellow_glazed_terracotta": {
+    "id": 677
+  },
+  "lime_glazed_terracotta": {
+    "id": 678
+  },
+  "pink_glazed_terracotta": {
+    "id": 679
+  },
+  "gray_glazed_terracotta": {
+    "id": 680
+  },
+  "light_gray_glazed_terracotta": {
+    "id": 681
+  },
+  "cyan_glazed_terracotta": {
+    "id": 682
+  },
+  "purple_glazed_terracotta": {
+    "id": 683
+  },
+  "blue_glazed_terracotta": {
+    "id": 684
+  },
+  "brown_glazed_terracotta": {
+    "id": 685
+  },
+  "green_glazed_terracotta": {
+    "id": 686
+  },
+  "red_glazed_terracotta": {
+    "id": 687
+  },
+  "black_glazed_terracotta": {
+    "id": 688
+  },
+  "white_concrete": {
+    "id": 689
+  },
+  "orange_concrete": {
+    "id": 690
+  },
+  "magenta_concrete": {
+    "id": 691
+  },
+  "light_blue_concrete": {
+    "id": 692
+  },
+  "yellow_concrete": {
+    "id": 693
+  },
+  "lime_concrete": {
+    "id": 694
+  },
+  "pink_concrete": {
+    "id": 695
+  },
+  "gray_concrete": {
+    "id": 696
+  },
+  "light_gray_concrete": {
+    "id": 697
+  },
+  "cyan_concrete": {
+    "id": 698
+  },
+  "purple_concrete": {
+    "id": 699
+  },
+  "blue_concrete": {
+    "id": 700
+  },
+  "brown_concrete": {
+    "id": 701
+  },
+  "green_concrete": {
+    "id": 702
+  },
+  "red_concrete": {
+    "id": 703
+  },
+  "black_concrete": {
+    "id": 704
+  },
+  "white_concrete_stairs": {
+    "id": 705
+  },
+  "orange_concrete_stairs": {
+    "id": 706
+  },
+  "magenta_concrete_stairs": {
+    "id": 707
+  },
+  "light_blue_concrete_stairs": {
+    "id": 708
+  },
+  "yellow_concrete_stairs": {
+    "id": 709
+  },
+  "lime_concrete_stairs": {
+    "id": 710
+  },
+  "pink_concrete_stairs": {
+    "id": 711
+  },
+  "gray_concrete_stairs": {
+    "id": 712
+  },
+  "light_gray_concrete_stairs": {
+    "id": 713
+  },
+  "cyan_concrete_stairs": {
+    "id": 714
+  },
+  "purple_concrete_stairs": {
+    "id": 715
+  },
+  "blue_concrete_stairs": {
+    "id": 716
+  },
+  "brown_concrete_stairs": {
+    "id": 717
+  },
+  "green_concrete_stairs": {
+    "id": 718
+  },
+  "red_concrete_stairs": {
+    "id": 719
+  },
+  "black_concrete_stairs": {
+    "id": 720
+  },
+  "white_concrete_slab": {
+    "id": 721
+  },
+  "orange_concrete_slab": {
+    "id": 722
+  },
+  "magenta_concrete_slab": {
+    "id": 723
+  },
+  "light_blue_concrete_slab": {
+    "id": 724
+  },
+  "yellow_concrete_slab": {
+    "id": 725
+  },
+  "lime_concrete_slab": {
+    "id": 726
+  },
+  "pink_concrete_slab": {
+    "id": 727
+  },
+  "gray_concrete_slab": {
+    "id": 728
+  },
+  "light_gray_concrete_slab": {
+    "id": 729
+  },
+  "cyan_concrete_slab": {
+    "id": 730
+  },
+  "purple_concrete_slab": {
+    "id": 731
+  },
+  "blue_concrete_slab": {
+    "id": 732
+  },
+  "brown_concrete_slab": {
+    "id": 733
+  },
+  "green_concrete_slab": {
+    "id": 734
+  },
+  "red_concrete_slab": {
+    "id": 735
+  },
+  "black_concrete_slab": {
+    "id": 736
+  },
+  "white_concrete_powder": {
+    "id": 737
+  },
+  "orange_concrete_powder": {
+    "id": 738
+  },
+  "magenta_concrete_powder": {
+    "id": 739
+  },
+  "light_blue_concrete_powder": {
+    "id": 740
+  },
+  "yellow_concrete_powder": {
+    "id": 741
+  },
+  "lime_concrete_powder": {
+    "id": 742
+  },
+  "pink_concrete_powder": {
+    "id": 743
+  },
+  "gray_concrete_powder": {
+    "id": 744
+  },
+  "light_gray_concrete_powder": {
+    "id": 745
+  },
+  "cyan_concrete_powder": {
+    "id": 746
+  },
+  "purple_concrete_powder": {
+    "id": 747
+  },
+  "blue_concrete_powder": {
+    "id": 748
+  },
+  "brown_concrete_powder": {
+    "id": 749
+  },
+  "green_concrete_powder": {
+    "id": 750
+  },
+  "red_concrete_powder": {
+    "id": 751
+  },
+  "black_concrete_powder": {
+    "id": 752
+  },
+  "turtle_egg": {
+    "id": 753
+  },
+  "sniffer_egg": {
+    "id": 754
+  },
+  "dried_ghast": {
+    "id": 755
+  },
+  "dead_tube_coral_block": {
+    "id": 756
+  },
+  "dead_brain_coral_block": {
+    "id": 757
+  },
+  "dead_bubble_coral_block": {
+    "id": 758
+  },
+  "dead_fire_coral_block": {
+    "id": 759
+  },
+  "dead_horn_coral_block": {
+    "id": 760
+  },
+  "tube_coral_block": {
+    "id": 761
+  },
+  "brain_coral_block": {
+    "id": 762
+  },
+  "bubble_coral_block": {
+    "id": 763
+  },
+  "fire_coral_block": {
+    "id": 764
+  },
+  "horn_coral_block": {
+    "id": 765
+  },
+  "tube_coral": {
+    "id": 766
+  },
+  "brain_coral": {
+    "id": 767
+  },
+  "bubble_coral": {
+    "id": 768
+  },
+  "fire_coral": {
+    "id": 769
+  },
+  "horn_coral": {
+    "id": 770
+  },
+  "dead_brain_coral": {
+    "id": 771
+  },
+  "dead_bubble_coral": {
+    "id": 772
+  },
+  "dead_fire_coral": {
+    "id": 773
+  },
+  "dead_horn_coral": {
+    "id": 774
+  },
+  "dead_tube_coral": {
+    "id": 775
+  },
+  "tube_coral_fan": {
+    "id": 776
+  },
+  "brain_coral_fan": {
+    "id": 777
+  },
+  "bubble_coral_fan": {
+    "id": 778
+  },
+  "fire_coral_fan": {
+    "id": 779
+  },
+  "horn_coral_fan": {
+    "id": 780
+  },
+  "dead_tube_coral_fan": {
+    "id": 781
+  },
+  "dead_brain_coral_fan": {
+    "id": 782
+  },
+  "dead_bubble_coral_fan": {
+    "id": 783
+  },
+  "dead_fire_coral_fan": {
+    "id": 784
+  },
+  "dead_horn_coral_fan": {
+    "id": 785
+  },
+  "blue_ice": {
+    "id": 786
+  },
+  "conduit": {
+    "id": 787
+  },
+  "polished_granite_stairs": {
+    "id": 788
+  },
+  "smooth_red_sandstone_stairs": {
+    "id": 789
+  },
+  "mossy_stone_brick_stairs": {
+    "id": 790
+  },
+  "polished_diorite_stairs": {
+    "id": 791
+  },
+  "mossy_cobblestone_stairs": {
+    "id": 792
+  },
+  "end_stone_brick_stairs": {
+    "id": 793
+  },
+  "stone_stairs": {
+    "id": 794
+  },
+  "smooth_sandstone_stairs": {
+    "id": 795
+  },
+  "smooth_quartz_stairs": {
+    "id": 796
+  },
+  "granite_stairs": {
+    "id": 797
+  },
+  "andesite_stairs": {
+    "id": 798
+  },
+  "red_nether_brick_stairs": {
+    "id": 799
+  },
+  "polished_andesite_stairs": {
+    "id": 800
+  },
+  "diorite_stairs": {
+    "id": 801
+  },
+  "cobbled_deepslate_stairs": {
+    "id": 802
+  },
+  "polished_deepslate_stairs": {
+    "id": 803
+  },
+  "deepslate_brick_stairs": {
+    "id": 804
+  },
+  "deepslate_tile_stairs": {
+    "id": 805
+  },
+  "polished_granite_slab": {
+    "id": 806
+  },
+  "smooth_red_sandstone_slab": {
+    "id": 807
+  },
+  "mossy_stone_brick_slab": {
+    "id": 808
+  },
+  "polished_diorite_slab": {
+    "id": 809
+  },
+  "mossy_cobblestone_slab": {
+    "id": 810
+  },
+  "end_stone_brick_slab": {
+    "id": 811
+  },
+  "smooth_sandstone_slab": {
+    "id": 812
+  },
+  "smooth_quartz_slab": {
+    "id": 813
+  },
+  "granite_slab": {
+    "id": 814
+  },
+  "andesite_slab": {
+    "id": 815
+  },
+  "red_nether_brick_slab": {
+    "id": 816
+  },
+  "polished_andesite_slab": {
+    "id": 817
+  },
+  "diorite_slab": {
+    "id": 818
+  },
+  "cobbled_deepslate_slab": {
+    "id": 819
+  },
+  "polished_deepslate_slab": {
+    "id": 820
+  },
+  "deepslate_brick_slab": {
+    "id": 821
+  },
+  "deepslate_tile_slab": {
+    "id": 822
+  },
+  "scaffolding": {
+    "id": 823
+  },
+  "redstone": {
+    "id": 824
+  },
+  "redstone_torch": {
+    "id": 825
+  },
+  "redstone_block": {
+    "id": 826
+  },
+  "repeater": {
+    "id": 827
+  },
+  "comparator": {
+    "id": 828
+  },
+  "piston": {
+    "id": 829
+  },
+  "sticky_piston": {
+    "id": 830
+  },
+  "slime_block": {
+    "id": 831
+  },
+  "honey_block": {
+    "id": 832
+  },
+  "observer": {
+    "id": 833
+  },
+  "hopper": {
+    "id": 834
+  },
+  "dispenser": {
+    "id": 835
+  },
+  "dropper": {
+    "id": 836
+  },
+  "lectern": {
+    "id": 837
+  },
+  "target": {
+    "id": 838
+  },
+  "lever": {
+    "id": 839
+  },
+  "lightning_rod": {
+    "id": 840
+  },
+  "exposed_lightning_rod": {
+    "id": 841
+  },
+  "weathered_lightning_rod": {
+    "id": 842
+  },
+  "oxidized_lightning_rod": {
+    "id": 843
+  },
+  "waxed_lightning_rod": {
+    "id": 844
+  },
+  "waxed_exposed_lightning_rod": {
+    "id": 845
+  },
+  "waxed_weathered_lightning_rod": {
+    "id": 846
+  },
+  "waxed_oxidized_lightning_rod": {
+    "id": 847
+  },
+  "daylight_detector": {
+    "id": 848
+  },
+  "sculk_sensor": {
+    "id": 849
+  },
+  "calibrated_sculk_sensor": {
+    "id": 850
+  },
+  "tripwire_hook": {
+    "id": 851
+  },
+  "trapped_chest": {
+    "id": 852
+  },
+  "tnt": {
+    "id": 853
+  },
+  "redstone_lamp": {
+    "id": 854
+  },
+  "note_block": {
+    "id": 855
+  },
+  "stone_button": {
+    "id": 856
+  },
+  "polished_blackstone_button": {
+    "id": 857
+  },
+  "oak_button": {
+    "id": 858
+  },
+  "spruce_button": {
+    "id": 859
+  },
+  "birch_button": {
+    "id": 860
+  },
+  "jungle_button": {
+    "id": 861
+  },
+  "acacia_button": {
+    "id": 862
+  },
+  "cherry_button": {
+    "id": 863
+  },
+  "dark_oak_button": {
+    "id": 864
+  },
+  "pale_oak_button": {
+    "id": 865
+  },
+  "mangrove_button": {
+    "id": 866
+  },
+  "poplar_button": {
+    "id": 867
+  },
+  "bamboo_button": {
+    "id": 868
+  },
+  "crimson_button": {
+    "id": 869
+  },
+  "warped_button": {
+    "id": 870
+  },
+  "stone_pressure_plate": {
+    "id": 871
+  },
+  "polished_blackstone_pressure_plate": {
+    "id": 872
+  },
+  "light_weighted_pressure_plate": {
+    "id": 873
+  },
+  "heavy_weighted_pressure_plate": {
+    "id": 874
+  },
+  "oak_pressure_plate": {
+    "id": 875
+  },
+  "spruce_pressure_plate": {
+    "id": 876
+  },
+  "birch_pressure_plate": {
+    "id": 877
+  },
+  "jungle_pressure_plate": {
+    "id": 878
+  },
+  "acacia_pressure_plate": {
+    "id": 879
+  },
+  "cherry_pressure_plate": {
+    "id": 880
+  },
+  "dark_oak_pressure_plate": {
+    "id": 881
+  },
+  "pale_oak_pressure_plate": {
+    "id": 882
+  },
+  "mangrove_pressure_plate": {
+    "id": 883
+  },
+  "poplar_pressure_plate": {
+    "id": 884
+  },
+  "bamboo_pressure_plate": {
+    "id": 885
+  },
+  "crimson_pressure_plate": {
+    "id": 886
+  },
+  "warped_pressure_plate": {
+    "id": 887
+  },
+  "iron_door": {
+    "id": 888
+  },
+  "oak_door": {
+    "id": 889
+  },
+  "spruce_door": {
+    "id": 890
+  },
+  "birch_door": {
+    "id": 891
+  },
+  "jungle_door": {
+    "id": 892
+  },
+  "acacia_door": {
+    "id": 893
+  },
+  "cherry_door": {
+    "id": 894
+  },
+  "dark_oak_door": {
+    "id": 895
+  },
+  "pale_oak_door": {
+    "id": 896
+  },
+  "mangrove_door": {
+    "id": 897
+  },
+  "poplar_door": {
+    "id": 898
+  },
+  "bamboo_door": {
+    "id": 899
+  },
+  "crimson_door": {
+    "id": 900
+  },
+  "warped_door": {
+    "id": 901
+  },
+  "copper_door": {
+    "id": 902
+  },
+  "exposed_copper_door": {
+    "id": 903
+  },
+  "weathered_copper_door": {
+    "id": 904
+  },
+  "oxidized_copper_door": {
+    "id": 905
+  },
+  "waxed_copper_door": {
+    "id": 906
+  },
+  "waxed_exposed_copper_door": {
+    "id": 907
+  },
+  "waxed_weathered_copper_door": {
+    "id": 908
+  },
+  "waxed_oxidized_copper_door": {
+    "id": 909
+  },
+  "iron_trapdoor": {
+    "id": 910
+  },
+  "oak_trapdoor": {
+    "id": 911
+  },
+  "spruce_trapdoor": {
+    "id": 912
+  },
+  "birch_trapdoor": {
+    "id": 913
+  },
+  "jungle_trapdoor": {
+    "id": 914
+  },
+  "acacia_trapdoor": {
+    "id": 915
+  },
+  "cherry_trapdoor": {
+    "id": 916
+  },
+  "dark_oak_trapdoor": {
+    "id": 917
+  },
+  "pale_oak_trapdoor": {
+    "id": 918
+  },
+  "mangrove_trapdoor": {
+    "id": 919
+  },
+  "poplar_trapdoor": {
+    "id": 920
+  },
+  "bamboo_trapdoor": {
+    "id": 921
+  },
+  "crimson_trapdoor": {
+    "id": 922
+  },
+  "warped_trapdoor": {
+    "id": 923
+  },
+  "copper_trapdoor": {
+    "id": 924
+  },
+  "exposed_copper_trapdoor": {
+    "id": 925
+  },
+  "weathered_copper_trapdoor": {
+    "id": 926
+  },
+  "oxidized_copper_trapdoor": {
+    "id": 927
+  },
+  "waxed_copper_trapdoor": {
+    "id": 928
+  },
+  "waxed_exposed_copper_trapdoor": {
+    "id": 929
+  },
+  "waxed_weathered_copper_trapdoor": {
+    "id": 930
+  },
+  "waxed_oxidized_copper_trapdoor": {
+    "id": 931
+  },
+  "oak_fence_gate": {
+    "id": 932
+  },
+  "spruce_fence_gate": {
+    "id": 933
+  },
+  "birch_fence_gate": {
+    "id": 934
+  },
+  "jungle_fence_gate": {
+    "id": 935
+  },
+  "acacia_fence_gate": {
+    "id": 936
+  },
+  "cherry_fence_gate": {
+    "id": 937
+  },
+  "dark_oak_fence_gate": {
+    "id": 938
+  },
+  "pale_oak_fence_gate": {
+    "id": 939
+  },
+  "mangrove_fence_gate": {
+    "id": 940
+  },
+  "poplar_fence_gate": {
+    "id": 941
+  },
+  "bamboo_fence_gate": {
+    "id": 942
+  },
+  "crimson_fence_gate": {
+    "id": 943
+  },
+  "warped_fence_gate": {
+    "id": 944
+  },
+  "powered_rail": {
+    "id": 945
+  },
+  "detector_rail": {
+    "id": 946
+  },
+  "rail": {
+    "id": 947
+  },
+  "activator_rail": {
+    "id": 948
+  },
+  "saddle": {
+    "id": 949
+  },
+  "white_harness": {
+    "id": 950
+  },
+  "orange_harness": {
+    "id": 951
+  },
+  "magenta_harness": {
+    "id": 952
+  },
+  "light_blue_harness": {
+    "id": 953
+  },
+  "yellow_harness": {
+    "id": 954
+  },
+  "lime_harness": {
+    "id": 955
+  },
+  "pink_harness": {
+    "id": 956
+  },
+  "gray_harness": {
+    "id": 957
+  },
+  "light_gray_harness": {
+    "id": 958
+  },
+  "cyan_harness": {
+    "id": 959
+  },
+  "purple_harness": {
+    "id": 960
+  },
+  "blue_harness": {
+    "id": 961
+  },
+  "brown_harness": {
+    "id": 962
+  },
+  "green_harness": {
+    "id": 963
+  },
+  "red_harness": {
+    "id": 964
+  },
+  "black_harness": {
+    "id": 965
+  },
+  "minecart": {
+    "id": 966
+  },
+  "chest_minecart": {
+    "id": 967
+  },
+  "furnace_minecart": {
+    "id": 968
+  },
+  "tnt_minecart": {
+    "id": 969
+  },
+  "hopper_minecart": {
+    "id": 970
+  },
+  "carrot_on_a_stick": {
+    "id": 971
+  },
+  "warped_fungus_on_a_stick": {
+    "id": 972
+  },
+  "phantom_membrane": {
+    "id": 973
+  },
+  "elytra": {
+    "id": 974
+  },
+  "oak_boat": {
+    "id": 975
+  },
+  "oak_chest_boat": {
+    "id": 976
+  },
+  "spruce_boat": {
+    "id": 977
+  },
+  "spruce_chest_boat": {
+    "id": 978
+  },
+  "birch_boat": {
+    "id": 979
+  },
+  "birch_chest_boat": {
+    "id": 980
+  },
+  "jungle_boat": {
+    "id": 981
+  },
+  "jungle_chest_boat": {
+    "id": 982
+  },
+  "acacia_boat": {
+    "id": 983
+  },
+  "acacia_chest_boat": {
+    "id": 984
+  },
+  "cherry_boat": {
+    "id": 985
+  },
+  "cherry_chest_boat": {
+    "id": 986
+  },
+  "dark_oak_boat": {
+    "id": 987
+  },
+  "dark_oak_chest_boat": {
+    "id": 988
+  },
+  "pale_oak_boat": {
+    "id": 989
+  },
+  "pale_oak_chest_boat": {
+    "id": 990
+  },
+  "mangrove_boat": {
+    "id": 991
+  },
+  "mangrove_chest_boat": {
+    "id": 992
+  },
+  "poplar_boat": {
+    "id": 993
+  },
+  "poplar_chest_boat": {
+    "id": 994
+  },
+  "bamboo_raft": {
+    "id": 995
+  },
+  "bamboo_chest_raft": {
+    "id": 996
+  },
+  "structure_block": {
+    "id": 997
+  },
+  "jigsaw": {
+    "id": 998
+  },
+  "test_block": {
+    "id": 999
+  },
+  "test_instance_block": {
+    "id": 1000
+  },
+  "turtle_helmet": {
+    "id": 1001
+  },
+  "turtle_scute": {
+    "id": 1002
+  },
+  "armadillo_scute": {
+    "id": 1003
+  },
+  "wolf_armor": {
+    "id": 1004
+  },
+  "flint_and_steel": {
+    "id": 1005
+  },
+  "bowl": {
+    "id": 1006
+  },
+  "apple": {
+    "id": 1007
+  },
+  "bow": {
+    "id": 1008
+  },
+  "arrow": {
+    "id": 1009
+  },
+  "coal": {
+    "id": 1010
+  },
+  "charcoal": {
+    "id": 1011
+  },
+  "diamond": {
+    "id": 1012
+  },
+  "emerald": {
+    "id": 1013
+  },
+  "lapis_lazuli": {
+    "id": 1014
+  },
+  "quartz": {
+    "id": 1015
+  },
+  "amethyst_shard": {
+    "id": 1016
+  },
+  "raw_iron": {
+    "id": 1017
+  },
+  "iron_ingot": {
+    "id": 1018
+  },
+  "raw_copper": {
+    "id": 1019
+  },
+  "copper_ingot": {
+    "id": 1020
+  },
+  "raw_gold": {
+    "id": 1021
+  },
+  "gold_ingot": {
+    "id": 1022
+  },
+  "netherite_ingot": {
+    "id": 1023
+  },
+  "netherite_scrap": {
+    "id": 1024
+  },
+  "wooden_sword": {
+    "id": 1025
+  },
+  "wooden_shovel": {
+    "id": 1026
+  },
+  "wooden_pickaxe": {
+    "id": 1027
+  },
+  "wooden_axe": {
+    "id": 1028
+  },
+  "wooden_hoe": {
+    "id": 1029
+  },
+  "copper_sword": {
+    "id": 1030
+  },
+  "copper_shovel": {
+    "id": 1031
+  },
+  "copper_pickaxe": {
+    "id": 1032
+  },
+  "copper_axe": {
+    "id": 1033
+  },
+  "copper_hoe": {
+    "id": 1034
+  },
+  "stone_sword": {
+    "id": 1035
+  },
+  "stone_shovel": {
+    "id": 1036
+  },
+  "stone_pickaxe": {
+    "id": 1037
+  },
+  "stone_axe": {
+    "id": 1038
+  },
+  "stone_hoe": {
+    "id": 1039
+  },
+  "golden_sword": {
+    "id": 1040
+  },
+  "golden_shovel": {
+    "id": 1041
+  },
+  "golden_pickaxe": {
+    "id": 1042
+  },
+  "golden_axe": {
+    "id": 1043
+  },
+  "golden_hoe": {
+    "id": 1044
+  },
+  "iron_sword": {
+    "id": 1045
+  },
+  "iron_shovel": {
+    "id": 1046
+  },
+  "iron_pickaxe": {
+    "id": 1047
+  },
+  "iron_axe": {
+    "id": 1048
+  },
+  "iron_hoe": {
+    "id": 1049
+  },
+  "diamond_sword": {
+    "id": 1050
+  },
+  "diamond_shovel": {
+    "id": 1051
+  },
+  "diamond_pickaxe": {
+    "id": 1052
+  },
+  "diamond_axe": {
+    "id": 1053
+  },
+  "diamond_hoe": {
+    "id": 1054
+  },
+  "netherite_sword": {
+    "id": 1055
+  },
+  "netherite_shovel": {
+    "id": 1056
+  },
+  "netherite_pickaxe": {
+    "id": 1057
+  },
+  "netherite_axe": {
+    "id": 1058
+  },
+  "netherite_hoe": {
+    "id": 1059
+  },
+  "stick": {
+    "id": 1060
+  },
+  "mushroom_stew": {
+    "id": 1061
+  },
+  "string": {
+    "id": 1062
+  },
+  "feather": {
+    "id": 1063
+  },
+  "gunpowder": {
+    "id": 1064
+  },
+  "wheat_seeds": {
+    "id": 1065
+  },
+  "wheat": {
+    "id": 1066
+  },
+  "bread": {
+    "id": 1067
+  },
+  "leather_helmet": {
+    "id": 1068
+  },
+  "leather_chestplate": {
+    "id": 1069
+  },
+  "leather_leggings": {
+    "id": 1070
+  },
+  "leather_boots": {
+    "id": 1071
+  },
+  "copper_helmet": {
+    "id": 1072
+  },
+  "copper_chestplate": {
+    "id": 1073
+  },
+  "copper_leggings": {
+    "id": 1074
+  },
+  "copper_boots": {
+    "id": 1075
+  },
+  "chainmail_helmet": {
+    "id": 1076
+  },
+  "chainmail_chestplate": {
+    "id": 1077
+  },
+  "chainmail_leggings": {
+    "id": 1078
+  },
+  "chainmail_boots": {
+    "id": 1079
+  },
+  "iron_helmet": {
+    "id": 1080
+  },
+  "iron_chestplate": {
+    "id": 1081
+  },
+  "iron_leggings": {
+    "id": 1082
+  },
+  "iron_boots": {
+    "id": 1083
+  },
+  "diamond_helmet": {
+    "id": 1084
+  },
+  "diamond_chestplate": {
+    "id": 1085
+  },
+  "diamond_leggings": {
+    "id": 1086
+  },
+  "diamond_boots": {
+    "id": 1087
+  },
+  "golden_helmet": {
+    "id": 1088
+  },
+  "golden_chestplate": {
+    "id": 1089
+  },
+  "golden_leggings": {
+    "id": 1090
+  },
+  "golden_boots": {
+    "id": 1091
+  },
+  "netherite_helmet": {
+    "id": 1092
+  },
+  "netherite_chestplate": {
+    "id": 1093
+  },
+  "netherite_leggings": {
+    "id": 1094
+  },
+  "netherite_boots": {
+    "id": 1095
+  },
+  "flint": {
+    "id": 1096
+  },
+  "porkchop": {
+    "id": 1097
+  },
+  "cooked_porkchop": {
+    "id": 1098
+  },
+  "painting": {
+    "id": 1099
+  },
+  "golden_apple": {
+    "id": 1100
+  },
+  "enchanted_golden_apple": {
+    "id": 1101
+  },
+  "oak_sign": {
+    "id": 1102
+  },
+  "spruce_sign": {
+    "id": 1103
+  },
+  "birch_sign": {
+    "id": 1104
+  },
+  "jungle_sign": {
+    "id": 1105
+  },
+  "acacia_sign": {
+    "id": 1106
+  },
+  "cherry_sign": {
+    "id": 1107
+  },
+  "dark_oak_sign": {
+    "id": 1108
+  },
+  "pale_oak_sign": {
+    "id": 1109
+  },
+  "mangrove_sign": {
+    "id": 1110
+  },
+  "poplar_sign": {
+    "id": 1111
+  },
+  "bamboo_sign": {
+    "id": 1112
+  },
+  "crimson_sign": {
+    "id": 1113
+  },
+  "warped_sign": {
+    "id": 1114
+  },
+  "oak_hanging_sign": {
+    "id": 1115
+  },
+  "spruce_hanging_sign": {
+    "id": 1116
+  },
+  "birch_hanging_sign": {
+    "id": 1117
+  },
+  "jungle_hanging_sign": {
+    "id": 1118
+  },
+  "acacia_hanging_sign": {
+    "id": 1119
+  },
+  "cherry_hanging_sign": {
+    "id": 1120
+  },
+  "dark_oak_hanging_sign": {
+    "id": 1121
+  },
+  "pale_oak_hanging_sign": {
+    "id": 1122
+  },
+  "mangrove_hanging_sign": {
+    "id": 1123
+  },
+  "poplar_hanging_sign": {
+    "id": 1124
+  },
+  "bamboo_hanging_sign": {
+    "id": 1125
+  },
+  "crimson_hanging_sign": {
+    "id": 1126
+  },
+  "warped_hanging_sign": {
+    "id": 1127
+  },
+  "bucket": {
+    "id": 1128
+  },
+  "water_bucket": {
+    "id": 1129
+  },
+  "lava_bucket": {
+    "id": 1130
+  },
+  "powder_snow_bucket": {
+    "id": 1131
+  },
+  "snowball": {
+    "id": 1132
+  },
+  "leather": {
+    "id": 1133
+  },
+  "milk_bucket": {
+    "id": 1134
+  },
+  "pufferfish_bucket": {
+    "id": 1135
+  },
+  "salmon_bucket": {
+    "id": 1136
+  },
+  "cod_bucket": {
+    "id": 1137
+  },
+  "tropical_fish_bucket": {
+    "id": 1138
+  },
+  "axolotl_bucket": {
+    "id": 1139
+  },
+  "sulfur_cube_bucket": {
+    "id": 1140
+  },
+  "tadpole_bucket": {
+    "id": 1141
+  },
+  "brick": {
+    "id": 1142
+  },
+  "clay_ball": {
+    "id": 1143
+  },
+  "dried_kelp_block": {
+    "id": 1144
+  },
+  "paper": {
+    "id": 1145
+  },
+  "book": {
+    "id": 1146
+  },
+  "slime_ball": {
+    "id": 1147
+  },
+  "egg": {
+    "id": 1148
+  },
+  "blue_egg": {
+    "id": 1149
+  },
+  "brown_egg": {
+    "id": 1150
+  },
+  "compass": {
+    "id": 1151
+  },
+  "recovery_compass": {
+    "id": 1152
+  },
+  "bundle": {
+    "id": 1153
+  },
+  "white_bundle": {
+    "id": 1154
+  },
+  "orange_bundle": {
+    "id": 1155
+  },
+  "magenta_bundle": {
+    "id": 1156
+  },
+  "light_blue_bundle": {
+    "id": 1157
+  },
+  "yellow_bundle": {
+    "id": 1158
+  },
+  "lime_bundle": {
+    "id": 1159
+  },
+  "pink_bundle": {
+    "id": 1160
+  },
+  "gray_bundle": {
+    "id": 1161
+  },
+  "light_gray_bundle": {
+    "id": 1162
+  },
+  "cyan_bundle": {
+    "id": 1163
+  },
+  "purple_bundle": {
+    "id": 1164
+  },
+  "blue_bundle": {
+    "id": 1165
+  },
+  "brown_bundle": {
+    "id": 1166
+  },
+  "green_bundle": {
+    "id": 1167
+  },
+  "red_bundle": {
+    "id": 1168
+  },
+  "black_bundle": {
+    "id": 1169
+  },
+  "white_cushion": {
+    "id": 1170
+  },
+  "orange_cushion": {
+    "id": 1171
+  },
+  "magenta_cushion": {
+    "id": 1172
+  },
+  "light_blue_cushion": {
+    "id": 1173
+  },
+  "yellow_cushion": {
+    "id": 1174
+  },
+  "lime_cushion": {
+    "id": 1175
+  },
+  "pink_cushion": {
+    "id": 1176
+  },
+  "gray_cushion": {
+    "id": 1177
+  },
+  "light_gray_cushion": {
+    "id": 1178
+  },
+  "cyan_cushion": {
+    "id": 1179
+  },
+  "purple_cushion": {
+    "id": 1180
+  },
+  "blue_cushion": {
+    "id": 1181
+  },
+  "brown_cushion": {
+    "id": 1182
+  },
+  "green_cushion": {
+    "id": 1183
+  },
+  "red_cushion": {
+    "id": 1184
+  },
+  "black_cushion": {
+    "id": 1185
+  },
+  "fishing_rod": {
+    "id": 1186
+  },
+  "clock": {
+    "id": 1187
+  },
+  "spyglass": {
+    "id": 1188
+  },
+  "glowstone_dust": {
+    "id": 1189
+  },
+  "cod": {
+    "id": 1190
+  },
+  "salmon": {
+    "id": 1191
+  },
+  "tropical_fish": {
+    "id": 1192
+  },
+  "pufferfish": {
+    "id": 1193
+  },
+  "cooked_cod": {
+    "id": 1194
+  },
+  "cooked_salmon": {
+    "id": 1195
+  },
+  "ink_sac": {
+    "id": 1196
+  },
+  "glow_ink_sac": {
+    "id": 1197
+  },
+  "cocoa_beans": {
+    "id": 1198
+  },
+  "white_dye": {
+    "id": 1199
+  },
+  "orange_dye": {
+    "id": 1200
+  },
+  "magenta_dye": {
+    "id": 1201
+  },
+  "light_blue_dye": {
+    "id": 1202
+  },
+  "yellow_dye": {
+    "id": 1203
+  },
+  "lime_dye": {
+    "id": 1204
+  },
+  "pink_dye": {
+    "id": 1205
+  },
+  "gray_dye": {
+    "id": 1206
+  },
+  "light_gray_dye": {
+    "id": 1207
+  },
+  "cyan_dye": {
+    "id": 1208
+  },
+  "purple_dye": {
+    "id": 1209
+  },
+  "blue_dye": {
+    "id": 1210
+  },
+  "brown_dye": {
+    "id": 1211
+  },
+  "green_dye": {
+    "id": 1212
+  },
+  "red_dye": {
+    "id": 1213
+  },
+  "black_dye": {
+    "id": 1214
+  },
+  "bone_meal": {
+    "id": 1215
+  },
+  "bone": {
+    "id": 1216
+  },
+  "sugar": {
+    "id": 1217
+  },
+  "cake": {
+    "id": 1218
+  },
+  "white_bed": {
+    "id": 1219
+  },
+  "orange_bed": {
+    "id": 1220
+  },
+  "magenta_bed": {
+    "id": 1221
+  },
+  "light_blue_bed": {
+    "id": 1222
+  },
+  "yellow_bed": {
+    "id": 1223
+  },
+  "lime_bed": {
+    "id": 1224
+  },
+  "pink_bed": {
+    "id": 1225
+  },
+  "gray_bed": {
+    "id": 1226
+  },
+  "light_gray_bed": {
+    "id": 1227
+  },
+  "cyan_bed": {
+    "id": 1228
+  },
+  "purple_bed": {
+    "id": 1229
+  },
+  "blue_bed": {
+    "id": 1230
+  },
+  "brown_bed": {
+    "id": 1231
+  },
+  "green_bed": {
+    "id": 1232
+  },
+  "red_bed": {
+    "id": 1233
+  },
+  "black_bed": {
+    "id": 1234
+  },
+  "straw_bed": {
+    "id": 1235
+  },
+  "cookie": {
+    "id": 1236
+  },
+  "crafter": {
+    "id": 1237
+  },
+  "filled_map": {
+    "id": 1238
+  },
+  "ocean_monument_map": {
+    "id": 1239
+  },
+  "woodland_mansion_map": {
+    "id": 1240
+  },
+  "buried_trial_chambers_map": {
+    "id": 1241
+  },
+  "jungle_pyramid_map": {
+    "id": 1242
+  },
+  "swamp_hut_map": {
+    "id": 1243
+  },
+  "desert_village_map": {
+    "id": 1244
+  },
+  "plains_village_map": {
+    "id": 1245
+  },
+  "savanna_village_map": {
+    "id": 1246
+  },
+  "snowy_village_map": {
+    "id": 1247
+  },
+  "taiga_village_map": {
+    "id": 1248
+  },
+  "buried_treasure_map": {
+    "id": 1249
+  },
+  "buried_ancient_city_map": {
+    "id": 1250
+  },
+  "buried_mineshaft_map": {
+    "id": 1251
+  },
+  "desert_pyramid_map": {
+    "id": 1252
+  },
+  "abandoned_camp_map": {
+    "id": 1253
+  },
+  "warm_ocean_ruins_map": {
+    "id": 1254
+  },
+  "shears": {
+    "id": 1255
+  },
+  "melon_slice": {
+    "id": 1256
+  },
+  "dried_kelp": {
+    "id": 1257
+  },
+  "pumpkin_seeds": {
+    "id": 1258
+  },
+  "melon_seeds": {
+    "id": 1259
+  },
+  "beef": {
+    "id": 1260
+  },
+  "cooked_beef": {
+    "id": 1261
+  },
+  "chicken": {
+    "id": 1262
+  },
+  "cooked_chicken": {
+    "id": 1263
+  },
+  "rotten_flesh": {
+    "id": 1264
+  },
+  "ender_pearl": {
+    "id": 1265
+  },
+  "blaze_rod": {
+    "id": 1266
+  },
+  "ghast_tear": {
+    "id": 1267
+  },
+  "gold_nugget": {
+    "id": 1268
+  },
+  "nether_wart": {
+    "id": 1269
+  },
+  "glass_bottle": {
+    "id": 1270
+  },
+  "potion": {
+    "id": 1271
+  },
+  "spider_eye": {
+    "id": 1272
+  },
+  "fermented_spider_eye": {
+    "id": 1273
+  },
+  "blaze_powder": {
+    "id": 1274
+  },
+  "magma_cream": {
+    "id": 1275
+  },
+  "brewing_stand": {
+    "id": 1276
+  },
+  "cauldron": {
+    "id": 1277
+  },
+  "ender_eye": {
+    "id": 1278
+  },
+  "glistering_melon_slice": {
+    "id": 1279
+  },
+  "chicken_spawn_egg": {
+    "id": 1280
+  },
+  "cow_spawn_egg": {
+    "id": 1281
+  },
+  "pig_spawn_egg": {
+    "id": 1282
+  },
+  "sheep_spawn_egg": {
+    "id": 1283
+  },
+  "camel_spawn_egg": {
+    "id": 1284
+  },
+  "donkey_spawn_egg": {
+    "id": 1285
+  },
+  "horse_spawn_egg": {
+    "id": 1286
+  },
+  "mule_spawn_egg": {
+    "id": 1287
+  },
+  "cat_spawn_egg": {
+    "id": 1288
+  },
+  "parrot_spawn_egg": {
+    "id": 1289
+  },
+  "wolf_spawn_egg": {
+    "id": 1290
+  },
+  "armadillo_spawn_egg": {
+    "id": 1291
+  },
+  "bat_spawn_egg": {
+    "id": 1292
+  },
+  "bee_spawn_egg": {
+    "id": 1293
+  },
+  "fox_spawn_egg": {
+    "id": 1294
+  },
+  "goat_spawn_egg": {
+    "id": 1295
+  },
+  "llama_spawn_egg": {
+    "id": 1296
+  },
+  "ocelot_spawn_egg": {
+    "id": 1297
+  },
+  "panda_spawn_egg": {
+    "id": 1298
+  },
+  "polar_bear_spawn_egg": {
+    "id": 1299
+  },
+  "rabbit_spawn_egg": {
+    "id": 1300
+  },
+  "axolotl_spawn_egg": {
+    "id": 1301
+  },
+  "cod_spawn_egg": {
+    "id": 1302
+  },
+  "dolphin_spawn_egg": {
+    "id": 1303
+  },
+  "frog_spawn_egg": {
+    "id": 1304
+  },
+  "glow_squid_spawn_egg": {
+    "id": 1305
+  },
+  "nautilus_spawn_egg": {
+    "id": 1306
+  },
+  "pufferfish_spawn_egg": {
+    "id": 1307
+  },
+  "salmon_spawn_egg": {
+    "id": 1308
+  },
+  "squid_spawn_egg": {
+    "id": 1309
+  },
+  "tadpole_spawn_egg": {
+    "id": 1310
+  },
+  "tropical_fish_spawn_egg": {
+    "id": 1311
+  },
+  "turtle_spawn_egg": {
+    "id": 1312
+  },
+  "allay_spawn_egg": {
+    "id": 1313
+  },
+  "mooshroom_spawn_egg": {
+    "id": 1314
+  },
+  "sniffer_spawn_egg": {
+    "id": 1315
+  },
+  "sulfur_cube_spawn_egg": {
+    "id": 1316
+  },
+  "copper_golem_spawn_egg": {
+    "id": 1317
+  },
+  "iron_golem_spawn_egg": {
+    "id": 1318
+  },
+  "snow_golem_spawn_egg": {
+    "id": 1319
+  },
+  "trader_llama_spawn_egg": {
+    "id": 1320
+  },
+  "villager_spawn_egg": {
+    "id": 1321
+  },
+  "wandering_trader_spawn_egg": {
+    "id": 1322
+  },
+  "bogged_spawn_egg": {
+    "id": 1323
+  },
+  "camel_husk_spawn_egg": {
+    "id": 1324
+  },
+  "drowned_spawn_egg": {
+    "id": 1325
+  },
+  "husk_spawn_egg": {
+    "id": 1326
+  },
+  "parched_spawn_egg": {
+    "id": 1327
+  },
+  "skeleton_spawn_egg": {
+    "id": 1328
+  },
+  "skeleton_horse_spawn_egg": {
+    "id": 1329
+  },
+  "stray_spawn_egg": {
+    "id": 1330
+  },
+  "wither_spawn_egg": {
+    "id": 1331
+  },
+  "wither_skeleton_spawn_egg": {
+    "id": 1332
+  },
+  "zombie_spawn_egg": {
+    "id": 1333
+  },
+  "zombie_horse_spawn_egg": {
+    "id": 1334
+  },
+  "zombie_nautilus_spawn_egg": {
+    "id": 1335
+  },
+  "zombie_villager_spawn_egg": {
+    "id": 1336
+  },
+  "cave_spider_spawn_egg": {
+    "id": 1337
+  },
+  "spider_spawn_egg": {
+    "id": 1338
+  },
+  "breeze_spawn_egg": {
+    "id": 1339
+  },
+  "creaking_spawn_egg": {
+    "id": 1340
+  },
+  "creeper_spawn_egg": {
+    "id": 1341
+  },
+  "elder_guardian_spawn_egg": {
+    "id": 1342
+  },
+  "guardian_spawn_egg": {
+    "id": 1343
+  },
+  "phantom_spawn_egg": {
+    "id": 1344
+  },
+  "silverfish_spawn_egg": {
+    "id": 1345
+  },
+  "slime_spawn_egg": {
+    "id": 1346
+  },
+  "warden_spawn_egg": {
+    "id": 1347
+  },
+  "witch_spawn_egg": {
+    "id": 1348
+  },
+  "evoker_spawn_egg": {
+    "id": 1349
+  },
+  "pillager_spawn_egg": {
+    "id": 1350
+  },
+  "ravager_spawn_egg": {
+    "id": 1351
+  },
+  "vindicator_spawn_egg": {
+    "id": 1352
+  },
+  "vex_spawn_egg": {
+    "id": 1353
+  },
+  "blaze_spawn_egg": {
+    "id": 1354
+  },
+  "ghast_spawn_egg": {
+    "id": 1355
+  },
+  "happy_ghast_spawn_egg": {
+    "id": 1356
+  },
+  "hoglin_spawn_egg": {
+    "id": 1357
+  },
+  "magma_cube_spawn_egg": {
+    "id": 1358
+  },
+  "piglin_spawn_egg": {
+    "id": 1359
+  },
+  "piglin_brute_spawn_egg": {
+    "id": 1360
+  },
+  "strider_spawn_egg": {
+    "id": 1361
+  },
+  "zoglin_spawn_egg": {
+    "id": 1362
+  },
+  "zombified_piglin_spawn_egg": {
+    "id": 1363
+  },
+  "ender_dragon_spawn_egg": {
+    "id": 1364
+  },
+  "enderman_spawn_egg": {
+    "id": 1365
+  },
+  "endermite_spawn_egg": {
+    "id": 1366
+  },
+  "shulker_spawn_egg": {
+    "id": 1367
+  },
+  "experience_bottle": {
+    "id": 1368
+  },
+  "fire_charge": {
+    "id": 1369
+  },
+  "wind_charge": {
+    "id": 1370
+  },
+  "writable_book": {
+    "id": 1371
+  },
+  "written_book": {
+    "id": 1372
+  },
+  "breeze_rod": {
+    "id": 1373
+  },
+  "mace": {
+    "id": 1374
+  },
+  "item_frame": {
+    "id": 1375
+  },
+  "glow_item_frame": {
+    "id": 1376
+  },
+  "flower_pot": {
+    "id": 1377
+  },
+  "carrot": {
+    "id": 1378
+  },
+  "potato": {
+    "id": 1379
+  },
+  "baked_potato": {
+    "id": 1380
+  },
+  "poisonous_potato": {
+    "id": 1381
+  },
+  "map": {
+    "id": 1382
+  },
+  "golden_carrot": {
+    "id": 1383
+  },
+  "skeleton_skull": {
+    "id": 1384
+  },
+  "wither_skeleton_skull": {
+    "id": 1385
+  },
+  "player_head": {
+    "id": 1386
+  },
+  "zombie_head": {
+    "id": 1387
+  },
+  "creeper_head": {
+    "id": 1388
+  },
+  "dragon_head": {
+    "id": 1389
+  },
+  "piglin_head": {
+    "id": 1390
+  },
+  "nether_star": {
+    "id": 1391
+  },
+  "pumpkin_pie": {
+    "id": 1392
+  },
+  "firework_rocket": {
+    "id": 1393
+  },
+  "firework_star": {
+    "id": 1394
+  },
+  "enchanted_book": {
+    "id": 1395
+  },
+  "nether_brick": {
+    "id": 1396
+  },
+  "resin_brick": {
+    "id": 1397
+  },
+  "prismarine_shard": {
+    "id": 1398
+  },
+  "prismarine_crystals": {
+    "id": 1399
+  },
+  "rabbit": {
+    "id": 1400
+  },
+  "cooked_rabbit": {
+    "id": 1401
+  },
+  "rabbit_stew": {
+    "id": 1402
+  },
+  "rabbit_foot": {
+    "id": 1403
+  },
+  "rabbit_hide": {
+    "id": 1404
+  },
+  "armor_stand": {
+    "id": 1405
+  },
+  "copper_horse_armor": {
+    "id": 1406
+  },
+  "iron_horse_armor": {
+    "id": 1407
+  },
+  "golden_horse_armor": {
+    "id": 1408
+  },
+  "diamond_horse_armor": {
+    "id": 1409
+  },
+  "netherite_horse_armor": {
+    "id": 1410
+  },
+  "leather_horse_armor": {
+    "id": 1411
+  },
+  "lead": {
+    "id": 1412
+  },
+  "name_tag": {
+    "id": 1413
+  },
+  "command_block_minecart": {
+    "id": 1414
+  },
+  "mutton": {
+    "id": 1415
+  },
+  "cooked_mutton": {
+    "id": 1416
+  },
+  "white_banner": {
+    "id": 1417
+  },
+  "orange_banner": {
+    "id": 1418
+  },
+  "magenta_banner": {
+    "id": 1419
+  },
+  "light_blue_banner": {
+    "id": 1420
+  },
+  "yellow_banner": {
+    "id": 1421
+  },
+  "lime_banner": {
+    "id": 1422
+  },
+  "pink_banner": {
+    "id": 1423
+  },
+  "gray_banner": {
+    "id": 1424
+  },
+  "light_gray_banner": {
+    "id": 1425
+  },
+  "cyan_banner": {
+    "id": 1426
+  },
+  "purple_banner": {
+    "id": 1427
+  },
+  "blue_banner": {
+    "id": 1428
+  },
+  "brown_banner": {
+    "id": 1429
+  },
+  "green_banner": {
+    "id": 1430
+  },
+  "red_banner": {
+    "id": 1431
+  },
+  "black_banner": {
+    "id": 1432
+  },
+  "end_crystal": {
+    "id": 1433
+  },
+  "chorus_fruit": {
+    "id": 1434
+  },
+  "popped_chorus_fruit": {
+    "id": 1435
+  },
+  "torchflower_seeds": {
+    "id": 1436
+  },
+  "pitcher_pod": {
+    "id": 1437
+  },
+  "beetroot": {
+    "id": 1438
+  },
+  "beetroot_seeds": {
+    "id": 1439
+  },
+  "beetroot_soup": {
+    "id": 1440
+  },
+  "dragon_breath": {
+    "id": 1441
+  },
+  "splash_potion": {
+    "id": 1442
+  },
+  "spectral_arrow": {
+    "id": 1443
+  },
+  "tipped_arrow": {
+    "id": 1444
+  },
+  "lingering_potion": {
+    "id": 1445
+  },
+  "shield": {
+    "id": 1446
+  },
+  "wooden_spear": {
+    "id": 1447
+  },
+  "stone_spear": {
+    "id": 1448
+  },
+  "copper_spear": {
+    "id": 1449
+  },
+  "iron_spear": {
+    "id": 1450
+  },
+  "golden_spear": {
+    "id": 1451
+  },
+  "diamond_spear": {
+    "id": 1452
+  },
+  "netherite_spear": {
+    "id": 1453
+  },
+  "totem_of_undying": {
+    "id": 1454
+  },
+  "shulker_shell": {
+    "id": 1455
+  },
+  "iron_nugget": {
+    "id": 1456
+  },
+  "copper_nugget": {
+    "id": 1457
+  },
+  "knowledge_book": {
+    "id": 1458
+  },
+  "debug_stick": {
+    "id": 1459
+  },
+  "music_disc_13": {
+    "id": 1460
+  },
+  "music_disc_cat": {
+    "id": 1461
+  },
+  "music_disc_blocks": {
+    "id": 1462
+  },
+  "music_disc_bounce": {
+    "id": 1463
+  },
+  "music_disc_chirp": {
+    "id": 1464
+  },
+  "music_disc_creator": {
+    "id": 1465
+  },
+  "music_disc_creator_music_box": {
+    "id": 1466
+  },
+  "music_disc_far": {
+    "id": 1467
+  },
+  "music_disc_lava_chicken": {
+    "id": 1468
+  },
+  "music_disc_mall": {
+    "id": 1469
+  },
+  "music_disc_mellohi": {
+    "id": 1470
+  },
+  "music_disc_stal": {
+    "id": 1471
+  },
+  "music_disc_strad": {
+    "id": 1472
+  },
+  "music_disc_ward": {
+    "id": 1473
+  },
+  "music_disc_11": {
+    "id": 1474
+  },
+  "music_disc_wait": {
+    "id": 1475
+  },
+  "music_disc_otherside": {
+    "id": 1476
+  },
+  "music_disc_relic": {
+    "id": 1477
+  },
+  "music_disc_5": {
+    "id": 1478
+  },
+  "music_disc_pigstep": {
+    "id": 1479
+  },
+  "music_disc_precipice": {
+    "id": 1480
+  },
+  "music_disc_tears": {
+    "id": 1481
+  },
+  "disc_fragment_5": {
+    "id": 1482
+  },
+  "trident": {
+    "id": 1483
+  },
+  "nautilus_shell": {
+    "id": 1484
+  },
+  "iron_nautilus_armor": {
+    "id": 1485
+  },
+  "golden_nautilus_armor": {
+    "id": 1486
+  },
+  "diamond_nautilus_armor": {
+    "id": 1487
+  },
+  "netherite_nautilus_armor": {
+    "id": 1488
+  },
+  "copper_nautilus_armor": {
+    "id": 1489
+  },
+  "heart_of_the_sea": {
+    "id": 1490
+  },
+  "crossbow": {
+    "id": 1491
+  },
+  "suspicious_stew": {
+    "id": 1492
+  },
+  "loom": {
+    "id": 1493
+  },
+  "flower_banner_pattern": {
+    "id": 1494
+  },
+  "creeper_banner_pattern": {
+    "id": 1495
+  },
+  "skull_banner_pattern": {
+    "id": 1496
+  },
+  "mojang_banner_pattern": {
+    "id": 1497
+  },
+  "globe_banner_pattern": {
+    "id": 1498
+  },
+  "piglin_banner_pattern": {
+    "id": 1499
+  },
+  "flow_banner_pattern": {
+    "id": 1500
+  },
+  "guster_banner_pattern": {
+    "id": 1501
+  },
+  "field_masoned_banner_pattern": {
+    "id": 1502
+  },
+  "bordure_indented_banner_pattern": {
+    "id": 1503
+  },
+  "goat_horn": {
+    "id": 1504
+  },
+  "composter": {
+    "id": 1505
+  },
+  "barrel": {
+    "id": 1506
+  },
+  "smoker": {
+    "id": 1507
+  },
+  "blast_furnace": {
+    "id": 1508
+  },
+  "cartography_table": {
+    "id": 1509
+  },
+  "fletching_table": {
+    "id": 1510
+  },
+  "grindstone": {
+    "id": 1511
+  },
+  "smithing_table": {
+    "id": 1512
+  },
+  "stonecutter": {
+    "id": 1513
+  },
+  "bell": {
+    "id": 1514
+  },
+  "lantern": {
+    "id": 1515
+  },
+  "soul_lantern": {
+    "id": 1516
+  },
+  "copper_lantern": {
+    "id": 1517
+  },
+  "exposed_copper_lantern": {
+    "id": 1518
+  },
+  "weathered_copper_lantern": {
+    "id": 1519
+  },
+  "oxidized_copper_lantern": {
+    "id": 1520
+  },
+  "waxed_copper_lantern": {
+    "id": 1521
+  },
+  "waxed_exposed_copper_lantern": {
+    "id": 1522
+  },
+  "waxed_weathered_copper_lantern": {
+    "id": 1523
+  },
+  "waxed_oxidized_copper_lantern": {
+    "id": 1524
+  },
+  "sweet_berries": {
+    "id": 1525
+  },
+  "glow_berries": {
+    "id": 1526
+  },
+  "campfire": {
+    "id": 1527
+  },
+  "soul_campfire": {
+    "id": 1528
+  },
+  "shroomlight": {
+    "id": 1529
+  },
+  "honeycomb": {
+    "id": 1530
+  },
+  "bee_nest": {
+    "id": 1531
+  },
+  "beehive": {
+    "id": 1532
+  },
+  "honey_bottle": {
+    "id": 1533
+  },
+  "honeycomb_block": {
+    "id": 1534
+  },
+  "lodestone": {
+    "id": 1535
+  },
+  "crying_obsidian": {
+    "id": 1536
+  },
+  "blackstone": {
+    "id": 1537
+  },
+  "blackstone_slab": {
+    "id": 1538
+  },
+  "blackstone_stairs": {
+    "id": 1539
+  },
+  "gilded_blackstone": {
+    "id": 1540
+  },
+  "polished_blackstone": {
+    "id": 1541
+  },
+  "polished_blackstone_slab": {
+    "id": 1542
+  },
+  "polished_blackstone_stairs": {
+    "id": 1543
+  },
+  "chiseled_polished_blackstone": {
+    "id": 1544
+  },
+  "polished_blackstone_bricks": {
+    "id": 1545
+  },
+  "polished_blackstone_brick_slab": {
+    "id": 1546
+  },
+  "polished_blackstone_brick_stairs": {
+    "id": 1547
+  },
+  "cracked_polished_blackstone_bricks": {
+    "id": 1548
+  },
+  "respawn_anchor": {
+    "id": 1549
+  },
+  "candle": {
+    "id": 1550
+  },
+  "white_candle": {
+    "id": 1551
+  },
+  "orange_candle": {
+    "id": 1552
+  },
+  "magenta_candle": {
+    "id": 1553
+  },
+  "light_blue_candle": {
+    "id": 1554
+  },
+  "yellow_candle": {
+    "id": 1555
+  },
+  "lime_candle": {
+    "id": 1556
+  },
+  "pink_candle": {
+    "id": 1557
+  },
+  "gray_candle": {
+    "id": 1558
+  },
+  "light_gray_candle": {
+    "id": 1559
+  },
+  "cyan_candle": {
+    "id": 1560
+  },
+  "purple_candle": {
+    "id": 1561
+  },
+  "blue_candle": {
+    "id": 1562
+  },
+  "brown_candle": {
+    "id": 1563
+  },
+  "green_candle": {
+    "id": 1564
+  },
+  "red_candle": {
+    "id": 1565
+  },
+  "black_candle": {
+    "id": 1566
+  },
+  "small_amethyst_bud": {
+    "id": 1567
+  },
+  "medium_amethyst_bud": {
+    "id": 1568
+  },
+  "large_amethyst_bud": {
+    "id": 1569
+  },
+  "amethyst_cluster": {
+    "id": 1570
+  },
+  "pointed_dripstone": {
+    "id": 1571
+  },
+  "sulfur_spike": {
+    "id": 1572
+  },
+  "ochre_froglight": {
+    "id": 1573
+  },
+  "verdant_froglight": {
+    "id": 1574
+  },
+  "pearlescent_froglight": {
+    "id": 1575
+  },
+  "frogspawn": {
+    "id": 1576
+  },
+  "echo_shard": {
+    "id": 1577
+  },
+  "brush": {
+    "id": 1578
+  },
+  "netherite_upgrade_smithing_template": {
+    "id": 1579
+  },
+  "sentry_armor_trim_smithing_template": {
+    "id": 1580
+  },
+  "dune_armor_trim_smithing_template": {
+    "id": 1581
+  },
+  "coast_armor_trim_smithing_template": {
+    "id": 1582
+  },
+  "wild_armor_trim_smithing_template": {
+    "id": 1583
+  },
+  "ward_armor_trim_smithing_template": {
+    "id": 1584
+  },
+  "eye_armor_trim_smithing_template": {
+    "id": 1585
+  },
+  "vex_armor_trim_smithing_template": {
+    "id": 1586
+  },
+  "tide_armor_trim_smithing_template": {
+    "id": 1587
+  },
+  "snout_armor_trim_smithing_template": {
+    "id": 1588
+  },
+  "rib_armor_trim_smithing_template": {
+    "id": 1589
+  },
+  "spire_armor_trim_smithing_template": {
+    "id": 1590
+  },
+  "wayfinder_armor_trim_smithing_template": {
+    "id": 1591
+  },
+  "shaper_armor_trim_smithing_template": {
+    "id": 1592
+  },
+  "silence_armor_trim_smithing_template": {
+    "id": 1593
+  },
+  "raiser_armor_trim_smithing_template": {
+    "id": 1594
+  },
+  "host_armor_trim_smithing_template": {
+    "id": 1595
+  },
+  "flow_armor_trim_smithing_template": {
+    "id": 1596
+  },
+  "bolt_armor_trim_smithing_template": {
+    "id": 1597
+  },
+  "angler_pottery_sherd": {
+    "id": 1598
+  },
+  "archer_pottery_sherd": {
+    "id": 1599
+  },
+  "arms_up_pottery_sherd": {
+    "id": 1600
+  },
+  "blade_pottery_sherd": {
+    "id": 1601
+  },
+  "brewer_pottery_sherd": {
+    "id": 1602
+  },
+  "burn_pottery_sherd": {
+    "id": 1603
+  },
+  "danger_pottery_sherd": {
+    "id": 1604
+  },
+  "explorer_pottery_sherd": {
+    "id": 1605
+  },
+  "flow_pottery_sherd": {
+    "id": 1606
+  },
+  "friend_pottery_sherd": {
+    "id": 1607
+  },
+  "guster_pottery_sherd": {
+    "id": 1608
+  },
+  "heart_pottery_sherd": {
+    "id": 1609
+  },
+  "heartbreak_pottery_sherd": {
+    "id": 1610
+  },
+  "howl_pottery_sherd": {
+    "id": 1611
+  },
+  "miner_pottery_sherd": {
+    "id": 1612
+  },
+  "mourner_pottery_sherd": {
+    "id": 1613
+  },
+  "plenty_pottery_sherd": {
+    "id": 1614
+  },
+  "prize_pottery_sherd": {
+    "id": 1615
+  },
+  "scrape_pottery_sherd": {
+    "id": 1616
+  },
+  "sheaf_pottery_sherd": {
+    "id": 1617
+  },
+  "shelter_pottery_sherd": {
+    "id": 1618
+  },
+  "skull_pottery_sherd": {
+    "id": 1619
+  },
+  "snort_pottery_sherd": {
+    "id": 1620
+  },
+  "copper_grate": {
+    "id": 1621
+  },
+  "exposed_copper_grate": {
+    "id": 1622
+  },
+  "weathered_copper_grate": {
+    "id": 1623
+  },
+  "oxidized_copper_grate": {
+    "id": 1624
+  },
+  "waxed_copper_grate": {
+    "id": 1625
+  },
+  "waxed_exposed_copper_grate": {
+    "id": 1626
+  },
+  "waxed_weathered_copper_grate": {
+    "id": 1627
+  },
+  "waxed_oxidized_copper_grate": {
+    "id": 1628
+  },
+  "copper_bulb": {
+    "id": 1629
+  },
+  "exposed_copper_bulb": {
+    "id": 1630
+  },
+  "weathered_copper_bulb": {
+    "id": 1631
+  },
+  "oxidized_copper_bulb": {
+    "id": 1632
+  },
+  "waxed_copper_bulb": {
+    "id": 1633
+  },
+  "waxed_exposed_copper_bulb": {
+    "id": 1634
+  },
+  "waxed_weathered_copper_bulb": {
+    "id": 1635
+  },
+  "waxed_oxidized_copper_bulb": {
+    "id": 1636
+  },
+  "copper_chest": {
+    "id": 1637
+  },
+  "exposed_copper_chest": {
+    "id": 1638
+  },
+  "weathered_copper_chest": {
+    "id": 1639
+  },
+  "oxidized_copper_chest": {
+    "id": 1640
+  },
+  "waxed_copper_chest": {
+    "id": 1641
+  },
+  "waxed_exposed_copper_chest": {
+    "id": 1642
+  },
+  "waxed_weathered_copper_chest": {
+    "id": 1643
+  },
+  "waxed_oxidized_copper_chest": {
+    "id": 1644
+  },
+  "copper_golem_statue": {
+    "id": 1645
+  },
+  "exposed_copper_golem_statue": {
+    "id": 1646
+  },
+  "weathered_copper_golem_statue": {
+    "id": 1647
+  },
+  "oxidized_copper_golem_statue": {
+    "id": 1648
+  },
+  "waxed_copper_golem_statue": {
+    "id": 1649
+  },
+  "waxed_exposed_copper_golem_statue": {
+    "id": 1650
+  },
+  "waxed_weathered_copper_golem_statue": {
+    "id": 1651
+  },
+  "waxed_oxidized_copper_golem_statue": {
+    "id": 1652
+  },
+  "trial_spawner": {
+    "id": 1653
+  },
+  "trial_key": {
+    "id": 1654
+  },
+  "ominous_trial_key": {
+    "id": 1655
+  },
+  "vault": {
+    "id": 1656
+  },
+  "ominous_bottle": {
+    "id": 1657
+  }
+}

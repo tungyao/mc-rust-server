@@ -1,262 +1,367 @@
-//! mc-registry build script: 26.3 方块表占位生成（离线可构建）
+//! mc-registry build script: 从 `data/manifest.json` + `data/777/*.json` 生成真实 ID 注册表。
 //!
-//! - 不联网下载任何大文件，216 个常见方块手写在下面 `BLOCKS`（ID 0..216 连续）。
-//! - ID 为离线占位，待按 26.3 minecraft-data(777) blockstate 表对齐真实 ID。
-//! - 生成 `$OUT_DIR/blocks_generated.rs`，内含
-//!   `pub const BLOCKS: &[(u32, &str)]` + `pub fn by_name(&str) -> Option<u32>`
-//! - lib.rs 通过 `include!` 引入并在其上实现 block_name/block_id（透传不变）。
-//! - 预算放宽后单文件即可（软约束 2000 行），不再拆 data_*.rs。
+//! 数据来源是 Pumpkin 26.3 Extractor 提取的 JSON（见 `data/777/SOURCE.md`）。
+//! 生成 `$OUT_DIR/generated.rs`，含 BLOCKS / ITEMS / ENTITIES / PACKETS 表以及
+//! `by_name` / `by_id` 查找函数；`src/lib.rs` 通过 `include!` 引入并在此之上实现公共 API。
+//!
+//! 构建期同时执行 P0 校验：把 JSON 里的 ID 与 HANDOFF / 计划文档中的真机实测值逐项比对，
+//! 数据漂移会直接导致编译失败，而不是运行期静默错位。
+use std::collections::HashMap;
 use std::env;
 use std::fs;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
-// (id, namespaced name)，只做 26.3 占位：id 0..216 连续分配，
-// 待按 26.3 minecraft-data(777) blockstate 表对齐真实 ID。
-const BLOCKS: &[(u32, &str)] = &[
-    (0, "minecraft:air"),
-    (1, "minecraft:stone"),
-    (2, "minecraft:grass_block"),
-    (3, "minecraft:dirt"),
-    (4, "minecraft:cobblestone"),
-    (5, "minecraft:oak_planks"),
-    (6, "minecraft:oak_sapling"),
-    (7, "minecraft:bedrock"),
-    (8, "minecraft:water"),
-    (9, "minecraft:lava"),
-    (10, "minecraft:sand"),
-    (11, "minecraft:gravel"),
-    (12, "minecraft:oak_log"),
-    (13, "minecraft:oak_leaves"),
-    (14, "minecraft:glass"),
-    (15, "minecraft:coal_ore"),
-    (16, "minecraft:iron_ore"),
-    (17, "minecraft:gold_ore"),
-    (18, "minecraft:diamond_ore"),
-    (19, "minecraft:crafting_table"),
-    (20, "minecraft:furnace"),
-    (21, "minecraft:torch"),
-    (22, "minecraft:chest"),
-    (23, "minecraft:oak_door"),
-    (24, "minecraft:oak_fence"),
-    (25, "minecraft:oak_stairs"),
-    (26, "minecraft:oak_slab"),
-    (27, "minecraft:cobblestone_stairs"),
-    (28, "minecraft:stone_slab"),
-    (29, "minecraft:bricks"),
-    (30, "minecraft:granite"),
-    (31, "minecraft:polished_granite"),
-    (32, "minecraft:diorite"),
-    (33, "minecraft:polished_diorite"),
-    (34, "minecraft:andesite"),
-    (35, "minecraft:polished_andesite"),
-    (36, "minecraft:deepslate"),
-    (37, "minecraft:cobbled_deepslate"),
-    (38, "minecraft:polished_deepslate"),
-    (39, "minecraft:deepslate_bricks"),
-    (40, "minecraft:deepslate_tiles"),
-    (41, "minecraft:cracked_deepslate_bricks"),
-    (42, "minecraft:chiseled_deepslate"),
-    (43, "minecraft:tuff"),
-    (44, "minecraft:polished_tuff"),
-    (45, "minecraft:tuff_bricks"),
-    (46, "minecraft:chiseled_tuff"),
-    (47, "minecraft:calcite"),
-    (48, "minecraft:smooth_stone"),
-    (49, "minecraft:stone_bricks"),
-    (50, "minecraft:mossy_stone_bricks"),
-    (51, "minecraft:cracked_stone_bricks"),
-    (52, "minecraft:chiseled_stone_bricks"),
-    (53, "minecraft:mossy_cobblestone"),
-    (54, "minecraft:sandstone"),
-    (55, "minecraft:cut_sandstone"),
-    (56, "minecraft:chiseled_sandstone"),
-    (57, "minecraft:red_sandstone"),
-    (58, "minecraft:cut_red_sandstone"),
-    (59, "minecraft:chiseled_red_sandstone"),
-    (60, "minecraft:smooth_sandstone"),
-    (61, "minecraft:smooth_quartz"),
-    (62, "minecraft:quartz_bricks"),
-    (63, "minecraft:quartz_pillar"),
-    (64, "minecraft:prismarine"),
-    (65, "minecraft:prismarine_bricks"),
-    (66, "minecraft:dark_prismarine"),
-    (67, "minecraft:sea_lantern"),
-    (68, "minecraft:end_stone"),
-    (69, "minecraft:end_stone_bricks"),
-    (70, "minecraft:purpur_block"),
-    (71, "minecraft:purpur_pillar"),
-    (72, "minecraft:obsidian"),
-    (73, "minecraft:crying_obsidian"),
-    (74, "minecraft:netherrack"),
-    (75, "minecraft:basalt"),
-    (76, "minecraft:polished_basalt"),
-    (77, "minecraft:smooth_basalt"),
-    (78, "minecraft:blackstone"),
-    (79, "minecraft:polished_blackstone"),
-    (80, "minecraft:polished_blackstone_bricks"),
-    (81, "minecraft:chiseled_polished_blackstone"),
-    (82, "minecraft:nether_bricks"),
-    (83, "minecraft:cracked_nether_bricks"),
-    (84, "minecraft:chiseled_nether_bricks"),
-    (85, "minecraft:red_nether_bricks"),
-    (86, "minecraft:soul_sand"),
-    (87, "minecraft:soul_soil"),
-    (88, "minecraft:glowstone"),
-    (89, "minecraft:magma_block"),
-    (90, "minecraft:nether_wart_block"),
-    (91, "minecraft:warped_wart_block"),
-    (92, "minecraft:shroomlight"),
-    (93, "minecraft:coarse_dirt"),
-    (94, "minecraft:rooted_dirt"),
-    (95, "minecraft:mud"),
-    (96, "minecraft:mud_bricks"),
-    (97, "minecraft:clay"),
-    (98, "minecraft:podzol"),
-    (99, "minecraft:mycelium"),
-    (100, "minecraft:farmland"),
-    (101, "minecraft:dirt_path"),
-    (102, "minecraft:red_sand"),
-    (103, "minecraft:snow"),
-    (104, "minecraft:snow_block"),
-    (105, "minecraft:ice"),
-    (106, "minecraft:packed_ice"),
-    (107, "minecraft:blue_ice"),
-    (108, "minecraft:powder_snow"),
-    (109, "minecraft:sponge"),
-    (110, "minecraft:wet_sponge"),
-    (111, "minecraft:cobweb"),
-    (112, "minecraft:moss_block"),
-    (113, "minecraft:pale_moss_block"),
-    (114, "minecraft:dripstone_block"),
-    (115, "minecraft:pointed_dripstone"),
-    (116, "minecraft:amethyst_block"),
-    (117, "minecraft:budding_amethyst"),
-    (118, "minecraft:sculk"),
-    (119, "minecraft:sculk_catalyst"),
-    (120, "minecraft:reinforced_deepslate"),
-    (121, "minecraft:redstone_ore"),
-    (122, "minecraft:lapis_ore"),
-    (123, "minecraft:emerald_ore"),
-    (124, "minecraft:copper_ore"),
-    (125, "minecraft:nether_gold_ore"),
-    (126, "minecraft:nether_quartz_ore"),
-    (127, "minecraft:ancient_debris"),
-    (128, "minecraft:deepslate_coal_ore"),
-    (129, "minecraft:deepslate_iron_ore"),
-    (130, "minecraft:deepslate_copper_ore"),
-    (131, "minecraft:deepslate_gold_ore"),
-    (132, "minecraft:deepslate_redstone_ore"),
-    (133, "minecraft:deepslate_lapis_ore"),
-    (134, "minecraft:deepslate_diamond_ore"),
-    (135, "minecraft:deepslate_emerald_ore"),
-    (136, "minecraft:coal_block"),
-    (137, "minecraft:iron_block"),
-    (138, "minecraft:gold_block"),
-    (139, "minecraft:diamond_block"),
-    (140, "minecraft:emerald_block"),
-    (141, "minecraft:lapis_block"),
-    (142, "minecraft:redstone_block"),
-    (143, "minecraft:copper_block"),
-    (144, "minecraft:raw_iron_block"),
-    (145, "minecraft:raw_gold_block"),
-    (146, "minecraft:raw_copper_block"),
-    (147, "minecraft:netherite_block"),
-    (148, "minecraft:quartz_block"),
-    (149, "minecraft:spruce_log"),
-    (150, "minecraft:birch_log"),
-    (151, "minecraft:jungle_log"),
-    (152, "minecraft:acacia_log"),
-    (153, "minecraft:dark_oak_log"),
-    (154, "minecraft:mangrove_log"),
-    (155, "minecraft:cherry_log"),
-    (156, "minecraft:pale_oak_log"),
-    (157, "minecraft:crimson_stem"),
-    (158, "minecraft:warped_stem"),
-    (159, "minecraft:spruce_planks"),
-    (160, "minecraft:birch_planks"),
-    (161, "minecraft:jungle_planks"),
-    (162, "minecraft:acacia_planks"),
-    (163, "minecraft:dark_oak_planks"),
-    (164, "minecraft:mangrove_planks"),
-    (165, "minecraft:cherry_planks"),
-    (166, "minecraft:pale_oak_planks"),
-    (167, "minecraft:bamboo_planks"),
-    (168, "minecraft:crimson_planks"),
-    (169, "minecraft:warped_planks"),
-    (170, "minecraft:spruce_leaves"),
-    (171, "minecraft:birch_leaves"),
-    (172, "minecraft:jungle_leaves"),
-    (173, "minecraft:acacia_leaves"),
-    (174, "minecraft:dark_oak_leaves"),
-    (175, "minecraft:mangrove_leaves"),
-    (176, "minecraft:cherry_leaves"),
-    (177, "minecraft:white_wool"),
-    (178, "minecraft:light_gray_wool"),
-    (179, "minecraft:gray_wool"),
-    (180, "minecraft:black_wool"),
-    (181, "minecraft:brown_wool"),
-    (182, "minecraft:red_wool"),
-    (183, "minecraft:orange_wool"),
-    (184, "minecraft:yellow_wool"),
-    (185, "minecraft:lime_wool"),
-    (186, "minecraft:green_wool"),
-    (187, "minecraft:cyan_wool"),
-    (188, "minecraft:light_blue_wool"),
-    (189, "minecraft:blue_wool"),
-    (190, "minecraft:purple_wool"),
-    (191, "minecraft:magenta_wool"),
-    (192, "minecraft:pink_wool"),
-    (193, "minecraft:bookshelf"),
-    (194, "minecraft:chiseled_bookshelf"),
-    (195, "minecraft:blast_furnace"),
-    (196, "minecraft:smoker"),
-    (197, "minecraft:anvil"),
-    (198, "minecraft:enchanting_table"),
-    (199, "minecraft:brewing_stand"),
-    (200, "minecraft:cauldron"),
-    (201, "minecraft:hopper"),
-    (202, "minecraft:dispenser"),
-    (203, "minecraft:dropper"),
-    (204, "minecraft:observer"),
-    (205, "minecraft:piston"),
-    (206, "minecraft:sticky_piston"),
-    (207, "minecraft:tnt"),
-    (208, "minecraft:note_block"),
-    (209, "minecraft:jukebox"),
-    (210, "minecraft:lectern"),
-    (211, "minecraft:lantern"),
-    (212, "minecraft:soul_lantern"),
-    (213, "minecraft:campfire"),
-    (214, "minecraft:redstone_torch"),
-    (215, "minecraft:redstone_lamp"),
-];
+use serde_json::Value;
+
+const EXPECTED_VERSION: &str = "26.3";
+const EXPECTED_PROTOCOL: u32 = 777;
+const EXPECTED_DATA_VERSION: u32 = 5023;
 
 fn main() {
     println!("cargo:rerun-if-changed=build.rs");
 
-    let out_dir = PathBuf::from(env::var("OUT_DIR").expect("OUT_DIR must be set"));
-    let dest = out_dir.join("blocks_generated.rs");
+    let manifest_dir = PathBuf::from(env::var("CARGO_MANIFEST_DIR").expect("CARGO_MANIFEST_DIR"));
+    let data_root = manifest_dir.join("../../data");
+    let manifest_path = data_root.join("manifest.json");
 
-    let mut src = String::new();
-    src.push_str(&format!(
-        "// @generated by crates/mc-registry/build.rs (MC 26.3 placeholder, {} blocks).\n",
-        BLOCKS.len()
-    ));
-    src.push_str("// 离线占位：不要在此手改，由 build.rs 硬编码表生成。\n");
-    src.push_str("// ID 为占位连续号，待按 26.3 minecraft-data(777) blockstate 表对齐。\n");
-    src.push_str("pub const BLOCKS: &[(u32, &str)] = &[\n");
-    for (id, name) in BLOCKS {
-        src.push_str(&format!("    ({id}, \"{name}\"),\n"));
-    }
-    src.push_str("];\n\n");
-    src.push_str("pub fn by_name(name: &str) -> Option<u32> {\n");
-    src.push_str("    match name {\n");
-    for (id, name) in BLOCKS {
-        src.push_str(&format!("        \"{name}\" => Some({id}),\n"));
-    }
-    src.push_str("        _ => None,\n");
-    src.push_str("    }\n");
-    src.push_str("}\n");
+    println!("cargo:rerun-if-changed={}", data_root.display());
+    println!("cargo:rerun-if-changed={}", manifest_path.display());
 
-    fs::write(&dest, src).expect("write blocks_generated.rs");
+    let manifest = read_json(&manifest_path);
+    assert_eq!(
+        manifest.get("version").and_then(Value::as_str),
+        Some(EXPECTED_VERSION),
+        "data/manifest.json version mismatch"
+    );
+    assert_eq!(
+        as_u32(manifest.get("protocol"), "manifest.protocol"),
+        EXPECTED_PROTOCOL,
+        "data/manifest.json protocol mismatch"
+    );
+    assert_eq!(
+        as_u32(manifest.get("data_version"), "manifest.data_version"),
+        EXPECTED_DATA_VERSION,
+        "data/manifest.json data_version mismatch"
+    );
+    let dir = manifest
+        .get("data_dir")
+        .and_then(Value::as_str)
+        .expect("manifest.data_dir must be a string");
+    assert!(
+        dir.split('/').all(|p| !p.is_empty() && p != "." && p != ".."),
+        "manifest.data_dir must be a simple relative directory name"
+    );
+    let version_dir = data_root.join(dir);
+    assert!(
+        version_dir.is_dir(),
+        "data directory missing: {}",
+        version_dir.display()
+    );
+
+    let blocks_path = version_dir.join("blocks.json");
+    let items_path = version_dir.join("items.json");
+    let entities_path = version_dir.join("entities.json");
+    let packets_path = version_dir.join("packets.json");
+    let properties_path = version_dir.join("properties.json");
+    for p in [
+        &blocks_path,
+        &items_path,
+        &entities_path,
+        &packets_path,
+        &properties_path,
+    ] {
+        println!("cargo:rerun-if-changed={}", p.display());
+    }
+
+    let blocks = read_blocks(&blocks_path);
+    let items = read_id_map(&items_path, "items");
+    let entities = read_id_map(&entities_path, "entities");
+    let packets = read_packets(&packets_path);
+
+    // properties.json 当前不参与 codegen，但仍校验它存在且形状正确，
+    // 保证升级时五项数据必须一起更新。
+    let properties = read_json(&properties_path);
+    assert!(
+        properties.as_array().is_some_and(|a| !a.is_empty()),
+        "properties.json must be a non-empty array"
+    );
+
+    validate_expected_ids(&blocks, &items, &packets);
+
+    let dest = PathBuf::from(env::var("OUT_DIR").expect("OUT_DIR"))
+        .join("generated.rs");
+    fs::write(&dest, render(&blocks, &items, &entities, &packets))
+        .expect("write $OUT_DIR/generated.rs");
+}
+
+// ---------------- 数据读取 ----------------
+
+fn read_json(path: &Path) -> Value {
+    let text = fs::read_to_string(path)
+        .unwrap_or_else(|e| panic!("read {}: {e}", path.display()));
+    serde_json::from_str(&text)
+        .unwrap_or_else(|e| panic!("parse JSON {}: {e}", path.display()))
+}
+
+fn as_u32(v: Option<&Value>, ctx: &str) -> u32 {
+    v.and_then(Value::as_u64)
+        .and_then(|n| u32::try_from(n).ok())
+        .unwrap_or_else(|| panic!("{ctx}: expected non-negative integer"))
+}
+
+fn as_i32(v: Option<&Value>, ctx: &str) -> i32 {
+    v.and_then(Value::as_i64)
+        .and_then(|n| i32::try_from(n).ok())
+        .unwrap_or_else(|| panic!("{ctx}: expected i32"))
+}
+
+/// 上游名称不带命名空间；统一补 `minecraft:`（若已带则原样保留）。
+fn namespaced(name: &str) -> String {
+    if name.contains(':') {
+        name.to_owned()
+    } else {
+        format!("minecraft:{name}")
+    }
+}
+
+fn read_blocks(path: &Path) -> Vec<(u32, String)> {
+    let v = read_json(path);
+    let arr = v
+        .get("blocks")
+        .and_then(Value::as_array)
+        .unwrap_or_else(|| panic!("{}: missing `blocks` array", path.display()));
+    let mut out = Vec::with_capacity(arr.len());
+    for b in arr {
+        let name = b
+            .get("name")
+            .and_then(Value::as_str)
+            .unwrap_or_else(|| panic!("{}: block missing `name`", path.display()));
+        // 关键：blockstate ID 取 default_state_id，不是 id，也不是 states[0].id。
+        let id = as_u32(
+            b.get("default_state_id"),
+            &format!("{}: {name}.default_state_id", path.display()),
+        );
+        out.push((id, namespaced(name)));
+    }
+    sort_and_check(&mut out, "blocks");
+    out
+}
+
+fn read_id_map(path: &Path, kind: &str) -> Vec<(u32, String)> {
+    let v = read_json(path);
+    let obj = v
+        .as_object()
+        .unwrap_or_else(|| panic!("{}: expected top-level object", path.display()));
+    let mut out = Vec::with_capacity(obj.len());
+    for (name, entry) in obj {
+        let id = as_u32(
+            entry.get("id"),
+            &format!("{}: {name}.id", path.display()),
+        );
+        out.push((id, namespaced(name)));
+    }
+    sort_and_check(&mut out, kind);
+    out
+}
+
+/// PACKETS 的三元组是 (state, name, id)，其中 state = `"<side>.<state>"`
+/// （如 `clientbound.play`），与 `packet_id(side, state, name)` 对应。
+fn read_packets(path: &Path) -> Vec<(String, String, i32)> {
+    let v = read_json(path);
+    assert_eq!(
+        as_u32(v.get("version"), "packets.version"),
+        EXPECTED_PROTOCOL,
+        "packets.json protocol mismatch"
+    );
+    let mut out = Vec::new();
+    for side in ["serverbound", "clientbound"] {
+        let states = v
+            .get(side)
+            .and_then(Value::as_object)
+            .unwrap_or_else(|| panic!("{}: missing `{side}` object", path.display()));
+        for (state, packets) in states {
+            let map = packets
+                .as_object()
+                .unwrap_or_else(|| panic!("{side}.{state} must be an object"));
+            for (name, id) in map {
+                out.push((
+                    format!("{side}.{state}"),
+                    name.clone(),
+                    as_i32(Some(id), &format!("{side}.{state}.{name}")),
+                ));
+            }
+        }
+    }
+    out.sort_by(|a, b| a.0.cmp(&b.0).then(a.1.cmp(&b.1)));
+    let mut seen = HashMap::new();
+    for (state, name, _) in &out {
+        assert!(
+            seen.insert((state.as_str(), name.as_str()), true).is_none(),
+            "duplicate packet {state}/{name}"
+        );
+    }
+    out
+}
+
+fn sort_and_check(entries: &mut [(u32, String)], kind: &str) {
+    entries.sort_by_key(|(id, _)| *id);
+    let mut ids = HashMap::new();
+    let mut names = HashMap::new();
+    for (id, name) in entries.iter() {
+        if let Some(prev) = ids.insert(*id, name.as_str()) {
+            panic!("{kind}: duplicate ID {id} ({prev} / {name})");
+        }
+        if let Some(prev) = names.insert(name.as_str(), *id) {
+            panic!("{kind}: duplicate name {name} (IDs {prev} / {id})");
+        }
+    }
+}
+
+// ---------------- P0 构建期校验 ----------------
+
+fn validate_expected_ids(
+    blocks: &[(u32, String)],
+    items: &[(u32, String)],
+    packets: &[(String, String, i32)],
+) {
+    let block_ids: HashMap<&str, u32> = blocks
+        .iter()
+        .map(|(id, name)| (name.as_str(), *id))
+        .collect();
+    for (name, expected) in [
+        ("minecraft:air", 0),
+        ("minecraft:stone", 1),
+        ("minecraft:grass_block", 9),
+        ("minecraft:dirt", 10),
+        ("minecraft:water", 89),
+        ("minecraft:sand", 121),
+        ("minecraft:oak_log", 140),
+        ("minecraft:oak_leaves", 294),
+        ("minecraft:coal_ore", 136),
+        ("minecraft:iron_ore", 134),
+    ] {
+        assert_eq!(
+            block_ids.get(name).copied(),
+            Some(expected),
+            "block default_state_id drift: {name}"
+        );
+    }
+
+    let item_ids: HashMap<&str, u32> = items
+        .iter()
+        .map(|(id, name)| (name.as_str(), *id))
+        .collect();
+    for (name, expected) in [
+        ("minecraft:stone", 1),
+        ("minecraft:dirt", 55),
+        ("minecraft:cobblestone", 62),
+        ("minecraft:oak_sapling", 77),
+        ("minecraft:sand", 88),
+        ("minecraft:oak_log", 163),
+        ("minecraft:coal", 1010),
+        ("minecraft:stick", 1060),
+        ("minecraft:raw_iron", 1017),
+    ] {
+        assert_eq!(
+            item_ids.get(name).copied(),
+            Some(expected),
+            "item ID drift: {name}"
+        );
+    }
+
+    for (side, state, name, expected) in [
+        ("clientbound", "play", "add_entity", 1),
+        ("clientbound", "play", "block_changed_ack", 4),
+        ("clientbound", "play", "block_update", 8),
+        ("clientbound", "play", "level_chunk_with_light", 46),
+        ("clientbound", "play", "entity_position_sync", 35),
+        ("clientbound", "play", "set_entity_data", 101),
+        ("clientbound", "play", "take_item_entity", 127),
+        ("serverbound", "play", "player_action", 41),
+        ("serverbound", "play", "use_item_on", 66),
+        ("serverbound", "play", "move_player_pos", 30),
+    ] {
+        let key = format!("{side}.{state}");
+        let found = packets
+            .iter()
+            .find(|(s, n, _)| s == &key && n == name)
+            .map(|(_, _, id)| *id);
+        assert_eq!(found, Some(expected), "packet ID drift: {side}/{state}/{name}");
+    }
+}
+
+// ---------------- 代码生成 ----------------
+
+/// 输出合法的 Rust 字符串字面量（名称只含 ASCII 标识符，但仍做完整转义）。
+fn rust_string(s: &str) -> String {
+    let mut out = String::with_capacity(s.len() + 2);
+    out.push('"');
+    for c in s.chars() {
+        match c {
+            '\\' => out.push_str("\\\\"),
+            '"' => out.push_str("\\\""),
+            '\n' => out.push_str("\\n"),
+            '\r' => out.push_str("\\r"),
+            '\t' => out.push_str("\\t"),
+            c if c.is_control() => out.push_str(&format!("\\u{{{:x}}}", c as u32)),
+            c => out.push(c),
+        }
+    }
+    out.push('"');
+    out
+}
+
+fn render_table(out: &mut String, decl: &str, entries: &[(u32, String)]) {
+    out.push_str(decl);
+    out.push_str(" = &[\n");
+    for (id, name) in entries {
+        out.push_str(&format!("    ({id}, {}),\n", rust_string(name)));
+    }
+    out.push_str("];\n\n");
+}
+
+fn render(
+    blocks: &[(u32, String)],
+    items: &[(u32, String)],
+    entities: &[(u32, String)],
+    packets: &[(String, String, i32)],
+) -> String {
+    let mut out = String::new();
+    out.push_str("// @generated by crates/mc-registry/build.rs — DO NOT EDIT.\n");
+    out.push_str("// Source: data/manifest.json (26.3 / 777) + data/777/*.json\n");
+    out.push_str("// blockstate IDs come from `default_state_id` in blocks.json.\n\n");
+
+    render_table(&mut out, "pub static BLOCKS: &[(u32, &str)]", blocks);
+    render_table(&mut out, "pub static ITEMS: &[(u32, &str)]", items);
+    render_table(&mut out, "pub static ENTITIES: &[(u32, &str)]", entities);
+
+    out.push_str("pub static PACKETS: &[(&str, &str, i32)] = &[\n");
+    for (state, name, id) in packets {
+        out.push_str(&format!(
+            "    ({}, {}, {id}),\n",
+            rust_string(state),
+            rust_string(name)
+        ));
+    }
+    out.push_str("];\n\n");
+
+    out.push_str("pub fn by_name(name: &str) -> Option<u32> {\n    match name {\n");
+    for (id, name) in blocks {
+        out.push_str(&format!(
+            "        {} => Some({id}),\n",
+            rust_string(name)
+        ));
+    }
+    out.push_str("        _ => None,\n    }\n}\n\n");
+
+    out.push_str("pub fn by_id(id: u32) -> Option<&'static str> {\n    match id {\n");
+    for (id, name) in blocks {
+        out.push_str(&format!(
+            "        {id} => Some({}),\n",
+            rust_string(name)
+        ));
+    }
+    out.push_str("        _ => None,\n    }\n}\n");
+
+    out
 }
