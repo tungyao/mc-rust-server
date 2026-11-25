@@ -5,7 +5,7 @@
 //!
 //! | 方块 | 掉落 |
 //! |---|----|
-//! | grass_block(9) | dirt(55)×1 |
+//! | grass_block(9) | dirt(55)×1 + 1/8 wheat_seeds(1065)×1（world+pos hash，三叶草口径，无高草故借草方块） |
 //! | dirt(10) | dirt(55)×1 |
 //! | stone(1) | cobblestone(62)×1 |
 //! | sand(121) | sand(88)×1 |
@@ -64,7 +64,15 @@ fn hash_pos(seed: i64, x: i32, y: i32, z: i32) -> u64 {
 /// `seed` 只用于树叶概率分支，其它掉落与 seed 无关。
 pub fn drops_for_block(block_id: u16, x: i32, y: i32, z: i32, seed: i64) -> Vec<Drop> {
     match block_id {
-        GRASS_BLOCK_ID | DIRT_BLOCK_ID => vec![Drop { item_id: ITEM_DIRT, count: 1 }],
+        // 草方块：恒掉泥土；另按树叶同口径 hash 1/8 掉种子（无高草，用草方块做唯一种子来源）。
+        GRASS_BLOCK_ID => {
+            let mut out = vec![Drop { item_id: ITEM_DIRT, count: 1 }];
+            if hash_pos(seed, x, y, z) % 8 == 2 {
+                out.push(Drop { item_id: ITEM_WHEAT_SEEDS, count: 1 });
+            }
+            out
+        }
+        DIRT_BLOCK_ID => vec![Drop { item_id: ITEM_DIRT, count: 1 }],
         STONE_BLOCK_ID => vec![Drop { item_id: ITEM_COBBLESTONE, count: 1 }],
         SAND_BLOCK_ID => vec![Drop { item_id: ITEM_SAND, count: 1 }],
         OAK_LOG_BLOCK_ID => vec![Drop { item_id: ITEM_OAK_LOG, count: 1 }],
@@ -138,10 +146,21 @@ mod tests {
 
     #[test]
     fn basic_drops_are_deterministic() {
-        assert_eq!(
-            drops_for_block(GRASS_BLOCK_ID, 369, 72, 381, 123),
-            vec![Drop { item_id: ITEM_DIRT, count: 1 }]
-        );
+        // 草方块恒掉泥土；找一个出种子的位点和一个不出种子的位点（hash%8==2 出种子）。
+        let mut saw_seeds = false;
+        let mut saw_plain = false;
+        for x in 0..64 {
+            let d = drops_for_block(GRASS_BLOCK_ID, x, 72, 381, 123);
+            assert_eq!(d.first(), Some(&Drop { item_id: ITEM_DIRT, count: 1 }));
+            assert!(d.len() <= 2);
+            if d.len() == 2 {
+                assert_eq!(d[1], Drop { item_id: ITEM_WHEAT_SEEDS, count: 1 });
+                saw_seeds = true;
+            } else {
+                saw_plain = true;
+            }
+        }
+        assert!(saw_seeds && saw_plain, "grass seed branch must exist and be gated");
         assert_eq!(
             drops_for_block(DIRT_BLOCK_ID, 0, 64, 0, 999),
             vec![Drop { item_id: ITEM_DIRT, count: 1 }]
