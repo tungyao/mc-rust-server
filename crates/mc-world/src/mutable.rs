@@ -14,8 +14,9 @@
 //! 被触碰列（自顶向下扫描），`heights` 取“地形集合”（石头/土/草/沙/矿），
 //! `motion` 取最高非空气（含水/树叶/原木），与 P16 基底规则对齐。
 use crate::{
-    AIR_BLOCK_ID, COAL_ORE_BLOCK_ID, DIRT_BLOCK_ID, GRASS_BLOCK_ID, IRON_ORE_BLOCK_ID, MIN_Y,
-    OAK_LOG_BLOCK_ID, SAND_BLOCK_ID, SECTION_COUNT, STONE_BLOCK_ID, WATER_BLOCK_ID,
+    AIR_BLOCK_ID, COAL_ORE_BLOCK_ID, COBBLESTONE_BLOCK_ID, DIRT_BLOCK_ID, GRASS_BLOCK_ID,
+    IRON_ORE_BLOCK_ID, MIN_Y, OAK_LOG_BLOCK_ID, SAND_BLOCK_ID, SECTION_COUNT, STONE_BLOCK_ID,
+    WATER_BLOCK_ID,
 };
 use mc_core::{BlockPos, ChunkPos};
 
@@ -33,9 +34,15 @@ pub const EYE_HEIGHT: f64 = 1.62;
 
 /// P17 放置默认材料：石头（创造背包解析见 HANDOFF 限制 §5，暂不支持客户端自选）。
 pub const DEFAULT_PLACE_BLOCK_ID: u16 = STONE_BLOCK_ID;
-/// P17 允许放置的方块（真实 blockstate ID）：石头/泥土/草/橡木原木/沙子。
-pub const PLACEABLE_BLOCK_IDS: [u16; 5] =
-    [STONE_BLOCK_ID, DIRT_BLOCK_ID, GRASS_BLOCK_ID, OAK_LOG_BLOCK_ID, SAND_BLOCK_ID];
+/// P17 允许放置的方块（真实 blockstate ID）：石头/泥土/草/橡木原木/沙子/圆石。
+pub const PLACEABLE_BLOCK_IDS: [u16; 6] = [
+    STONE_BLOCK_ID,
+    DIRT_BLOCK_ID,
+    GRASS_BLOCK_ID,
+    OAK_LOG_BLOCK_ID,
+    SAND_BLOCK_ID,
+    COBBLESTONE_BLOCK_ID,
+];
 
 /// 是否允许玩家放置该方块 ID（P17 allowlist，熔炉/水等不在内）。
 pub fn is_placeable(id: u16) -> bool {

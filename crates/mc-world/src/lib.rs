@@ -86,6 +86,9 @@ const fn registry_id(table: &[(u32, &str)], name: &str) -> u32 {
 /// 水/沙/树/矿 ID 同样来自该表（26.3 客户端 jar 实测值，见 `data/777/SOURCE.md`）。
 pub const AIR_BLOCK_ID: u16 = registry_id(mc_registry::BLOCKS, "minecraft:air") as u16;
 pub const STONE_BLOCK_ID: u16 = registry_id(mc_registry::BLOCKS, "minecraft:stone") as u16;
+/// `data/777/blocks.json` 的 `cobblestone.default_state_id=14`（P18 遗漏映射，
+/// 管理页默认发放即圆石，右键只 ack 造成客户端预测幽灵块；P28 补上）。
+pub const COBBLESTONE_BLOCK_ID: u16 = registry_id(mc_registry::BLOCKS, "minecraft:cobblestone") as u16;
 pub const GRASS_BLOCK_ID: u16 = registry_id(mc_registry::BLOCKS, "minecraft:grass_block") as u16;
 pub const DIRT_BLOCK_ID: u16 = registry_id(mc_registry::BLOCKS, "minecraft:dirt") as u16;
 /// `Blocks.WATER.defaultBlockState()`（source，level=0）。
@@ -287,6 +290,7 @@ mod tests {
         for (name, expected, id) in [
             ("minecraft:air", 0, AIR_BLOCK_ID),
             ("minecraft:stone", 1, STONE_BLOCK_ID),
+            ("minecraft:cobblestone", 14, COBBLESTONE_BLOCK_ID),
             ("minecraft:grass_block", 9, GRASS_BLOCK_ID),
             ("minecraft:dirt", 10, DIRT_BLOCK_ID),
             ("minecraft:water", 89, WATER_BLOCK_ID),

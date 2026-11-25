@@ -8,6 +8,7 @@
 //! | grass_block(9) | dirt(55)×1 + 1/8 wheat_seeds(1065)×1（world+pos hash，三叶草口径，无高草故借草方块） |
 //! | dirt(10) | dirt(55)×1 |
 //! | stone(1) | cobblestone(62)×1 |
+//! | cobblestone(14) | cobblestone(62)×1 |
 //! | sand(121) | sand(88)×1 |
 //! | oak_log(140) | oak_log(163)×1 |
 //! | oak_leaves(294) | 1/8 oak_sapling(77)×1，否则 1/8 stick(1060)×1（world+pos hash） |
@@ -20,8 +21,9 @@
 //! 限制（TODO）：无工具等级/精准采集检查（都按徒手掉落），无经验球。
 
 use crate::{
-    COAL_ORE_BLOCK_ID, DIRT_BLOCK_ID, GRASS_BLOCK_ID, IRON_ORE_BLOCK_ID, OAK_LEAVES_BLOCK_ID,
-    OAK_LOG_BLOCK_ID, OAK_SAPLING_BLOCK_ID, SAND_BLOCK_ID, STONE_BLOCK_ID, WHEAT_MAX_AGE,
+    COAL_ORE_BLOCK_ID, COBBLESTONE_BLOCK_ID, DIRT_BLOCK_ID, GRASS_BLOCK_ID, IRON_ORE_BLOCK_ID,
+    OAK_LEAVES_BLOCK_ID, OAK_LOG_BLOCK_ID, OAK_SAPLING_BLOCK_ID, SAND_BLOCK_ID, STONE_BLOCK_ID,
+    WHEAT_MAX_AGE,
 };
 
 /// `minecraft:item` 注册表 ID，编译期从 `mc_registry::ITEMS`（由 `build.rs` 从
@@ -75,6 +77,8 @@ pub fn drops_for_block(block_id: u16, x: i32, y: i32, z: i32, seed: i64) -> Vec<
         }
         DIRT_BLOCK_ID => vec![Drop { item_id: ITEM_DIRT, count: 1 }],
         STONE_BLOCK_ID => vec![Drop { item_id: ITEM_COBBLESTONE, count: 1 }],
+        // 放置的圆石（14）挖掉返还圆石（原版口径；石头挖掉则掉圆石，见上）。
+        COBBLESTONE_BLOCK_ID => vec![Drop { item_id: ITEM_COBBLESTONE, count: 1 }],
         SAND_BLOCK_ID => vec![Drop { item_id: ITEM_SAND, count: 1 }],
         OAK_LOG_BLOCK_ID => vec![Drop { item_id: ITEM_OAK_LOG, count: 1 }],
         OAK_LEAVES_BLOCK_ID => {
@@ -113,10 +117,12 @@ pub fn drops_for_block(block_id: u16, x: i32, y: i32, z: i32, seed: i64) -> Vec<
 pub fn block_for_item(item_id: i32) -> Option<u16> {
     match item_id {
         ITEM_STONE => Some(STONE_BLOCK_ID),
+        ITEM_COBBLESTONE => Some(COBBLESTONE_BLOCK_ID),
         ITEM_DIRT => Some(DIRT_BLOCK_ID),
         ITEM_SAND => Some(SAND_BLOCK_ID),
         ITEM_OAK_LOG => Some(OAK_LOG_BLOCK_ID),
-        // 草方块没有对应物品（草掉泥土）；原木树叶等其余暂不支持。
+        // 草方块没有对应物品（草掉泥土）；原木树叶等其余暂不支持；
+        // 小麦/煤/铁/木棍在原版中不可放置，保持 None（只 ack）。
         _ => None,
     }
 }
@@ -170,6 +176,11 @@ mod tests {
         );
         assert_eq!(
             drops_for_block(STONE_BLOCK_ID, 0, 60, 0, 1),
+            vec![Drop { item_id: ITEM_COBBLESTONE, count: 1 }]
+        );
+        // 放置的圆石挖掉返还圆石（不断链）。
+        assert_eq!(
+            drops_for_block(COBBLESTONE_BLOCK_ID, 5, 60, 5, 1),
             vec![Drop { item_id: ITEM_COBBLESTONE, count: 1 }]
         );
         assert_eq!(
@@ -265,7 +276,7 @@ mod tests {
         assert_eq!(block_for_item(ITEM_DIRT), Some(DIRT_BLOCK_ID));
         assert_eq!(block_for_item(ITEM_SAND), Some(SAND_BLOCK_ID));
         assert_eq!(block_for_item(ITEM_OAK_LOG), Some(OAK_LOG_BLOCK_ID));
-        assert_eq!(block_for_item(ITEM_COBBLESTONE), None);
+        assert_eq!(block_for_item(ITEM_COBBLESTONE), Some(COBBLESTONE_BLOCK_ID));
         assert_eq!(block_for_item(ITEM_STICK), None);
     }
 }

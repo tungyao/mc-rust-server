@@ -945,6 +945,108 @@ async fn plant_oak_sapling_and_dig_returns_sapling() {
     let _ = std::fs::remove_dir_all(&dir);
 }
 
+/// P28 回归：后台/挖掘拿到的圆石必须能放下（此前无映射 → 只 ack，
+/// 客户端预测幽灵块随后被纠正，看起来"放下一瞬间就消失"，计数还少了）。
+#[tokio::test]
+async fn placed_cobblestone_stays_and_dig_returns_cobble() {
+    use mc_network::{BroadcastHub, DropState};
+    let dir = std::env::temp_dir().join(format!("mc-p28-cobble-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    let (tx, rx) = crossbeam_channel::unbounded::<PlayEvent>();
+    let mutable = Arc::new(MutableWorld::new(DEFAULT_SEED));
+    let cache = Arc::new(ChunkCache::new(DEFAULT_SEED, 64).with_mutable(Arc::clone(&mutable)));
+    let drops = Arc::new(DropState::new(dir.clone(), DEFAULT_SEED));
+    let hub = Arc::new(BroadcastHub::new());
+    let config = NetConfig::new(100, "p28-cobble".into(), Arc::new(AtomicUsize::new(0)))
+        .with_play_events(tx)
+        .with_view_distance(2)
+        .with_chunk_cache(cache)
+        .with_mutable_world(Arc::clone(&mutable))
+        .with_drops(Arc::clone(&drops))
+        .with_hub(Arc::clone(&hub));
+    let addr = spawn_server(config).await;
+    let mut s = login_and_join(addr, "Cobbler", 2).await;
+    let (id, _) = read_frame_timeout(&mut s, Duration::from_secs(5)).await.unwrap();
+    assert_eq!(id, packets::PLAY_SET_CONTAINER_CONTENT_S2C_ID);
+
+    let spawn = WorldGen::new(DEFAULT_SEED).spawn_pos();
+    let (fx, fy, fz) = (spawn.0 as f64 + 0.5, spawn.1 as f64, spawn.2 as f64 + 0.5);
+    let (gx, gy, gz) = (spawn.0, spawn.1 - 1, spawn.2);
+    send_pos_y(&mut s, fx, fy, fz).await;
+    let conn_id = match next_event(&rx).await {
+        PlayEvent::Movement { conn_id, .. } => conn_id,
+        other => panic!("expected movement event, got {other:?}"),
+    };
+
+    // 发 2 个圆石（模拟后台发放/挖掘拾取），切手持选中。
+    let leftover =
+        drops.with_inventory(conn_id, |inv| inv.add_item(mc_world::drops::ITEM_COBBLESTONE, 2));
+    assert_eq!(leftover, Some(0), "cobble must fit the backpack");
+    let body = [0u8, 1u8];
+    mc_network::framing::write_packet(&mut s, packets::PLAY_SET_HELD_ITEM_C2S_ID, &body)
+        .await
+        .unwrap();
+
+    // 对草方块顶面右键：目标空气格落圆石（14），扣 1。
+    let mut body = Vec::new();
+    packets::UseItemOn {
+        hand: 0,
+        x: gx,
+        y: gy,
+        z: gz,
+        face: 1,
+        cursor_x: 0.5,
+        cursor_y: 1.0,
+        cursor_z: 0.5,
+        inside_block: false,
+        world_border_hit: false,
+        sequence: 21,
+    }
+    .encode_body(&mut body);
+    mc_network::framing::write_packet(&mut s, packets::PLAY_USE_ITEM_ON_C2S_ID, &body)
+        .await
+        .unwrap();
+    let (id, payload) = read_frame_timeout(&mut s, Duration::from_secs(5)).await.unwrap();
+    assert_eq!(id, packets::PLAY_BLOCK_UPDATE_S2C_ID, "cobble must really place");
+    let (bu, _) = packets::BlockUpdate::decode_body(&payload).unwrap();
+    assert_eq!((bu.x, bu.y, bu.z), (gx, gy + 1, gz));
+    assert_eq!(bu.block_id, mc_world::COBBLESTONE_BLOCK_ID as i32);
+    let (id, payload) = read_frame_timeout(&mut s, Duration::from_secs(5)).await.unwrap();
+    assert_eq!(id, packets::PLAY_BLOCK_CHANGED_ACK_S2C_ID);
+    assert_eq!(read_varint(&payload).unwrap().0, 21);
+    let (id, payload) = read_frame_timeout(&mut s, Duration::from_secs(5)).await.unwrap();
+    assert_eq!(id, packets::PLAY_SET_CONTAINER_SLOT_S2C_ID, "placing must consume 1 cobble");
+    let (slot_pkt, _) = packets::SetContainerSlot::decode_body(&payload).unwrap();
+    assert_eq!(slot_pkt.slot, 37);
+    assert_eq!(
+        slot_pkt.data,
+        packets::Slot { count: 1, item_id: mc_world::drops::ITEM_COBBLESTONE }
+    );
+    match next_event(&rx).await {
+        PlayEvent::BlockEdit { old_id: 0, new_id: 14, .. } => {}
+        other => panic!("expected place block edit event, got {other:?}"),
+    }
+    assert_eq!(mutable.get(gx, gy + 1, gz), mc_world::COBBLESTONE_BLOCK_ID);
+
+    // 挖掉放下的圆石：返还圆石（不断链）。
+    let mut body = Vec::new();
+    packets::PlayerAction { status: 3, x: gx, y: gy + 1, z: gz, face: 1, sequence: 22 }
+        .encode_body(&mut body);
+    mc_network::framing::write_packet(&mut s, packets::PLAY_PLAYER_ACTION_C2S_ID, &body)
+        .await
+        .unwrap();
+    let (id, payload) = read_frame_timeout(&mut s, Duration::from_secs(5)).await.unwrap();
+    assert_eq!(id, packets::PLAY_BLOCK_UPDATE_S2C_ID);
+    let (bu, _) = packets::BlockUpdate::decode_body(&payload).unwrap();
+    assert_eq!(bu.block_id, 0, "dug cobble must become air");
+    let (id, payload) = read_frame_timeout(&mut s, Duration::from_secs(5)).await.unwrap();
+    assert_eq!(id, packets::PLAY_BLOCK_CHANGED_ACK_S2C_ID);
+    assert_eq!(read_varint(&payload).unwrap().0, 22);
+    assert_eq!(mutable.get(gx, gy + 1, gz), 0);
+    drop(rx);
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
 /// P26：种下树苗 → 调小计时 → 长成小橡树（log + leaves BlockUpdate）→ 挖树干掉 log。
 /// 全跑真实全局 ticker + hub 广播路径（生产 7200 拍 ≈ 6min，e2e 用 10 拍加速）。
 #[tokio::test]
