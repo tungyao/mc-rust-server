@@ -7,6 +7,7 @@
 //! - entity_id 由调用方分配（全局自增，与玩家 LoginPlay entity_id=1 不冲突，
 //!   本模块只断言唯一，不分配）。
 
+use crate::MIN_Y;
 use mc_core::ChunkPos;
 
 /// 拾取保护 ticks（10）。
@@ -35,6 +36,9 @@ pub struct ItemEntity {
     pub age: u32,
     pub pickup_delay: u32,
     pub rest_y: f64,
+    /// 支撑方块坐标：`(x, rest_y - 1, z)`。被挖空时重算静息高度并恢复下落。
+    /// 全空列（rest_y == MIN_Y）为 None。
+    pub support: Option<(i32, i32, i32)>,
     pub on_ground: bool,
     pub chunk: ChunkPos,
     /// 本 tick 是否移动过（同步用，发送后由调用方清零）。
@@ -128,6 +132,12 @@ impl ItemEntities {
             let h = (id as u64).wrapping_mul(0x9e3779b97f4a7c15);
             let hx = ((h >> 16) as f64 % 200.0) / 1000.0 - 0.1;
             let hz = ((h >> 32) as f64 % 200.0) / 1000.0 - 0.1;
+            let sy = rest_y as i32 - 1;
+            let support = if sy >= MIN_Y {
+                Some((x.floor() as i32, sy, z.floor() as i32))
+            } else {
+                None
+            };
             self.entities.push(ItemEntity {
                 id,
                 uuid: uuid_for_entity(id),
@@ -138,6 +148,7 @@ impl ItemEntities {
                 age: 0,
                 pickup_delay: PICKUP_DELAY_TICKS,
                 rest_y,
+                support,
                 on_ground: false,
                 chunk,
                 moved: true,
@@ -186,6 +197,40 @@ impl ItemEntities {
             e.moved = false;
         }
         (moved, dead)
+    }
+
+    /// 找出「静息在支撑方块上、但支撑已被挖空」的实体。
+    /// `is_present` 由调用方注入世界查询（本模块无 IO）；返回 `(entity_id, 支撑坐标)`。
+    pub fn find_unsupported(
+        &self,
+        is_present: impl Fn((i32, i32, i32)) -> bool,
+    ) -> Vec<(i32, (i32, i32, i32))> {
+        self.entities
+            .iter()
+            .filter(|e| e.on_ground)
+            .filter_map(|e| e.support.map(|s| (e.id, s)))
+            .filter(|(_, s)| !is_present(*s))
+            .collect()
+    }
+
+    /// 支撑被挖空：解除静止，改用新的静息高度继续下落。
+    /// `new_rest_y` 由调用方用世界查询算出（`MutableWorld::drop_rest_y`）。
+    pub fn resume_fall(&mut self, id: i32, new_rest_y: f64) -> bool {
+        let Some(e) = self.entities.iter_mut().find(|e| e.id == id) else { return false };
+        e.rest_y = new_rest_y;
+        e.on_ground = false;
+        e.moved = true;
+        let sy = new_rest_y as i32 - 1;
+        e.support = if sy >= MIN_Y {
+            // 保留原支撑列的 x/z：掉落物的水平漂移不能改变“下方是哪一列”。
+            let (sx, _, sz) = e.support.unwrap_or_else(|| {
+                (e.pos.0.floor() as i32, sy, e.pos.2.floor() as i32)
+            });
+            Some((sx, sy, sz))
+        } else {
+            None
+        };
+        true
     }
 
     /// 移除指定实体（拾取/despawn 发包后调用），返回被删实体。
@@ -292,6 +337,37 @@ mod tests {
         // 1.5 边界：1.49 可捡，1.51 不可（相对实际位置）。
         assert_eq!(es.pickable((p.0 + 1.49, p.1, p.2)), vec![1001]);
         assert!(es.pickable((p.0 + 1.51, p.1, p.2)).is_empty());
+    }
+
+    #[test]
+    fn unsupported_drop_resumes_fall_to_new_rest_height() {
+        let mut es = ItemEntities::new();
+        // 掉落物静止在 y=69（支撑方块 (0,68,0)）。
+        spawn_one(&mut es, 1001, 0.5, 70.0, 0.5, 69.0);
+        for _ in 0..200 {
+            es.tick();
+        }
+        let e = es.get(1001).unwrap();
+        assert!(e.on_ground);
+        assert_eq!(e.support, Some((0, 68, 0)));
+        assert_eq!(e.rest_y, 69.0);
+
+        // 支撑还在 → 无需重算。
+        assert!(es.find_unsupported(|_| true).is_empty());
+        // 支撑被挖 → 返回该实体，重算后恢复下落。
+        let unsupported = es.find_unsupported(|_| false);
+        assert_eq!(unsupported, vec![(1001, (0, 68, 0))]);
+        assert!(es.resume_fall(1001, 67.0));
+        let e = es.get(1001).unwrap();
+        assert_eq!(e.rest_y, 67.0);
+        assert!(!e.on_ground);
+        assert_eq!(e.support, Some((0, 66, 0)));
+        for _ in 0..200 {
+            es.tick();
+        }
+        let e = es.get(1001).unwrap();
+        assert!(e.on_ground);
+        assert_eq!(e.pos.1, 67.0);
     }
 
     #[test]

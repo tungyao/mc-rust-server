@@ -960,7 +960,21 @@ async fn tick_drops(
     conn_user: &str,
     last_pos: (f64, f64, f64),
     view: &ChunkView,
+    world: &MutableWorld,
 ) -> io::Result<()> {
+    // 落地高度重算：静息中的掉落物若支撑方块被挖，重算 rest_y 并恢复下落。
+    // 否则会悬空在原高度（用户反馈的 TODO）。
+    let unsupported = {
+        let items = drops.items.lock().unwrap_or_else(|p| p.into_inner());
+        items.find_unsupported(|s| world.get(s.0, s.1, s.2) != mc_world::AIR_BLOCK_ID)
+    };
+    if !unsupported.is_empty() {
+        let mut items = drops.items.lock().unwrap_or_else(|p| p.into_inner());
+        for (id, s) in unsupported {
+            let new_rest = world.drop_rest_y(s.0, s.2, s.1) as f64;
+            items.resume_fall(id, new_rest);
+        }
+    }
     let (moved, dead) = {
         let mut items = drops.items.lock().unwrap_or_else(|p| p.into_inner());
         items.tick()
@@ -1125,8 +1139,10 @@ async fn play_loop(
         .await
         {
             Err(_) => {
-                if let (Some(ds), Some(_)) = (&opts.drops, mutable) {
-                    if let Err(e) = tick_drops(stream, opts, ds, &conn_user, last_pos, &view).await {
+                if let (Some(ds), Some(world)) = (&opts.drops, mutable) {
+                    if let Err(e) =
+                        tick_drops(stream, opts, ds, &conn_user, last_pos, &view, world).await
+                    {
                         debug!("play uuid={} drop tick failed ({e}), closing", profile.uuid);
                         break;
                     }
@@ -1379,8 +1395,10 @@ async fn play_loop(
         }
         // 包流不断时也按 50ms 节拍跑掉落 tick，防止读超时分支饿死。
         if last_drop_tick.elapsed() >= Duration::from_millis(50) {
-            if let (Some(ds), Some(_)) = (&opts.drops, mutable) {
-                if let Err(e) = tick_drops(stream, opts, ds, &conn_user, last_pos, &view).await {
+            if let (Some(ds), Some(world)) = (&opts.drops, mutable) {
+                if let Err(e) =
+                    tick_drops(stream, opts, ds, &conn_user, last_pos, &view, world).await
+                {
                     debug!("play uuid={} drop tick failed ({e}), closing", profile.uuid);
                     break;
                 }

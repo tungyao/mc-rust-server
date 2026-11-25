@@ -431,7 +431,8 @@ $natives = 'C:\Users\qwe\AppData\Local\Temp\mc263natives'
    工具等级/精准采集（掉落无视工具，TODO）；经验球（entity 50，不生成不拾取）；
    创造/生存模式切换（全按即时破坏+开局石头）；背包键为用户名（离线 uuid 随机，
    在线模式落地后切回 uuid，见 inventory 文档）；实体 UUID 为 id 派生（非随机，
-   客户端仅 warn，不影响）；掉落落地高度生成时一次算好（下方被挖会悬空，TODO 重算）。
+   客户端仅 warn，不影响）；掉落落地高度重算已实现（`ItemEntity.support` 记录支撑坐标，
+   `tick_drops` 每 tick 检测悬空并重算 `rest_y`）。
 11. **P18.2 掉落修复待真机测试**：本轮修了四处（见 §3 掉落/实体/背包）：
     - Spawn 带真实初速、删除每 50ms `TeleportEntitySync`(0x23) → 验证不再原地蹦跶、
       抛物线/落地与原版一致、拾取仍正常；
@@ -442,6 +443,10 @@ $natives = 'C:\Users\qwe\AppData\Local\Temp\mc263natives'
     脚本端到端已全部通过（含模拟原版逐步走远→START→FINISH 全流程）；**原版 26.3 真机复验待做**。
     另：走远会瞬时补发大量区块（radius=10 跨 23 区块约 1035 包/~20MB），掉落 Spawn 排在
     后面，若真机感觉“走远后没掉落”需先确认是延迟还是丢失；必要时给跨区块批次加节流。
+12. **P18.3 落地高度重算**：`ItemEntity` 新增 `support: Option<(x,y,z)>`（支撑方块坐标），
+    `ItemEntities::find_unsupported` / `resume_fall` 纯逻辑 + `tick_drops` 接入世界查询；
+    支撑被挖空则重算 `rest_y` 并恢复下落。单测 + e2e 覆盖（挖掉掉落物脚下泥土验证重算）。
+    TODO(真机)：挖掉掉落物下方方块时观察是否平滑落到新支撑面。
 
 ## 6. 关键文件
 

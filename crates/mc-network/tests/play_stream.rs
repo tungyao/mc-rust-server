@@ -1158,3 +1158,90 @@ async fn vanilla_style_walk_then_dig_far_spawns_drop() {
     drop(rx);
     let _ = std::fs::remove_dir_all(&dir);
 }
+
+/// 落地高度重算：掉落物静息后其支撑方块被挖，服务端必须重算 rest_y 并让
+/// 掉落物继续下落，而不是悬空在原高度。
+#[tokio::test]
+async fn drop_recomputes_rest_y_when_support_is_dug() {
+    use mc_network::DropState;
+    let dir = std::env::temp_dir().join(format!("mc-recompute-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    let (tx, rx) = crossbeam_channel::unbounded::<PlayEvent>();
+    let mutable = Arc::new(MutableWorld::new(DEFAULT_SEED));
+    let cache = Arc::new(ChunkCache::new(DEFAULT_SEED, 64).with_mutable(Arc::clone(&mutable)));
+    let drops = Arc::new(DropState::new(dir.clone(), DEFAULT_SEED));
+    let config = NetConfig::new(100, "recompute".into(), Arc::new(AtomicUsize::new(0)))
+        .with_play_events(tx)
+        .with_view_distance(2)
+        .with_chunk_cache(cache)
+        .with_mutable_world(Arc::clone(&mutable))
+        .with_drops(Arc::clone(&drops));
+    let addr = spawn_server(config).await;
+    let mut s = login_and_join(addr, "Digger", 2).await;
+    let (id, _) = read_frame_timeout(&mut s, Duration::from_secs(5)).await.unwrap();
+    assert_eq!(id, packets::PLAY_SET_CONTAINER_CONTENT_S2C_ID);
+
+    let spawn = WorldGen::new(DEFAULT_SEED).spawn_pos();
+    let (gx, gy, gz) = (spawn.0, spawn.1 - 1, spawn.2);
+    let feet = (spawn.0 as f64 + 0.5, spawn.1 as f64, spawn.2 as f64 + 0.5);
+    send_pos_y(&mut s, feet.0, feet.1, feet.2).await;
+    match next_event(&rx).await {
+        PlayEvent::Movement { .. } => {}
+        other => panic!("expected movement, got {other:?}"),
+    }
+
+    // 挖草 → 掉落 dirt。
+    let mut body = Vec::new();
+    packets::PlayerAction { status: 2, x: gx, y: gy, z: gz, face: 1, sequence: 51 }
+        .encode_body(&mut body);
+    mc_network::framing::write_packet(&mut s, packets::PLAY_PLAYER_ACTION_C2S_ID, &body).await.unwrap();
+    let mut drop_id = None;
+    for _ in 0..50 {
+        let (id, payload) = read_frame_timeout(&mut s, Duration::from_millis(100)).await.unwrap();
+        if id == packets::PLAY_SPAWN_ENTITY_S2C_ID {
+            drop_id = Some(packets::SpawnItemEntity::decode_body(&payload).unwrap().0.entity_id);
+            break;
+        }
+    }
+    let drop_id = drop_id.expect("dig must spawn a drop");
+
+    // 玩家走开 3 格（同 chunk，不触发视距批次），避免掉落物被立即拾取。
+    send_pos_y(&mut s, feet.0 + 3.0, feet.1, feet.2).await;
+
+    // 等掉落物落地。
+    let mut landed = false;
+    for _ in 0..100 {
+        let snap = drops.items.lock().unwrap().get(drop_id).map(|e| e.on_ground);
+        if snap == Some(true) {
+            landed = true;
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+    assert!(landed, "drop must land before support is dug");
+    let old = drops.items.lock().unwrap().get(drop_id)
+        .map(|e| (e.rest_y, e.support)).unwrap();
+    assert_eq!(old.1, Some((gx, gy - 1, gz)), "support must be the dirt under the grass");
+
+    // 挖掉支撑方块（泥土）。
+    assert_eq!(mutable.get(gx, gy - 1, gz), mc_world::DIRT_BLOCK_ID);
+    mutable.set(gx, gy - 1, gz, mc_world::AIR_BLOCK_ID);
+
+    // 等服务端 tick 检测到悬空并重算。
+    let mut recomputed = None;
+    for _ in 0..50 {
+        tokio::time::sleep(Duration::from_millis(20)).await;
+        let snap = drops.items.lock().unwrap().get(drop_id)
+            .map(|e| (e.rest_y, e.on_ground));
+        if snap.map(|(r, _)| r < old.0).unwrap_or(false) {
+            recomputed = snap;
+            break;
+        }
+    }
+    let (new_rest, on_ground) = recomputed.expect("rest_y must drop after support is dug");
+    assert_eq!(new_rest, (gy - 1) as f64, "new rest must be top of the next block down");
+    assert!(!on_ground, "drop must resume falling after recompute");
+    drop(s);
+    drop(rx);
+    let _ = std::fs::remove_dir_all(&dir);
+}

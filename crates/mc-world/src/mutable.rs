@@ -226,7 +226,8 @@ impl MutableWorld {
     /// `from_y` 传**被破坏方块的 y**：这样树冠/水面/上方方块不会把掉落物“抬”上去，
     /// 挖洞穴或地下矿物时掉落物也停在挖掘点附近（而不是瞬移到地表）。全空列回落 MIN_Y。
     /// 单次 `generate_chunk` 扫描（调用方在 spawn 时算一次，tick 内不再查世界）。
-    /// TODO(落地高度重算)：生成后若支撑方块被挖，掉落物会悬空；下一轮按支撑坐标重算。
+    /// 生成后支撑被挖的悬空重算见 `mc_world::items::ItemEntity::support` 与
+    /// `login_route::tick_drops`（每 tick 检测并重算 rest_y）。
     pub fn drop_rest_y(&self, x: i32, z: i32, from_y: i32) -> i32 {
         let chunk = self.generate_chunk(chunk_of_block(x, z));
         let lx = x.rem_euclid(16) as usize;
