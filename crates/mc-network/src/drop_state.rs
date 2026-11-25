@@ -22,6 +22,9 @@ use std::sync::{
 use std::time::{Duration, Instant};
 use tracing::warn;
 
+use super::broadcast::BroadcastHub;
+use super::chunk_cache::ChunkCache;
+
 /// 全服掉落物物理节拍（ms）：只由 [`DropState::start_global_tick`] 的一个 ticker 驱动。
 pub const DROP_TICK_MS: u64 = 50;
 
@@ -31,6 +34,15 @@ pub const FIRST_DROP_ENTITY_ID: i32 = 1000;
 pub const PLAYER_ENTITY_ID: i32 = 1;
 /// 新背包开局石头数量（ hotbar 槽 36），保证“放置扣 1”可验证；后续按生存模式替换。
 pub const STARTER_STONE_COUNT: i32 = mc_world::inventory::STARTER_COUNT;
+
+/// P22 作物条目：种下时的全局 tick + 上次已广播的 age。
+/// 生长只由全服唯一 ticker 推进（P18.1 R1：连接侧绝不 tick），阶段变更经
+/// `MutableWorld::set` 落子并走 hub 广播 fan-out；挖掉后由挖掘路径显式摘除。
+#[derive(Debug, Clone, Copy)]
+struct CropEntry {
+    planted_tick: u64,
+    stage: u8,
+}
 
 /// net 线程共享的掉落/背包状态（`Arc` 进 `PlayOptions`）。
 ///
@@ -44,6 +56,14 @@ pub struct DropState {
     next_id: AtomicI32,
     /// 物理 tick 次数（只统计 `ItemEntities::tick()`，与在线连接数无关；测试可观测）。
     tick_count: AtomicU64,
+    /// P22 作物：(x,y,z) → 条目；种下时登记，挖掉时摘除，生长由全局 ticker 推进。
+    crops: Mutex<HashMap<(i32, i32, i32), CropEntry>>,
+    /// P22 每阶段 tick 数（生产 1200；测试可经 `set_stage_ticks` 调小）。
+    stage_ticks: AtomicU64,
+    /// P22 生长广播用 hub（`serve` 在 world+drops+hub 齐备时注入；None 则生长只落子不广播）。
+    hub: Mutex<Option<Arc<BroadcastHub>>>,
+    /// P22 生长缓存失效用（同上；None 则跳过失效，下次编辑时自然重编）。
+    cache: Mutex<Option<Arc<ChunkCache>>>,
     /// 全服 ticker 是否已启动（每份 DropState 至多一个）。
     tick_started: AtomicBool,
     /// 当前代 ticker 的停止标志；每次 `start_global_tick` 装一个全新的 Arc。
@@ -61,6 +81,10 @@ impl DropState {
             known: Mutex::new(HashMap::new()),
             next_id: AtomicI32::new(FIRST_DROP_ENTITY_ID),
             tick_count: AtomicU64::new(0),
+            crops: Mutex::new(HashMap::new()),
+            stage_ticks: AtomicU64::new(mc_world::WHEAT_TICKS_PER_STAGE),
+            hub: Mutex::new(None),
+            cache: Mutex::new(None),
             tick_started: AtomicBool::new(false),
             stop_flag: Mutex::new(None),
             save_dir,
@@ -170,6 +194,128 @@ impl DropState {
         }
         items.tick();
         self.tick_count.fetch_add(1, Ordering::Relaxed);
+        drop(items);
+        // P22 作物生长：同一 ticker 内推进，与掉落物理同节拍（50ms），连接侧不参与。
+        self.tick_crops(world);
+    }
+
+    /// P22：按 `(now - planted) / WHEAT_TICKS_PER_STAGE` 算应处 age，到阶段即
+    /// `world.set` + 缓存失效 + hub 广播 BlockUpdate（`u64::MAX` 占位 except，
+    /// 全体视距内连接都收，含种植者本人）；方块已不是预期旧阶段（被挖/被改）
+    /// 则静默摘除，不广播。
+    fn tick_crops(&self, world: &MutableWorld) {
+        let now = self.tick_count.load(Ordering::Relaxed);
+        let interval = self.stage_ticks.load(Ordering::Relaxed).max(1);
+        let due: Vec<((i32, i32, i32), u8, u8)> = {
+            let crops = self.crops.lock().unwrap_or_else(|p| p.into_inner());
+            crops
+                .iter()
+                .map(|(pos, e)| {
+                    let want = ((now.saturating_sub(e.planted_tick)) / interval)
+                        .min(mc_world::WHEAT_MAX_AGE as u64) as u8;
+                    (*pos, e.stage, want)
+                })
+                .filter(|(_, old, want)| want != old)
+                .collect()
+        };
+        if due.is_empty() {
+            return;
+        }
+        let hub = self.hub.lock().unwrap_or_else(|p| p.into_inner()).clone();
+        let cache = self.cache.lock().unwrap_or_else(|p| p.into_inner()).clone();
+        for ((x, y, z), old_stage, want) in due {
+            let expected_old = mc_world::wheat_stage_id(old_stage);
+            if world.get(x, y, z) != expected_old {
+                // 已被挖掉或改掉：摘除跟踪，不广播（挖掘路径的 BlockUpdate 已发出）。
+                self.crops.lock().unwrap_or_else(|p| p.into_inner()).remove(&(x, y, z));
+                continue;
+            }
+            if want <= old_stage {
+                continue;
+            }
+            let new_id = mc_world::wheat_stage_id(want);
+            world.set(x, y, z, new_id);
+            if let Some(cache) = &cache {
+                cache.invalidate(mc_world::chunk_of_block(x, z));
+            }
+            if let Some(hub) = &hub {
+                let mut body = Vec::new();
+                mc_protocol::packets::BlockUpdate { x, y, z, block_id: new_id as i32 }
+                    .encode_body(&mut body);
+                hub.broadcast(
+                    u64::MAX,
+                    mc_world::chunk_of_block(x, z),
+                    mc_protocol::packets::PLAY_BLOCK_UPDATE_S2C_ID,
+                    &body,
+                );
+            }
+            if let Some(e) = self.crops.lock().unwrap_or_else(|p| p.into_inner()).get_mut(&(x, y, z))
+            {
+                e.stage = want;
+            }
+        }
+    }
+
+    /// P22：种下登记（UseItemOn 种植路径调用，落子成功后）。
+    pub fn plant_crop(&self, x: i32, y: i32, z: i32) {
+        self.crops.lock().unwrap_or_else(|p| p.into_inner()).insert(
+            (x, y, z),
+            CropEntry { planted_tick: self.tick_count.load(Ordering::Relaxed), stage: 0 },
+        );
+    }
+
+    /// P22：挖掉/移除时摘除跟踪（挖掘路径调用；ticker 内的懒摘除是兜底）。
+    pub fn uproot_crop(&self, x: i32, y: i32, z: i32) {
+        self.crops.lock().unwrap_or_else(|p| p.into_inner()).remove(&(x, y, z));
+    }
+
+    /// P22：跟踪中的作物数（e2e/诊断用）。
+    pub fn crop_count(&self) -> usize {
+        self.crops.lock().unwrap_or_else(|p| p.into_inner()).len()
+    }
+
+    /// P22 测试钩子：覆盖每阶段 tick 数（生产值 `WHEAT_TICKS_PER_STAGE` = 1200，
+    /// 即 60s；e2e/单测用小值加速，验证真实 ticker 路径而非伪造时钟）。
+    pub fn set_stage_ticks(&self, n: u64) {
+        self.stage_ticks.store(n.max(1), Ordering::Relaxed);
+    }
+
+    /// P22：注入生长广播 hub（`serve` 在配置齐备时调用一次；测试可直接调）。
+    pub fn set_hub(&self, hub: Arc<BroadcastHub>) {
+        *self.hub.lock().unwrap_or_else(|p| p.into_inner()) = Some(hub);
+    }
+
+    /// P22：注入生长缓存失效用 cache（同上）。
+    pub fn set_cache(&self, cache: Arc<ChunkCache>) {
+        *self.cache.lock().unwrap_or_else(|p| p.into_inner()) = Some(cache);
+    }
+
+    /// P22：重启后把存量小麦重新纳入生长（stage 按存盘 age，planted 按现在，
+    /// 即从重启时刻起重新计时满阶段；与 Anvil 的差距见 HANDOFF §5）。
+    pub fn adopt_existing_crops(&self, world: &MutableWorld) {
+        let now = self.tick_count.load(Ordering::Relaxed);
+        let mut crops = self.crops.lock().unwrap_or_else(|p| p.into_inner());
+        for ((x, y, z), id) in world.wheat_blocks() {
+            if let Some(age) = mc_world::wheat_age(id) {
+                crops
+                    .entry((x, y, z))
+                    .or_insert(CropEntry { planted_tick: now, stage: age });
+            }
+        }
+    }
+
+    /// P22 测试钩子：把某作物的种下 tick 改写为指定值（模拟流逝），返回是否命中。
+    /// 生产代码不用；`set_stage_ticks` 调小间隔后一般不需要它。
+    /// 注意：`planted_tick` 是绝对 tick（`tick_count` 坐标系），回拨过大—
+    /// 即早于 `tick_count` 减去 `stage_ticks*7`—会直接跳到成熟，这是预期语义。
+    pub fn retime_crop(&self, x: i32, y: i32, z: i32, planted_tick: u64) -> bool {
+        match self.crops.lock().unwrap_or_else(|p| p.into_inner()).get_mut(&(x, y, z)) {
+            Some(e) => {
+                e.planted_tick = planted_tick;
+                true
+            }
+            None => false,
+        }
     }
 
     /// 分配全局唯一 entity_id（永不复用）。
@@ -314,6 +460,60 @@ mod tests {
         let e = snap.get(id).unwrap();
         assert_eq!(e.rest_y, 68.0, "rest_y must follow the next support down");
         assert!(!e.on_ground);
+    }
+
+    #[test]
+    fn crops_advance_on_global_tick_and_uproot_on_dig() {
+        use mc_world::MutableWorld;
+        let world = MutableWorld::new(1);
+        let st = DropState::new(std::env::temp_dir(), 1);
+        st.set_stage_ticks(2);
+        // 在泥土上种一株（直接落子模拟种植路径的 set）。
+        world.set(0, 70, 0, mc_world::DIRT_BLOCK_ID);
+        world.set(0, 71, 0, mc_world::WHEAT_CROP_BASE_ID);
+        st.plant_crop(0, 71, 0);
+        assert_eq!(st.crop_count(), 1);
+        // 未到阶段：tick 不推进。
+        st.physics_tick(&world);
+        assert_eq!(world.get(0, 71, 0), mc_world::WHEAT_CROP_BASE_ID);
+        // 第 2 拍：长到 age=1（无 hub 也落子，只是不广播）。
+        st.physics_tick(&world);
+        assert_eq!(world.get(0, 71, 0), mc_world::wheat_stage_id(1));
+        // retime 回拨到 0：下 4 拍后 elapsed=6 → 跳到 age=3。
+        assert!(st.retime_crop(0, 71, 0, 0));
+        for _ in 0..4 {
+            st.physics_tick(&world);
+        }
+        assert_eq!(world.get(0, 71, 0), mc_world::wheat_stage_id(3));
+        // 阶段上限钳制在 7。
+        for _ in 0..8 {
+            st.physics_tick(&world);
+        }
+        assert_eq!(world.get(0, 71, 0), mc_world::wheat_stage_id(7));
+        // 挖掉后摘除跟踪（挖掘路径显式调用；ticker 懒摘除是兜底）。
+        world.set(0, 71, 0, mc_world::AIR_BLOCK_ID);
+        st.uproot_crop(0, 71, 0);
+        assert_eq!(st.crop_count(), 0);
+        assert!(!st.retime_crop(0, 71, 0, 0), "unknown crop must not be retimed");
+    }
+
+    #[test]
+    fn adopt_existing_crops_recovers_saved_wheat_after_restart() {
+        use mc_world::MutableWorld;
+        let world = MutableWorld::new(3);
+        world.set(5, 70, 5, mc_world::DIRT_BLOCK_ID);
+        world.set(5, 71, 5, mc_world::wheat_stage_id(4));
+        // 新 DropState（模拟重启后内存丢失）：认领存量小麦。
+        let st = DropState::new(std::env::temp_dir(), 3);
+        st.set_stage_ticks(4);
+        assert_eq!(st.crop_count(), 0);
+        st.adopt_existing_crops(&world);
+        assert_eq!(st.crop_count(), 1);
+        // 从认领时刻重计时：stage=4、间隔 4 拍 → 第 20 拍时 want=5，长到 age=5。
+        for _ in 0..20 {
+            st.physics_tick(&world);
+        }
+        assert_eq!(world.get(5, 71, 5), mc_world::wheat_stage_id(5));
     }
 
     /// 停止句柄的可验证语义（服务端状态级验证，真机手感 T1–T13 仍需人工确认）：

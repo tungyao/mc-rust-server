@@ -13,12 +13,14 @@
 //! | oak_leaves(294) | 1/8 oak_sapling(77)×1，否则 1/8 stick(1060)×1（world+pos hash） |
 //! | coal_ore(136) | coal(1010)×1 |
 //! | iron_ore(134) | raw_iron(1017)×1 |
+//! | wheat age<7 | wheat_seeds(1065)×1 |
+//! | wheat age=7 | wheat(1066)×1 + wheat_seeds(1065)×1~2 |
 //!
 //! 限制（TODO）：无工具等级/精准采集检查（都按徒手掉落），无经验球。
 
 use crate::{
     COAL_ORE_BLOCK_ID, DIRT_BLOCK_ID, GRASS_BLOCK_ID, IRON_ORE_BLOCK_ID, OAK_LEAVES_BLOCK_ID,
-    OAK_LOG_BLOCK_ID, SAND_BLOCK_ID, STONE_BLOCK_ID,
+    OAK_LOG_BLOCK_ID, SAND_BLOCK_ID, STONE_BLOCK_ID, WHEAT_MAX_AGE,
 };
 
 /// `minecraft:item` 注册表 ID，编译期从 `mc_registry::ITEMS`（由 `build.rs` 从
@@ -32,6 +34,10 @@ pub const ITEM_OAK_LOG: i32 = crate::registry_id(mc_registry::ITEMS, "minecraft:
 pub const ITEM_COAL: i32 = crate::registry_id(mc_registry::ITEMS, "minecraft:coal") as i32;
 pub const ITEM_STICK: i32 = crate::registry_id(mc_registry::ITEMS, "minecraft:stick") as i32;
 pub const ITEM_RAW_IRON: i32 = crate::registry_id(mc_registry::ITEMS, "minecraft:raw_iron") as i32;
+/// `data/777/items.json` 的 `wheat_seeds.id=1065`（P22 种植用手持物品）。
+pub const ITEM_WHEAT_SEEDS: i32 = crate::registry_id(mc_registry::ITEMS, "minecraft:wheat_seeds") as i32;
+/// `data/777/items.json` 的 `wheat.id=1066`（成熟小麦掉落）。
+pub const ITEM_WHEAT: i32 = crate::registry_id(mc_registry::ITEMS, "minecraft:wheat") as i32;
 
 /// 单种掉落：物品 + 数量。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -74,6 +80,20 @@ pub fn drops_for_block(block_id: u16, x: i32, y: i32, z: i32, seed: i64) -> Vec<
         }
         COAL_ORE_BLOCK_ID => vec![Drop { item_id: ITEM_COAL, count: 1 }],
         IRON_ORE_BLOCK_ID => vec![Drop { item_id: ITEM_RAW_IRON, count: 1 }],
+        // P22 小麦：成熟（age=7）掉小麦×1 + 种子 1~2（hash 最低位决定，无随机状态）；
+        // 未熟只掉种子×1。耕地/精准采集等差异见 HANDOFF §5。
+        id if crate::wheat_age(id).is_some() => {
+            let age = crate::wheat_age(id).unwrap_or(0);
+            if age >= WHEAT_MAX_AGE {
+                let extra = (hash_pos(seed, x, y, z) % 2) as i32;
+                vec![
+                    Drop { item_id: ITEM_WHEAT, count: 1 },
+                    Drop { item_id: ITEM_WHEAT_SEEDS, count: 1 + extra },
+                ]
+            } else {
+                vec![Drop { item_id: ITEM_WHEAT_SEEDS, count: 1 }]
+            }
+        }
         _ => Vec::new(),
     }
 }
@@ -108,6 +128,8 @@ mod tests {
             ("minecraft:coal", 1010, ITEM_COAL),
             ("minecraft:stick", 1060, ITEM_STICK),
             ("minecraft:raw_iron", 1017, ITEM_RAW_IRON),
+            ("minecraft:wheat_seeds", 1065, ITEM_WHEAT_SEEDS),
+            ("minecraft:wheat", 1066, ITEM_WHEAT),
         ] {
             assert_eq!(id as u32, expected, "wrong item ID for {name}");
             assert_eq!(Some(id as u32), mc_registry::item_id(name));
@@ -179,6 +201,40 @@ mod tests {
             }
         }
         assert!(saw_sapling && saw_empty, "leaves must have both drop and empty branches");
+    }
+
+    #[test]
+    fn wheat_drops_ripe_wheat_plus_seeds_unripe_only_seeds() {
+        use crate::{wheat_stage_id, WHEAT_CROP_BASE_ID};
+        // 未熟（age 0..6）：只掉 1 种子，与位置/seed 无关。
+        for age in 0..7u8 {
+            for (x, seed) in [(0, 1i64), (369, 123456789), (-100, 42)] {
+                assert_eq!(
+                    drops_for_block(wheat_stage_id(age), x, 70, 381, seed),
+                    vec![Drop { item_id: ITEM_WHEAT_SEEDS, count: 1 }],
+                    "unripe age={age} must drop exactly 1 seed"
+                );
+            }
+        }
+        // 成熟（age=7）：恒掉小麦×1 + 种子 1~2（确定性 hash，无随机污染）。
+        let ripe = wheat_stage_id(7);
+        assert_eq!(ripe, WHEAT_CROP_BASE_ID + 7);
+        let a = drops_for_block(ripe, 369, 73, 381, 123456789);
+        let b = drops_for_block(ripe, 369, 73, 381, 123456789);
+        assert_eq!(a, b, "same pos+seed must drop identically");
+        assert_eq!(a.len(), 2);
+        assert_eq!(a[0], Drop { item_id: ITEM_WHEAT, count: 1 });
+        assert_eq!(a[1].item_id, ITEM_WHEAT_SEEDS);
+        assert!((1..=2).contains(&a[1].count), "ripe seeds count must be 1..=2, got {:?}", a);
+        // 两个分支都存在（不同 pos 覆盖 1 与 2）。
+        let mut counts = std::collections::HashSet::new();
+        for x in 0..32 {
+            counts.insert(drops_for_block(ripe, x, 70, 0, 7)[1].count);
+        }
+        assert!(counts.contains(&1) && counts.contains(&2), "ripe must have both 1-seed and 2-seed branches, got {counts:?}");
+        // 种子不是可放置方块（种植走 P22 专属路径，不走 block_for_item）。
+        assert_eq!(block_for_item(ITEM_WHEAT_SEEDS), None);
+        assert_eq!(block_for_item(ITEM_WHEAT), None);
     }
 
     #[test]

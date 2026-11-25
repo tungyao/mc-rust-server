@@ -112,6 +112,18 @@ impl MutableWorld {
         self.lock_read().dirty.len()
     }
 
+    /// P22：当前所有小麦方块（pos → blockstate，含 age 信息）。
+    /// 小麦永不在确定性基底里，override 全量即全集；供重启后把存量小麦
+    /// 重新纳入生长跟踪（`adopt_existing_crops`），以及 e2e 断言。
+    pub fn wheat_blocks(&self) -> Vec<((i32, i32, i32), u16)> {
+        self.lock_read()
+            .overrides
+            .iter()
+            .filter(|(_, id)| crate::wheat_age(**id).is_some())
+            .map(|(pos, id)| (*pos, *id))
+            .collect()
+    }
+
     /// 读方块：override 优先，否则确定性基底；y 越界返回空气。
     pub fn get(&self, x: i32, y: i32, z: i32) -> u16 {
         if !(MIN_Y..=WORLD_TOP_Y).contains(&y) {

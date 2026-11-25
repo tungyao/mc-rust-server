@@ -64,6 +64,16 @@ pub async fn serve(listener: TcpListener, tx: Sender<NewConnection>, config: Net
     // 只做拾取/视距同步，绝不调用 ItemEntities::tick()，否则 N 连接 = N 倍速物理。
     // 独立 std::thread，不依赖 tokio runtime；DropState::new 在单测里依然无副作用。
     if let (Some(drops), Some(world)) = (&config.drops, &config.mutable_world) {
+        // P22 生长广播/缓存失效：hub 与 cache 齐备时注入 DropState，生长变更才能
+        // fan-out 到视距内连接并使 chunk 缓存失效；缺谁都不影响落子本身。
+        if let Some(hub) = &config.hub {
+            drops.set_hub(Arc::clone(hub));
+        }
+        if let Some(cache) = &config.chunk_cache {
+            drops.set_cache(Arc::clone(cache));
+        }
+        // P22：重启后把存量小麦重新纳入生长（内存跟踪丢失，override 还在）。
+        drops.adopt_existing_crops(world);
         if drops.start_global_tick(Arc::clone(world)) {
             info!("global drop physics ticker started ({}ms)", drop_state::DROP_TICK_MS);
         } else {

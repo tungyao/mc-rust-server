@@ -2242,3 +2242,197 @@ async fn broadcast_disconnect_clears_hub_entry_and_survivor_unaffected() {
     drop(rx);
     let _ = std::fs::remove_dir_all(&dir);
 }
+
+/// P22 端到端：手持小麦种子对草方块顶面右键 → 种下 0 阶段小麦 + 扣 1 种子；
+/// 全服唯一 ticker 推生长 → 逐阶段 BlockUpdate（含 P21 hub 广播）；
+/// 挖成熟小麦 → 掉小麦 + 种子 → 走近拾取入库。
+/// 阶段间隔经 `set_stage_ticks` 调小（生产 1200 拍 = 60s，见 HANDOFF §5），
+/// 走真实 ticker + 真实 hub 广播，不伪造时钟。
+#[tokio::test]
+async fn plant_wheat_seed_grows_and_harvest_drops_wheat_and_seeds() {
+    use mc_network::{BroadcastHub, DropState};
+    let dir = std::env::temp_dir().join(format!("mc-p22-plant-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    let (tx, rx) = crossbeam_channel::unbounded::<PlayEvent>();
+    let mutable = Arc::new(MutableWorld::new(DEFAULT_SEED));
+    let cache = Arc::new(ChunkCache::new(DEFAULT_SEED, 64).with_mutable(Arc::clone(&mutable)));
+    let drops = Arc::new(DropState::new(dir.clone(), DEFAULT_SEED));
+    // 10 拍 = 0.5s/阶段：7 阶段约 3.5s 成熟，e2e 可等；生产值 1200 拍 = 60s。
+    drops.set_stage_ticks(10);
+    let hub = Arc::new(BroadcastHub::new());
+    let config = NetConfig::new(100, "p22-plant".into(), Arc::new(AtomicUsize::new(0)))
+        .with_play_events(tx)
+        .with_view_distance(2)
+        .with_chunk_cache(cache)
+        .with_mutable_world(Arc::clone(&mutable))
+        .with_drops(Arc::clone(&drops))
+        .with_hub(Arc::clone(&hub));
+    let addr = spawn_server(config).await;
+    let mut s = login_and_join(addr, "WheatP", 2).await;
+    let (id, _) = read_frame_timeout(&mut s, Duration::from_secs(5)).await.unwrap();
+    assert_eq!(id, packets::PLAY_SET_CONTAINER_CONTENT_S2C_ID);
+
+    let spawn = WorldGen::new(DEFAULT_SEED).spawn_pos();
+    let (fx, fy, fz) = (spawn.0 as f64 + 0.5, spawn.1 as f64, spawn.2 as f64 + 0.5);
+    let (gx, gy, gz) = (spawn.0, spawn.1 - 1, spawn.2);
+    assert_eq!(mutable.get(gx, gy, gz), 9, "spawn feet must be grass");
+    send_pos_y(&mut s, fx, fy, fz).await;
+    let conn_id = match next_event(&rx).await {
+        PlayEvent::Movement { conn_id, .. } => conn_id,
+        other => panic!("expected movement event, got {other:?}"),
+    };
+
+    // 发 3 颗种子（hotbar 槽 37），切手持到槽 1 选中它们。
+    let leftover =
+        drops.with_inventory(conn_id, |inv| inv.add_item(mc_world::drops::ITEM_WHEAT_SEEDS, 3));
+    assert_eq!(leftover, Some(0), "seeds must fit the backpack");
+    let body = [0u8, 1u8];
+    mc_network::framing::write_packet(&mut s, packets::PLAY_SET_HELD_ITEM_C2S_ID, &body)
+        .await
+        .unwrap();
+
+    // 对草方块顶面右键（face=1）：目标空气格落 0 阶段小麦（6867），扣 1 种子。
+    let mut body = Vec::new();
+    packets::UseItemOn {
+        hand: 0,
+        x: gx,
+        y: gy,
+        z: gz,
+        face: 1,
+        cursor_x: 0.5,
+        cursor_y: 1.0,
+        cursor_z: 0.5,
+        inside_block: false,
+        world_border_hit: false,
+        sequence: 21,
+    }
+    .encode_body(&mut body);
+    mc_network::framing::write_packet(&mut s, packets::PLAY_USE_ITEM_ON_C2S_ID, &body)
+        .await
+        .unwrap();
+    let (id, payload) = read_frame_timeout(&mut s, Duration::from_secs(5)).await.unwrap();
+    assert_eq!(id, packets::PLAY_BLOCK_UPDATE_S2C_ID);
+    let (bu, _) = packets::BlockUpdate::decode_body(&payload).unwrap();
+    assert_eq!((bu.x, bu.y, bu.z), (gx, gy + 1, gz));
+    assert_eq!(bu.block_id, 6867, "planted wheat must be age 0 (default_state_id)");
+    let (id, payload) = read_frame_timeout(&mut s, Duration::from_secs(5)).await.unwrap();
+    assert_eq!(id, packets::PLAY_BLOCK_CHANGED_ACK_S2C_ID);
+    assert_eq!(read_varint(&payload).unwrap().0, 21);
+    let (id, payload) = read_frame_timeout(&mut s, Duration::from_secs(5)).await.unwrap();
+    assert_eq!(id, packets::PLAY_SET_CONTAINER_SLOT_S2C_ID, "planting must consume 1 seed");
+    let (slot_pkt, _) = packets::SetContainerSlot::decode_body(&payload).unwrap();
+    assert_eq!(slot_pkt.slot, 37);
+    assert_eq!(slot_pkt.data, packets::Slot { count: 2, item_id: 1065 });
+    match next_event(&rx).await {
+        PlayEvent::BlockEdit { old_id: 0, new_id: 6867, .. } => {}
+        other => panic!("expected plant block edit event, got {other:?}"),
+    }
+    assert_eq!(mutable.get(gx, gy + 1, gz), 6867);
+    assert_eq!(drops.crop_count(), 1);
+
+    // 生长：真实 ticker + hub 广播，逐阶段 BlockUpdate 6868..=6874（成熟 6874）。
+    let mut stages = Vec::new();
+    let deadline = std::time::Instant::now() + Duration::from_secs(20);
+    while std::time::Instant::now() < deadline {
+        let (id, payload) =
+            read_frame_timeout(&mut s, Duration::from_secs(5)).await.unwrap();
+        match id {
+            packets::PLAY_ENTITY_POSITION_SYNC_S2C_ID | packets::PLAY_KEEPALIVE_S2C_ID => continue,
+            packets::PLAY_BLOCK_UPDATE_S2C_ID => {
+                let (bu, _) = packets::BlockUpdate::decode_body(&payload).unwrap();
+                assert_eq!((bu.x, bu.y, bu.z), (gx, gy + 1, gz));
+                stages.push(bu.block_id);
+                if bu.block_id == 6874 {
+                    break;
+                }
+            }
+            other => panic!("unexpected packet {other:#04x} while waiting for growth"),
+        }
+    }
+    assert_eq!(
+        stages,
+        vec![6868, 6869, 6870, 6871, 6872, 6873, 6874],
+        "must grow one stage at a time to maturity"
+    );
+    assert_eq!(mutable.get(gx, gy + 1, gz), 6874);
+
+    // 挖成熟小麦：掉小麦×1 + 种子 1~2（确定性掉落表，期望值现场算）。
+    let want = mc_world::drops_for_block(6874, gx, gy + 1, gz, DEFAULT_SEED);
+    assert_eq!(want.len(), 2);
+    assert_eq!(want[0], mc_world::Drop { item_id: 1066, count: 1 });
+    assert_eq!(want[1].item_id, 1065);
+    let mut body = Vec::new();
+    packets::PlayerAction { status: 3, x: gx, y: gy + 1, z: gz, face: 1, sequence: 22 }
+        .encode_body(&mut body);
+    mc_network::framing::write_packet(&mut s, packets::PLAY_PLAYER_ACTION_C2S_ID, &body)
+        .await
+        .unwrap();
+    let (id, payload) = read_frame_timeout(&mut s, Duration::from_secs(5)).await.unwrap();
+    assert_eq!(id, packets::PLAY_BLOCK_UPDATE_S2C_ID);
+    assert_eq!(packets::BlockUpdate::decode_body(&payload).unwrap().0.block_id, 0);
+    let (id, payload) = read_frame_timeout(&mut s, Duration::from_secs(5)).await.unwrap();
+    assert_eq!(id, packets::PLAY_BLOCK_CHANGED_ACK_S2C_ID);
+    assert_eq!(read_varint(&payload).unwrap().0, 22);
+    for (i, w) in want.iter().enumerate() {
+        let (id, payload) = read_frame_timeout(&mut s, Duration::from_secs(5)).await.unwrap();
+        assert_eq!(id, packets::PLAY_SPAWN_ENTITY_S2C_ID, "harvest drop {i} must spawn");
+        let (spawned, _) = packets::SpawnItemEntity::decode_body(&payload).unwrap();
+        let (id, payload) = read_frame_timeout(&mut s, Duration::from_secs(5)).await.unwrap();
+        assert_eq!(id, packets::PLAY_SET_ENTITY_DATA_S2C_ID);
+        let (data, _) = packets::ItemEntityData::decode_body(&payload).unwrap();
+        assert_eq!(data.entity_id, spawned.entity_id);
+        assert_eq!(data.slot, packets::Slot { count: w.count, item_id: w.item_id });
+    }
+    assert_eq!(mutable.get(gx, gy + 1, gz), 0);
+    assert_eq!(drops.crop_count(), 0, "dug wheat must leave growth tracking");
+    match next_event(&rx).await {
+        PlayEvent::BlockEdit { old_id: 6874, new_id: 0, .. } => {}
+        other => panic!("expected dig block edit event, got {other:?}"),
+    }
+
+    // 拾取：站在 1 格内，delay 到期后 TakeItem + Remove + 全量背包同步。
+    let want_seeds = 2 + want[1].count;
+    let deadline = std::time::Instant::now() + Duration::from_secs(10);
+    let (mut takes, mut saw_content) = (0, false);
+    while std::time::Instant::now() < deadline {
+        let (id, payload) =
+            read_frame_timeout(&mut s, Duration::from_millis(500)).await.unwrap();
+        match id {
+            packets::PLAY_ENTITY_POSITION_SYNC_S2C_ID | packets::PLAY_KEEPALIVE_S2C_ID => continue,
+            packets::PLAY_PICKUP_ITEM_S2C_ID => {
+                let (t, _) = packets::TakeItemEntity::decode_body(&payload).unwrap();
+                assert_eq!(t.collector_id, 1);
+                takes += 1;
+            }
+            packets::PLAY_REMOVE_ENTITIES_S2C_ID => {}
+            packets::PLAY_SET_CONTAINER_CONTENT_S2C_ID => {
+                let (c, _) = packets::SetContainerContent::decode_body(&payload).unwrap();
+                let mut wheat = 0;
+                let mut seeds = 0;
+                for sl in &c.slots {
+                    match sl.item_id {
+                        1066 => wheat += sl.count,
+                        1065 => seeds += sl.count,
+                        _ => {}
+                    }
+                }
+                if wheat == 1 && seeds == want_seeds {
+                    saw_content = true;
+                }
+            }
+            other => panic!("unexpected packet {other:#04x} while waiting for pickup"),
+        }
+        if takes >= 2 && saw_content {
+            break;
+        }
+    }
+    assert!(takes >= 2 && saw_content, "harvest must be picked up into the backpack");
+
+    drop(s);
+    match next_event(&rx).await {
+        PlayEvent::Disconnect { .. } => {}
+        other => panic!("expected disconnect event, got {other:?}"),
+    }
+    drop(rx);
+    let _ = std::fs::remove_dir_all(&dir);
+}

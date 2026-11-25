@@ -191,6 +191,62 @@ pub fn decide_place(
     })
 }
 
+/// P22 种植判定（手持 `wheat_seeds` 对草方块/泥土**顶面**右键）：
+/// 要求：face=顶面(+Y)，被点是草/泥土，目标（被点上方 1 格）是空气、
+/// y/视距/距离合法；否则回滚重发目标现状（非法 face 只 ack）。
+/// 成功时目标落 0 阶段小麦（`WHEAT_CROP_BASE_ID`，真实 ID 见 `mc_world` 文档）。
+/// 判定内已落子，调用方负责：缓存失效 + 发 BlockUpdate/Ack + 生长登记 +
+/// 扣种子 + 投递事件（复用 `apply_block_outcome`，走 P21 广播）。
+pub fn decide_plant(
+    world: Option<&MutableWorld>,
+    eye: (f64, f64, f64),
+    center: mc_core::ChunkPos,
+    radius: i32,
+    act: &packets::UseItemOn,
+) -> Option<BlockEditOutcome> {
+    let world = world?;
+    // 只要顶面：face=1(+Y)；其它 face（含非法）只 ack，不改世界。
+    if act.face != 1 {
+        return Some(BlockEditOutcome { sequence: act.sequence, changes: Vec::new(), drops: Vec::new() });
+    }
+    let (tx, ty, tz) = (act.x, act.y + 1, act.z);
+    if !(mc_world::MIN_Y..=mc_world::WORLD_TOP_Y).contains(&act.y)
+        || !(mc_world::MIN_Y..=mc_world::WORLD_TOP_Y).contains(&ty)
+        || !in_view(center, radius, tx, tz)
+        || eye_block_dist(eye, act.x, act.y, act.z) > mc_world::MAX_REACH
+    {
+        return Some(BlockEditOutcome {
+            sequence: act.sequence,
+            changes: vec![rollback(world, tx, ty, tz)],
+            drops: Vec::new(),
+        });
+    }
+    // 被点必须是土壤（草方块/泥土；耕地/锄头不在 P22 范围，见 HANDOFF §5）。
+    let clicked = world.get(act.x, act.y, act.z);
+    if clicked != mc_world::GRASS_BLOCK_ID && clicked != mc_world::DIRT_BLOCK_ID {
+        return Some(BlockEditOutcome {
+            sequence: act.sequence,
+            changes: vec![rollback(world, tx, ty, tz)],
+            drops: Vec::new(),
+        });
+    }
+    // 目标必须是空气格（水面/被占都不种）。
+    let cur = world.get(tx, ty, tz);
+    if cur != mc_world::AIR_BLOCK_ID {
+        return Some(BlockEditOutcome {
+            sequence: act.sequence,
+            changes: vec![BlockChange { x: tx, y: ty, z: tz, old_id: cur, new_id: cur }],
+            drops: Vec::new(),
+        });
+    }
+    let old = world.set(tx, ty, tz, mc_world::WHEAT_CROP_BASE_ID);
+    Some(BlockEditOutcome {
+        sequence: act.sequence,
+        changes: vec![BlockChange { x: tx, y: ty, z: tz, old_id: old, new_id: mc_world::WHEAT_CROP_BASE_ID }],
+        drops: Vec::new(),
+    })
+}
+
 /// 落子后动作：缓存失效 → 发 BlockUpdate → 发 Ack → 投递 BlockEdit 事件。
 /// P21：每个 BlockUpdate 同步广播给视距内其它连接（`Ack` 仍只回操作者本人，
 /// 客户端序列预测是 per-connection 的）；无 hub 时行为与旧版逐字节一致。
@@ -564,5 +620,90 @@ mod tests {
         assert_eq!(far.changes[0].old_id, far.changes[0].new_id);
         // 无世界：忽略。
         assert!(decide_place(None, eye, center, 2, &base(1), mc_world::STONE_BLOCK_ID).is_none());
+    }
+
+    #[test]
+    fn plant_seeds_on_grass_top_grows_stage_zero() {
+        let (world, feet, center) = dig_fixture();
+        let (x, y, z) = grass_top();
+        let eye = eye_of(feet);
+        // 点草方块顶面：上方空气落 0 阶段小麦。
+        let act = packets::UseItemOn {
+            hand: 0,
+            x,
+            y,
+            z,
+            face: 1,
+            cursor_x: 0.5,
+            cursor_y: 1.0,
+            cursor_z: 0.5,
+            inside_block: false,
+            world_border_hit: false,
+            sequence: 31,
+        };
+        let out = decide_plant(Some(&world), eye, center, 2, &act).unwrap();
+        assert_eq!(out.sequence, 31);
+        assert_eq!(
+            out.changes,
+            vec![BlockChange { x, y: y + 1, z, old_id: 0, new_id: mc_world::WHEAT_CROP_BASE_ID }]
+        );
+        assert!(out.drops.is_empty());
+        assert_eq!(world.get(x, y + 1, z), mc_world::WHEAT_CROP_BASE_ID);
+        // 小麦是非地形弱方块：terrain 高度不变，motion 顶随之 +1（与水/树叶同口径）。
+        let col = (z.rem_euclid(16) * 16 + x.rem_euclid(16)) as usize;
+        let gen = world.generate_chunk(mc_world::chunk_of_block(x, z));
+        assert_eq!(gen.heights[col], y, "wheat must not move the terrain height");
+        assert_eq!(gen.motion_heights[col], y + 2 - mc_world::MIN_Y, "motion follows the wheat top");
+    }
+
+    #[test]
+    fn plant_rejects_non_top_face_non_soil_occupied_and_bad_range() {
+        let (world, feet, center) = dig_fixture();
+        let (x, y, z) = grass_top();
+        let eye = eye_of(feet);
+        let base = |face| packets::UseItemOn {
+            hand: 0,
+            x,
+            y,
+            z,
+            face,
+            cursor_x: 0.5,
+            cursor_y: 0.5,
+            cursor_z: 0.5,
+            inside_block: false,
+            world_border_hit: false,
+            sequence: 40,
+        };
+        // 侧面/底面：只 ack，不落子。
+        for face in [0, 2, 3, 4, 5, 9] {
+            let out = decide_plant(Some(&world), eye, center, 2, &base(face)).unwrap();
+            assert!(out.changes.is_empty(), "face={face} must only ack");
+            assert_eq!(world.get(x, y + 1, z), mc_world::AIR_BLOCK_ID);
+        }
+        // 被点是石头：回滚目标现状。
+        world.set(x, y, z, mc_world::STONE_BLOCK_ID);
+        let out = decide_plant(Some(&world), eye, center, 2, &base(1)).unwrap();
+        assert_eq!(out.changes[0].old_id, out.changes[0].new_id);
+        assert_eq!(world.get(x, y + 1, z), mc_world::AIR_BLOCK_ID);
+        world.set(x, y, z, mc_world::GRASS_BLOCK_ID);
+        // 目标被占：回滚重发。
+        world.set(x, y + 1, z, mc_world::STONE_BLOCK_ID);
+        let before = world.override_count();
+        let out = decide_plant(Some(&world), eye, center, 2, &base(1)).unwrap();
+        assert_eq!(out.changes[0].new_id, mc_world::STONE_BLOCK_ID);
+        assert_eq!(world.override_count(), before);
+        world.set(x, y + 1, z, mc_world::AIR_BLOCK_ID);
+        // 泥土同样可种。
+        world.set(x, y, z, mc_world::DIRT_BLOCK_ID);
+        let out = decide_plant(Some(&world), eye, center, 2, &base(1)).unwrap();
+        assert_eq!(out.changes[0].new_id, mc_world::WHEAT_CROP_BASE_ID);
+        // 超距/出视距/无世界。
+        let far_eye = (eye.0 + 100.0, eye.1, eye.2);
+        let out = decide_plant(Some(&world), far_eye, center, 2, &base(1)).unwrap();
+        assert_eq!(out.changes[0].old_id, out.changes[0].new_id);
+        assert!(
+            decide_plant(None, eye, center, 2, &base(1)).is_none(),
+            "missing world must be ignored"
+        );
     }
 }

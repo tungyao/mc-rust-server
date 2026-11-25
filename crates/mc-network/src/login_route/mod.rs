@@ -8,7 +8,7 @@ pub mod drop_sync;
 pub mod login;
 pub mod view_sync;
 
-pub use self::block_edit::{decide_dig, decide_place, BlockChange, BlockEditOutcome};
+pub use self::block_edit::{decide_dig, decide_place, decide_plant, BlockChange, BlockEditOutcome};
 pub use self::login::{config_finish, enter_play, enter_play_with_events, enter_play_with_options, handle_login, handle_login_configured, handle_login_with_options, handle_login_with_threshold, notify_login_success, PlayOptions};
 
 use self::block_edit::{apply_block_outcome, eye_of};
@@ -217,6 +217,14 @@ async fn play_loop(
                                         debug!("play uuid={} drop spawn failed ({e}), closing", profile.uuid);
                                         break;
                                     }
+                                    // P22：挖掉小麦即摘除生长跟踪（ticker 懒摘除是兜底）。
+                                    for c in &outcome.changes {
+                                        if c.new_id == mc_world::AIR_BLOCK_ID
+                                            && mc_world::wheat_age(c.old_id).is_some()
+                                        {
+                                            ds.uproot_crop(c.x, c.y, c.z);
+                                        }
+                                    }
                                 }
                             }
                         }
@@ -238,7 +246,58 @@ async fn play_loop(
                 }
                 match packets::UseItemOn::decode_body(&payload) {
                     Ok((act, _)) => {
-                        // 手持映射决定材料；空手/无方块映射（如种子/圆石/煤）原版不放任何方块，
+                        // P22：手持小麦种子对土壤顶面右键 → 种下（专属路径，不走方块映射）。
+                        let held_seeds: bool = opts
+                            .drops
+                            .as_ref()
+                            .and_then(|ds| ds.with_inventory(opts.conn_id, |inv| inv.held()).flatten())
+                            .is_some_and(|(item_id, _)| {
+                                item_id == mc_world::drops::ITEM_WHEAT_SEEDS
+                            });
+                        if held_seeds {
+                            if let Some(outcome) = decide_plant(
+                                mutable,
+                                eye_of(last_pos),
+                                view.center(),
+                                view.radius(),
+                                &act,
+                            ) {
+                                if mutable.is_some() {
+                                    let planted = outcome.changes.iter().any(|c| {
+                                        c.new_id == mc_world::WHEAT_CROP_BASE_ID
+                                            && c.old_id != c.new_id
+                                    });
+                                    if let Err(e) = apply_block_outcome(
+                                        stream, addr, profile, opts, cache, &outcome,
+                                    )
+                                    .await
+                                    {
+                                        debug!("play uuid={} plant outcome failed ({e}), closing", profile.uuid);
+                                        break;
+                                    }
+                                    if planted {
+                                        if let Some(ds) = &opts.drops {
+                                            if let Some(c) = outcome.changes.first() {
+                                                ds.plant_crop(c.x, c.y, c.z);
+                                            }
+                                            let consumed = ds.with_inventory(opts.conn_id, |inv| {
+                                                inv.consume_held()
+                                            });
+                                            if consumed.flatten().is_some() {
+                                                if let Err(e) = send_held_slot(stream, opts, ds).await
+                                                {
+                                                    debug!("play uuid={} plant held sync failed ({e}), closing", profile.uuid);
+                                                    break;
+                                                }
+                                                ds.save_inventory(opts.conn_id, &conn_user);
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                            continue;
+                        }
+                        // 手持映射决定材料；空手/无方块映射（如圆石/煤）原版不放任何方块，
                         // 只 ack 对齐客户端预测——之前回退放石头是 P17 兼容，已按反馈去掉。
                         let place_id: Option<u16> = opts
                             .drops

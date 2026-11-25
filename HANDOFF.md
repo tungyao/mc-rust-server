@@ -544,6 +544,35 @@ $natives = 'C:\Users\qwe\AppData\Local\Temp\mc263natives'
     - 遗留 TODO：玩家实体互见（位置广播 + Spawn Player 159）；挖掘动画 0x05；
       大视距（radius=10）广播风暴限流/合并（当前每变更即时广播，高频挖放 +
       多人同视距时包量线性增长）；真机两人同屏复验。
+18. **P22 种子种植（本轮，已实现，未真机）**：手持 `wheat_seeds`（物品 1065，
+    `data/777/items.json`）对草方块/泥土**顶面**（face=1）右键 → 上方空气格落
+    0 阶段小麦（blockstate **6867**，`data/777/blocks.json` 的 `wheat.default_state_id`；
+    age N = 6867+N，`data/777/full/blocks.json` 的 wheat `states` 数组按 age 升序
+    `id: 6867..=6874`，实现只从 JSON 取 base，偏移即数据顺序本身；单测断言
+    base=6867 与逐 age 映射防漂移）→ 扣 1 种子 + 单槽同步 + 刷盘 → `BlockUpdate`
+    经 P21 hub fan-out（种植路径复用 `apply_block_outcome`）。
+    生长走**全服唯一 50ms ticker**（`DropState::physics_tick` 内 `tick_crops`，
+    与掉落物理同节拍；连接侧 `tick_drops` 绝不碰作物，P18.1 R1 不重犯）：
+    阶段 = `(now - planted) / 1200`（**固定 60s/阶段**，满 7 阶段约 7 分钟成熟），
+    到阶段即 `MutableWorld::set`（override+dirty+刷盘）+ 缓存失效 + hub 广播
+    `BlockUpdate`（`except=u64::MAX`，视距内全体都收）；方块已不是预期旧阶段
+    （被挖/被改）则静默摘除。挖小麦走通用挖掘 + 掉落表新增两臂：
+    成熟（age=7）掉小麦（1066）×1 + 种子 1~2（hash 最低位决定），未熟只掉 1 种子；
+    拾取/背包链路复用 P18。挖掉时挖掘路径显式 `uproot_crop`，ticker 懒摘除是兜底；
+    `serve` 在 world+drops+hub/cache 齐备时注入 hub/cache 并 `adopt_existing_crops`
+    把存量小麦重新纳入跟踪（**从重启时刻重计时**，与 Anvil 的差距见下）。
+    - **与原版差异（有意 MVP，后续再补，均已记 TODO）**：无需耕地（直接种在草/泥土上，
+      无 farmland 方块、无锄头）；无水源/光照加速；固定时长生长（原版随机 tick）；
+      重启后存量作物重计时（不持久化 planted）；小麦是非地形弱方块——`heights`
+      （地形顶）不变、天空光起点不变，但 `motion_heights` 随麦顶 +1（与水/树叶同口径，
+      高度图含麦顶，客户端渲染/高度一致）；`drop_rest_y` 把小麦当支撑（掉落物可停在麦顶）。
+    - 测试：`drops` 单测（成熟/未熟掉落、两分支覆盖、种子不可放置）+ `lib` 单测
+      （base/逐 age/钳制）+ `block_edit` 单测（顶面种下/motion+1/6 种拒绝）+
+      `drop_state` 单测（ticker 推进/摘除/重启认领）+ `play_stream.rs` 新增 1 个 e2e
+      （种下→BlockUpdate 6867→扣种子；真实生长 6868..=6874；挖成熟→掉小麦+种子→
+      拾取入库；阶段间隔经 `set_stage_ticks(10)` 调小，生产 1200 不变）。
+      旧 23 项一个字未动，全绿。遗留 TODO：原版真机复验（种植手感/生长可见/收割拾取）；
+      耕地+锄头+水源加速；骨粉；作物被水/挖掘连带破坏；生长跨重启精确计时（持久化 planted）。
 
 ## 6. 关键文件
 

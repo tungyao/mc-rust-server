@@ -96,6 +96,26 @@ pub const OAK_LOG_BLOCK_ID: u16 = registry_id(mc_registry::BLOCKS, "minecraft:oa
 pub const OAK_LEAVES_BLOCK_ID: u16 = registry_id(mc_registry::BLOCKS, "minecraft:oak_leaves") as u16;
 pub const COAL_ORE_BLOCK_ID: u16 = registry_id(mc_registry::BLOCKS, "minecraft:coal_ore") as u16;
 pub const IRON_ORE_BLOCK_ID: u16 = registry_id(mc_registry::BLOCKS, "minecraft:iron_ore") as u16;
+/// `Blocks.WHEAT.defaultBlockState()`（age=0）：`data/777/blocks.json` 的
+/// `wheat.default_state_id=6867`；`data/777/full/blocks.json` 的 wheat `states`
+/// 数组按 age 升序排列 `id: 6867..=6874`，故 age N 的 blockstate = base + N。
+/// 耕地/锄头/水源加速一律不做（P22 MVP 范围，见 HANDOFF §5）。
+pub const WHEAT_CROP_BASE_ID: u16 = registry_id(mc_registry::BLOCKS, "minecraft:wheat") as u16;
+/// 小麦最大 age（7 阶段成熟；states 数组共 8 项）。
+pub const WHEAT_MAX_AGE: u8 = 7;
+/// 小麦每生长一阶段的全局 tick 数（50ms/拍 → 1200 拍 = 60s；固定时长，原版随机 tick 差异见 HANDOFF）。
+pub const WHEAT_TICKS_PER_STAGE: u64 = 1200;
+
+/// 小麦 age → blockstate ID（age > 7 按 7 钳制）。
+pub fn wheat_stage_id(age: u8) -> u16 {
+    WHEAT_CROP_BASE_ID + age.min(WHEAT_MAX_AGE) as u16
+}
+
+/// blockstate ID → 小麦 age（非小麦返回 None）。
+pub fn wheat_age(id: u16) -> Option<u8> {
+    let age = id.wrapping_sub(WHEAT_CROP_BASE_ID);
+    if age <= WHEAT_MAX_AGE as u16 { Some(age as u8) } else { None }
+}
 
 /// 按 y 分层的地形带：y <= GROUND_LEVEL 石头，61..=63 泥土，64 草方块，其余空气。
 pub const GROUND_LEVEL: i32 = 60;
@@ -233,10 +253,26 @@ mod tests {
             ("minecraft:oak_leaves", 294, OAK_LEAVES_BLOCK_ID),
             ("minecraft:coal_ore", 136, COAL_ORE_BLOCK_ID),
             ("minecraft:iron_ore", 134, IRON_ORE_BLOCK_ID),
+            ("minecraft:wheat", 6867, WHEAT_CROP_BASE_ID),
         ] {
             assert_eq!(id as u32, expected, "wrong blockstate ID for {name}");
             assert_eq!(Some(id as u32), mc_registry::block_id(name));
         }
+    }
+
+    #[test]
+    fn wheat_stages_are_base_plus_age() {
+        // `data/777/full/blocks.json` wheat states 按 age 升序 id 6867..=6874；
+        // default_state_id=6867 即 age=0。实现只从 JSON 取 base，偏移是数据顺序本身。
+        assert_eq!(WHEAT_CROP_BASE_ID, 6867);
+        for age in 0..=WHEAT_MAX_AGE {
+            assert_eq!(wheat_stage_id(age), 6867 + age as u16, "age={age}");
+            assert_eq!(wheat_age(6867 + age as u16), Some(age));
+        }
+        assert_eq!(wheat_age(6866), None);
+        assert_eq!(wheat_age(6875), None);
+        assert_eq!(wheat_age(STONE_BLOCK_ID), None);
+        assert_eq!(wheat_stage_id(99), wheat_stage_id(WHEAT_MAX_AGE), "over-age clamps");
     }
 
     #[test]
