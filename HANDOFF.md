@@ -471,8 +471,13 @@ $natives = 'C:\Users\qwe\AppData\Local\Temp\mc263natives'
     （来源/SHA 见 `SOURCE.md`，共 ~9.4MB）；`mc-registry/build.rs` 从 JSON 生成 1286 方块 /
     1658 物品 / 161 实体 / 全量包 ID 表，**替换 216 项连续假 ID**；29 个真机实测 ID
     构建期断言 + 6 个集成校验测试。新增 `item_id`/`entity_id`/`packet_id` API，旧 API 不变。
-    剩余：P2/P3（mc-world/drops/play_entity 硬编码 ID 改为从表派生、33 bin 迁移、
-    `0x23` 常量改名 `ENTITY_POSITION_SYNC`）待做。
+    P2/P3 已完成：`mc-world` 的 10 方块 / 9 物品 ID、`mc-protocol` 的全部包 ID 与
+    `ITEM_ENTITY_TYPE_ID` 均改为编译期从生成表查得（各自 const `registry_id` / `packet_id`
+    线性查找，缺失即编译期 panic，不静默回退）；`0x23` 常量改名
+    `PLAY_ENTITY_POSITION_SYNC_S2C_ID`（兼容别名已删、全仓库引用已更新）；36 个抓包 bin
+    迁至 `data/777/{vanilla_config,login_play.bin,player_position_sync.bin,update_tags.bin}`，
+    `include_bytes!` 改走 workspace 相对路径。抓包 fixture 逐字节测试全部通过。
+    真实 ID 现在只有一份数据源（`data/777/*.json`）；新增方块/物品只需改 JSON 并重编译。
 
 ## 6. 关键文件
 

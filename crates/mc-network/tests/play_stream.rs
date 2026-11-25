@@ -674,7 +674,7 @@ async fn dig_spawns_pickable_drop_and_inventory_syncs() {
     for _ in 0..60 {
         let (id, payload) = read_frame_timeout(&mut s, Duration::from_secs(5)).await.unwrap();
         match id {
-            packets::PLAY_TELEPORT_ENTITY_S2C_ID => continue,
+            packets::PLAY_ENTITY_POSITION_SYNC_S2C_ID => continue,
             packets::PLAY_PICKUP_ITEM_S2C_ID => {
                 let (t, _) = packets::TakeItemEntity::decode_body(&payload).unwrap();
                 assert_eq!((t.collected_id, t.collector_id), (drop_id, 1));
@@ -866,7 +866,7 @@ async fn drop_pickup_works_on_busy_connection() {
             Ok(Err(e)) => panic!("read failed on busy connection: {e}"),
         };
         match id {
-            packets::PLAY_TELEPORT_ENTITY_S2C_ID | packets::PLAY_KEEPALIVE_S2C_ID => continue,
+            packets::PLAY_ENTITY_POSITION_SYNC_S2C_ID | packets::PLAY_KEEPALIVE_S2C_ID => continue,
             packets::PLAY_PICKUP_ITEM_S2C_ID => {
                 let (t, _) = packets::TakeItemEntity::decode_body(&payload).unwrap();
                 assert_eq!(t.collector_id, 1);

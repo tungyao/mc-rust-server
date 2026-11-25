@@ -20,28 +20,33 @@ use crate::packets::codec::{
 };
 use crate::{read_varint, write_varint, ProtocolError};
 
+// 以下包 ID 全部编译期从 `mc-registry` 由 data/777/packets.json 生成的 PACKETS 表派生。
+
 /// S2C Spawn Entity（掉落物）：`add_entity`。
-pub const PLAY_SPAWN_ENTITY_S2C_ID: i32 = 0x01;
+pub const PLAY_SPAWN_ENTITY_S2C_ID: i32 = super::packet_id("clientbound.play", "add_entity");
 /// S2C Set Entity Metadata：`set_entity_data`。
-pub const PLAY_SET_ENTITY_DATA_S2C_ID: i32 = 0x65;
+pub const PLAY_SET_ENTITY_DATA_S2C_ID: i32 = super::packet_id("clientbound.play", "set_entity_data");
 /// S2C Remove Entities：`remove_entities`。
-pub const PLAY_REMOVE_ENTITIES_S2C_ID: i32 = 0x4E;
-/// S2C Teleport Entity：`entity_position_sync`（线性路径，绝对坐标同步）。
-pub const PLAY_TELEPORT_ENTITY_S2C_ID: i32 = 0x23;
+pub const PLAY_REMOVE_ENTITIES_S2C_ID: i32 = super::packet_id("clientbound.play", "remove_entities");
+/// S2C Entity Position Sync：`entity_position_sync`（线性路径，绝对坐标同步）。
+/// 0x23 历史上被误称为 TeleportEntity（Pumpkin 的 `teleport_entity` 是另一个包 0x80）；
+/// 包体不变，仅名字改正。
+pub const PLAY_ENTITY_POSITION_SYNC_S2C_ID: i32 = super::packet_id("clientbound.play", "entity_position_sync");
 /// S2C Update Entity Position：`move_entity_pos`（线性差量 step=0）。
-pub const PLAY_UPDATE_ENTITY_POS_S2C_ID: i32 = 0x36;
+pub const PLAY_UPDATE_ENTITY_POS_S2C_ID: i32 = super::packet_id("clientbound.play", "move_entity_pos");
 /// S2C Pickup Item：`take_item_entity`（拾取动画，不删实体不加背包，需另发 Remove+背包）。
-pub const PLAY_PICKUP_ITEM_S2C_ID: i32 = 0x7F;
+pub const PLAY_PICKUP_ITEM_S2C_ID: i32 = super::packet_id("clientbound.play", "take_item_entity");
 /// S2C Set Container Content：`container_set_content`（window 0=玩家背包）。
-pub const PLAY_SET_CONTAINER_CONTENT_S2C_ID: i32 = 0x12;
+pub const PLAY_SET_CONTAINER_CONTENT_S2C_ID: i32 = super::packet_id("clientbound.play", "container_set_content");
 /// S2C Set Container Slot：`container_set_slot`（window 0=玩家背包）。
-pub const PLAY_SET_CONTAINER_SLOT_S2C_ID: i32 = 0x14;
+pub const PLAY_SET_CONTAINER_SLOT_S2C_ID: i32 = super::packet_id("clientbound.play", "container_set_slot");
 /// C2S Set Held Item / Click Container 的 ID 见 `play_block`
 ///（`PLAY_SET_HELD_ITEM_C2S_ID` 0x36 / `PLAY_CLICK_CONTAINER_C2S_ID` 0x12）：
 /// C2S 0x36 是 Short（本文件 `decode_set_held_item_c2s`），注意 S2C 同名包是 VarInt。
 
-/// `minecraft:item` 在 EntityType 注册表中的位置（26.3 客户端 jar 实测，见 HANDOFF）。
-pub const ITEM_ENTITY_TYPE_ID: i32 = 72;
+/// `minecraft:item` 在 EntityType 注册表中的位置，编译期从 `mc-registry` 由
+/// data/777/entities.json 生成的 ENTITIES 表派生（26.3 实测值 72）。
+pub const ITEM_ENTITY_TYPE_ID: i32 = super::entity_id("minecraft:item");
 
 /// 玩家背包窗口 ID（window 0）。
 pub const PLAYER_INVENTORY_WINDOW_ID: i32 = 0;
@@ -429,7 +434,7 @@ impl TeleportEntitySync {
 pub fn encode_teleport_entity_packet(v: &TeleportEntitySync, out: &mut Vec<u8>) {
     let mut body = Vec::new();
     v.encode_body(&mut body);
-    encode_packet(PLAY_TELEPORT_ENTITY_S2C_ID, &body, out);
+    encode_packet(PLAY_ENTITY_POSITION_SYNC_S2C_ID, &body, out);
 }
 
 // ---------------------------------------------------------------------------
@@ -747,7 +752,7 @@ mod tests {
         assert_eq!(PLAY_SPAWN_ENTITY_S2C_ID, 0x01);
         assert_eq!(PLAY_SET_ENTITY_DATA_S2C_ID, 0x65);
         assert_eq!(PLAY_REMOVE_ENTITIES_S2C_ID, 0x4E);
-        assert_eq!(PLAY_TELEPORT_ENTITY_S2C_ID, 0x23);
+        assert_eq!(PLAY_ENTITY_POSITION_SYNC_S2C_ID, 0x23);
         assert_eq!(PLAY_UPDATE_ENTITY_POS_S2C_ID, 0x36);
         assert_eq!(PLAY_PICKUP_ITEM_S2C_ID, 0x7F);
         assert_eq!(PLAY_SET_CONTAINER_CONTENT_S2C_ID, 0x12);
@@ -892,7 +897,7 @@ mod tests {
         encode_teleport_entity_packet(&v, &mut pkt);
         let (_, n) = read_varint(&pkt).unwrap();
         let (id, _) = decode_packet_id(&pkt[n..]).unwrap();
-        assert_eq!(id, PLAY_TELEPORT_ENTITY_S2C_ID);
+        assert_eq!(id, PLAY_ENTITY_POSITION_SYNC_S2C_ID);
     }
 
     #[test]

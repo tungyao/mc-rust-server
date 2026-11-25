@@ -3,13 +3,15 @@ use crate::packets::codec::{decode_string, encode_packet, encode_string};
 use crate::{read_varint, write_varint, ProtocolError};
 use uuid::Uuid;
 
-// 包ID: Start 0x00(SB) / Success 0x02(CB) / Ack 0x03(SB) / SetCompression 0x03(CB) / EncReq 0x01(CB) / EncResp 0x01(SB)
-pub const LOGIN_START_PACKET_ID: i32 = 0x00;
-pub const LOGIN_SUCCESS_PACKET_ID: i32 = 0x02;
-pub const LOGIN_ACKNOWLEDGED_PACKET_ID: i32 = 0x03;
-pub const SET_COMPRESSION_PACKET_ID: i32 = 0x03;
-pub const ENCRYPTION_REQUEST_PACKET_ID: i32 = 0x01;
-pub const ENCRYPTION_RESPONSE_PACKET_ID: i32 = 0x01;
+// 包ID: Start 0x00(SB hello) / Success 0x02(CB login_finished) / Ack 0x03(SB login_acknowledged)
+// / SetCompression 0x03(CB login_compression) / EncReq 0x01(CB hello) / EncResp 0x01(SB key)
+// 全部编译期从 `mc-registry` 由 data/777/packets.json 生成的 PACKETS 表派生。
+pub const LOGIN_START_PACKET_ID: i32 = super::packet_id("serverbound.login", "hello");
+pub const LOGIN_SUCCESS_PACKET_ID: i32 = super::packet_id("clientbound.login", "login_finished");
+pub const LOGIN_ACKNOWLEDGED_PACKET_ID: i32 = super::packet_id("serverbound.login", "login_acknowledged");
+pub const SET_COMPRESSION_PACKET_ID: i32 = super::packet_id("clientbound.login", "login_compression");
+pub const ENCRYPTION_REQUEST_PACKET_ID: i32 = super::packet_id("clientbound.login", "hello");
+pub const ENCRYPTION_RESPONSE_PACKET_ID: i32 = super::packet_id("serverbound.login", "key");
 
 /// 压缩阈值语义：-1=禁用(不发SetCompression)；>=0=启用(Success前先发，后续包走zlib帧)。
 pub const COMPRESSION_DISABLED_THRESHOLD: i32 = -1;

@@ -2,14 +2,16 @@
 use crate::packets::codec::{decode_string, encode_packet, encode_string, read_i64_be, write_i64_be};
 use crate::ProtocolError;
 
-/// Status Request 包 ID（Status serverbound `0x00`）。
-pub const STATUS_REQUEST_PACKET_ID: i32 = 0x00;
-/// Status Response 包 ID（Status clientbound `0x00`）。
-pub const STATUS_RESPONSE_PACKET_ID: i32 = 0x00;
-/// Ping Request 包 ID（Status serverbound `0x01`）。
-pub const PING_PACKET_ID: i32 = 0x01;
-/// Pong 包 ID（Status clientbound `0x01`）。
-pub const PONG_PACKET_ID: i32 = 0x01;
+// 以下包 ID 全部编译期从 `mc-registry` 由 data/777/packets.json 生成的 PACKETS 表派生。
+
+/// Status Request 包 ID（Status serverbound `0x00` status_request）。
+pub const STATUS_REQUEST_PACKET_ID: i32 = super::packet_id("serverbound.status", "status_request");
+/// Status Response 包 ID（Status clientbound `0x00` status_response）。
+pub const STATUS_RESPONSE_PACKET_ID: i32 = super::packet_id("clientbound.status", "status_response");
+/// Ping Request 包 ID（Status serverbound `0x01` ping_request）。
+pub const PING_PACKET_ID: i32 = super::packet_id("serverbound.status", "ping_request");
+/// Pong 包 ID（Status clientbound `0x01` pong_response）。
+pub const PONG_PACKET_ID: i32 = super::packet_id("clientbound.status", "pong_response");
 
 pub fn encode_status_request_packet(out: &mut Vec<u8>) {
     encode_packet(STATUS_REQUEST_PACKET_ID, &[], out);

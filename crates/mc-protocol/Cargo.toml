@@ -6,6 +6,7 @@ license.workspace = true
 
 [dependencies]
 mc-core = { workspace = true }
+mc-registry = { workspace = true }
 thiserror.workspace = true
 bytes.workspace = true
 serde.workspace = true

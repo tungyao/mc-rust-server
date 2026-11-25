@@ -16,24 +16,26 @@ use crate::packets::codec::{
 };
 use crate::{read_varint, write_varint, ProtocolError};
 
+// 以下包 ID 全部编译期从 `mc-registry` 由 data/777/packets.json 生成的 PACKETS 表派生。
+
 /// C2S Player Action（挖方块/取消/完成/丢弃等）包 ID（777 SB `0x29`）。
-pub const PLAY_PLAYER_ACTION_C2S_ID: i32 = 0x29;
+pub const PLAY_PLAYER_ACTION_C2S_ID: i32 = super::packet_id("serverbound.play", "player_action");
 /// C2S Use Item On（对方块使用/放置）包 ID（777 SB `0x42`）。
-pub const PLAY_USE_ITEM_ON_C2S_ID: i32 = 0x42;
+pub const PLAY_USE_ITEM_ON_C2S_ID: i32 = super::packet_id("serverbound.play", "use_item_on");
 /// C2S Use Item（空手使用）包 ID（777 SB `0x43`）。
-pub const PLAY_USE_ITEM_C2S_ID: i32 = 0x43;
+pub const PLAY_USE_ITEM_C2S_ID: i32 = super::packet_id("serverbound.play", "use_item");
 /// C2S Punch（挥拳动画）包 ID（777 SB `0x2E`）：空包体，只忽略。
-pub const PLAY_PUNCH_C2S_ID: i32 = 0x2E;
+pub const PLAY_PUNCH_C2S_ID: i32 = super::packet_id("serverbound.play", "punch");
 /// C2S Click Container：`container_click`（Hashed Slot 复杂，本轮只忽略不断线，见模块文档）。
-pub const PLAY_CLICK_CONTAINER_C2S_ID: i32 = 0x12;
+pub const PLAY_CLICK_CONTAINER_C2S_ID: i32 = super::packet_id("serverbound.play", "container_click");
 /// C2S Set Held Item（切换手持槽位）包 ID（777 SB `0x36`）：P17 暂不解析，只忽略。
-pub const PLAY_SET_HELD_ITEM_C2S_ID: i32 = 0x36;
+pub const PLAY_SET_HELD_ITEM_C2S_ID: i32 = super::packet_id("serverbound.play", "set_carried_item");
 /// C2S Set Creative Mode Slot（创造模式点物品）包 ID（777 SB `0x39`）：P17 暂不解析，只忽略。
-pub const PLAY_SET_CREATIVE_SLOT_C2S_ID: i32 = 0x39;
+pub const PLAY_SET_CREATIVE_SLOT_C2S_ID: i32 = super::packet_id("serverbound.play", "set_creative_mode_slot");
 /// S2C Block Update（单方块变更）包 ID（777 CB `0x08`）。
-pub const PLAY_BLOCK_UPDATE_S2C_ID: i32 = 0x08;
+pub const PLAY_BLOCK_UPDATE_S2C_ID: i32 = super::packet_id("clientbound.play", "block_update");
 /// S2C Acknowledge Block Change（确认方块变更序列号）包 ID（777 CB `0x04`）。
-pub const PLAY_BLOCK_CHANGED_ACK_S2C_ID: i32 = 0x04;
+pub const PLAY_BLOCK_CHANGED_ACK_S2C_ID: i32 = super::packet_id("clientbound.play", "block_changed_ack");
 
 /// Player Action Status：开始挖掘（创造模式下客户端只发这个，视为已完成）。
 pub const PLAYER_ACTION_START_DIG: i32 = 0;

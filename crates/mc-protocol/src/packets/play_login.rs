@@ -3,7 +3,8 @@ use crate::packets::codec::{decode_string, encode_packet, encode_string, read_bo
 use crate::{read_varint, write_varint, ProtocolError};
 
 /// Login Play（Join Game）包 ID（Play CB `0x32` login）。已按P4A对照表核对777（旧值0x2B实为hurt_animation）。
-pub const PLAY_LOGIN_PLAY_ID: i32 = 0x32;
+/// 编译期从 `mc-registry` 生成的 PACKETS 表派生。
+pub const PLAY_LOGIN_PLAY_ID: i32 = super::packet_id("clientbound.play", "login");
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct LoginPlay {
@@ -233,7 +234,7 @@ mod tests {
     /// portal_cooldown/sea_level 两个 VarInt，以及末尾 onlineMode/enforcesSecureChat。
     #[test]
     fn play_login_matches_vanilla_777_capture() {
-        let body = include_bytes!("data/login_play_777.bin");
+        let body = include_bytes!(concat!(env!("CARGO_MANIFEST_DIR"), "/../../data/777/login_play.bin"));
         let (got, used) = LoginPlay::decode_body(body).unwrap();
         assert_eq!(used, body.len());
         assert_eq!(got.entity_id, 27);

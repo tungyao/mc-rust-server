@@ -5,16 +5,18 @@
 use crate::packets::codec::{decode_string, encode_packet, encode_string};
 use crate::{read_varint, write_varint, ProtocolError};
 
+// 以下包 ID 全部编译期从 `mc-registry` 由 data/777/packets.json 生成的 PACKETS 表派生。
+
 /// Finish Configuration CB 包 ID（Configuration `0x03` finish_configuration）。已按P4A对照表核对777。
-pub const CONFIG_FINISH_S2C_ID: i32 = 0x03;
+pub const CONFIG_FINISH_S2C_ID: i32 = super::packet_id("clientbound.config", "finish_configuration");
 /// Finish Configuration Ack SB 包 ID（Configuration `0x03` finish_configuration）。已按P4A对照表核对777。
-pub const CONFIG_FINISH_ACK_C2S_ID: i32 = 0x03;
+pub const CONFIG_FINISH_ACK_C2S_ID: i32 = super::packet_id("serverbound.config", "finish_configuration");
 /// Registry Data CB 包 ID（Configuration `0x07` registry_data）。已按P4A对照表核对777（旧占位0x05作废）。
-pub const CONFIG_REGISTRY_DATA_S2C_ID: i32 = 0x07;
+pub const CONFIG_REGISTRY_DATA_S2C_ID: i32 = super::packet_id("clientbound.config", "registry_data");
 /// Known Packs CB 包 ID（Configuration `0x0F` select_known_packs）。已按P4A对照表核对777（旧占位0x0E是26.1值，777因update_tags插入顺延）。
-pub const CONFIG_KNOWN_PACKS_S2C_ID: i32 = 0x0F;
+pub const CONFIG_KNOWN_PACKS_S2C_ID: i32 = super::packet_id("clientbound.config", "select_known_packs");
 /// Known Packs SB 包 ID（Configuration `0x07` select_known_packs）。已按P4A对照表核对777。
-pub const CONFIG_KNOWN_PACKS_C2S_ID: i32 = 0x07;
+pub const CONFIG_KNOWN_PACKS_C2S_ID: i32 = super::packet_id("serverbound.config", "select_known_packs");
 
 /// 是否跳过 Registry 下发：P6a起为false（发最小registry再Finish，真机才站得住）。
 /// 空registry直接Finish在多数vanilla上可过，但Play Login按索引查dimension_type，缺表会黑屏/被踢，故至少发2包。
@@ -316,7 +318,7 @@ pub fn real_villager_schedule_timeline_nbt() -> Vec<u8> { timeline_json_to_packe
 /// 取值勘误：repo 旧文档记 0x0D（实为 26.1 值）；26.1 protocol.json 里 tags 已在 0x0D，
 /// 26.2/26.3 新增 post_effects(0x0A) 使其后全体 +1，live wiki 777 明示 update_tags=0x0E、known_packs=0x0F（与本分支 0x0F 自洽）；
 /// 0x0D 在 777 是 feature_flags，误用会撞包。26.4-snap 侧证 Update Tags 亦为 0x0E。
-pub const CONFIG_UPDATE_TAGS_S2C_ID: i32 = 0x0E;
+pub const CONFIG_UPDATE_TAGS_S2C_ID: i32 = super::packet_id("clientbound.config", "update_tags");
 
 /// Update Tags 单 tag：tag 名（Identifier，不带 `#` 前缀）+ 条目数字 ID 数组（VarInt 数组，顺序即发送序）。
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -815,7 +817,7 @@ mod tests {
     /// 只比对本服实际下发的 block/timeline 两个注册表，tag 顺序按名字归一化。
     #[test]
     fn config_update_tags_match_vanilla_777_capture() {
-        let (cap, used) = decode_config_update_tags(include_bytes!("data/update_tags_777.bin")).unwrap();
+        let (cap, used) = decode_config_update_tags(include_bytes!(concat!(env!("CARGO_MANIFEST_DIR"), "/../../data/777/update_tags.bin"))).unwrap();
         assert_eq!(used, 58_754);
         fn sorted(mut tags: Vec<ConfigUpdateTag>) -> Vec<ConfigUpdateTag> {
             tags.sort_by(|a, b| a.name.cmp(&b.name));

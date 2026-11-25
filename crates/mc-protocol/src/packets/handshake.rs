@@ -2,8 +2,9 @@
 use crate::packets::codec::{decode_string, encode_string, read_u16_be, write_u16_be};
 use crate::{read_varint, write_varint, ProtocolError};
 
-/// Handshake 包 ID（Handshaking state，serverbound `0x00`）。
-pub const HANDSHAKE_PACKET_ID: i32 = 0x00;
+/// Handshake 包 ID（Handshaking state，serverbound `intention` = `0x00`）。
+/// 编译期从 `mc-registry` 生成的 PACKETS 表派生。
+pub const HANDSHAKE_PACKET_ID: i32 = super::packet_id("serverbound.handshake", "intention");
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum HandshakeNextState {

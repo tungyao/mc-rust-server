@@ -15,21 +15,23 @@
 use crate::packets::codec::{encode_packet, read_i32_be, read_i64_be, write_i32_be, write_i64_be, write_u16_be};
 use crate::{read_varint, write_varint, ProtocolError};
 
+// 以下包 ID 全部编译期从 `mc-registry` 由 data/777/packets.json 生成的 PACKETS 表派生。
+
 /// Set Center Chunk 包 ID（Play CB `0x60` set_chunk_cache_center）。已按P4A对照表核对777（旧值0x4C实为recipe_book_remove）。
-pub const PLAY_SET_CENTER_CHUNK_ID: i32 = 0x60;
+pub const PLAY_SET_CENTER_CHUNK_ID: i32 = super::packet_id("clientbound.play", "set_chunk_cache_center");
 /// Chunk Data 包 ID（Play CB `0x2E` level_chunk_with_light）。已按P4A对照表核对777（旧值0x27实为game_event）。
-pub const PLAY_CHUNK_DATA_ID: i32 = 0x2E;
+pub const PLAY_CHUNK_DATA_ID: i32 = super::packet_id("clientbound.play", "level_chunk_with_light");
 /// Unload Chunk 包 ID（Play CB `0x26` forget_level_chunk）。777 里旧 KeepAlive 占的 0x26
 /// 实际就是该包（见 packet-map-777.md §4.1），P4b 曾误把 KeepAlive S2C 记成它，已改 0x2D。
-pub const PLAY_UNLOAD_CHUNK_ID: i32 = 0x26;
+pub const PLAY_UNLOAD_CHUNK_ID: i32 = super::packet_id("clientbound.play", "forget_level_chunk");
 /// Chunk Batch Start / Finished（Play CB 0x0C / 0x0B）：26.3 客户端用批次结束
 /// 判断“首包区块已下完”，不发这两个包会一直停在“加载地形中…”。
-pub const PLAY_CHUNK_BATCH_START_ID: i32 = 0x0C;
-pub const PLAY_CHUNK_BATCH_FINISHED_ID: i32 = 0x0B;
+pub const PLAY_CHUNK_BATCH_START_ID: i32 = super::packet_id("clientbound.play", "chunk_batch_start");
+pub const PLAY_CHUNK_BATCH_FINISHED_ID: i32 = super::packet_id("clientbound.play", "chunk_batch_finished");
 /// Game Event（Play CB 0x27）：26.3 客户端只有收到
 /// `LEVEL_CHUNKS_LOAD_START`（type=13）才把 LevelLoadTracker 从 WaitingForServer
 /// 切到 WaitingForPlayerChunk；缺失则永远停在“加载地形中…”。
-pub const PLAY_GAME_EVENT_ID: i32 = 0x27;
+pub const PLAY_GAME_EVENT_ID: i32 = super::packet_id("clientbound.play", "game_event");
 pub const GAME_EVENT_LEVEL_CHUNKS_LOAD_START: u8 = 13;
 /// 原版 26.3 `worldgen/biome` 网络注册表中 `minecraft:plains` 的 ID
 /// （空 KnownPacks 抓包：67 项按 key 排序，plains=41）。区块 palette 用这个 ID。
@@ -519,7 +521,7 @@ mod tests {
     }
     #[test]
     fn plains_biome_id_matches_vanilla_registry() {
-        let body = include_bytes!("data/vanilla_config_777/registry_00.bin");
+        let body = include_bytes!(concat!(env!("CARGO_MANIFEST_DIR"), "/../../data/777/vanilla_config/registry_00.bin"));
         let (reg, _) = super::super::decode_config_registry_data(body).unwrap();
         assert_eq!(reg.registry_id, "minecraft:worldgen/biome");
         let idx = |name: &str| {

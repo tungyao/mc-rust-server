@@ -7,11 +7,13 @@
 use crate::packets::codec::{encode_packet, read_f32_be, read_f64_be, read_i32_be, read_i64_be, write_f32_be, write_f64_be, write_i32_be, write_i64_be};
 use crate::{read_varint, write_varint, ProtocolError};
 
+// 以下包 ID 全部编译期从 `mc-registry` 由 data/777/packets.json 生成的 PACKETS 表派生。
+
 /// Player Position Sync 包 ID（Play CB `0x49` player_position）。已按P4A对照表核对777（旧值0x3E实为ping）。
-pub const PLAY_PLAYER_POSITION_SYNC_ID: i32 = 0x49;
+pub const PLAY_PLAYER_POSITION_SYNC_ID: i32 = super::packet_id("clientbound.play", "player_position");
 /// KeepAlive S2C/C2S 包 ID（Play CB `0x2D` / SB `0x1C` keep_alive）。已按P4A对照表核对777（旧值0x26实为unload_chunk/0x1A实为interact）。
-pub const PLAY_KEEPALIVE_S2C_ID: i32 = 0x2D;
-pub const PLAY_KEEPALIVE_C2S_ID: i32 = 0x1C;
+pub const PLAY_KEEPALIVE_S2C_ID: i32 = super::packet_id("clientbound.play", "keep_alive");
+pub const PLAY_KEEPALIVE_C2S_ID: i32 = super::packet_id("serverbound.play", "keep_alive");
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct PlayerPositionSync {
@@ -140,13 +142,13 @@ pub fn decode_keepalive_c2s(payload: &[u8]) -> Result<i64, ProtocolError> {
 // ---------------------------------------------------------------------------
 
 /// Set Player Position C2S 包 ID（Play SB `0x1E` move_player_pos，777）。
-pub const PLAY_MOVE_POS_C2S_ID: i32 = 0x1E;
+pub const PLAY_MOVE_POS_C2S_ID: i32 = super::packet_id("serverbound.play", "move_player_pos");
 /// Set Player Position and Rotation C2S 包 ID（Play SB `0x1F` move_player_pos_rot，777）。
-pub const PLAY_MOVE_POSROT_C2S_ID: i32 = 0x1F;
+pub const PLAY_MOVE_POSROT_C2S_ID: i32 = super::packet_id("serverbound.play", "move_player_pos_rot");
 /// Set Player Rotation C2S 包 ID（Play SB `0x20` move_player_rot，777）。
-pub const PLAY_MOVE_ROT_C2S_ID: i32 = 0x20;
+pub const PLAY_MOVE_ROT_C2S_ID: i32 = super::packet_id("serverbound.play", "move_player_rot");
 /// Set Player Movement Flags C2S 包 ID（Play SB `0x21` move_player_status_only，777）。
-pub const PLAY_MOVE_FLAGS_C2S_ID: i32 = 0x21;
+pub const PLAY_MOVE_FLAGS_C2S_ID: i32 = super::packet_id("serverbound.play", "move_player_status_only");
 
 /// 移动 flags 打包/解包：bit0 on_ground，bit1 horizontal_collision。
 pub fn pack_move_flags(on_ground: bool, horizontal_collision: bool) -> u8 {
@@ -359,7 +361,7 @@ mod tests {
     /// VarInt teleportId + PositionMoveRotation(3×pos, 3×delta, yaw, pitch) + Int relative mask。
     #[test]
     fn play_position_sync_matches_vanilla_777_capture() {
-        let body = include_bytes!("data/player_position_sync_777.bin");
+        let body = include_bytes!(concat!(env!("CARGO_MANIFEST_DIR"), "/../../data/777/player_position_sync.bin"));
         let (got, used) = PlayerPositionSync::decode_body(body).unwrap();
         assert_eq!(used, body.len());
         assert_eq!(got.teleport_id, 1);
