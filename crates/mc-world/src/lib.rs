@@ -94,6 +94,9 @@ pub const SAND_BLOCK_ID: u16 = registry_id(mc_registry::BLOCKS, "minecraft:sand"
 /// `Blocks.OAK_LOG.defaultBlockState()`（axis=y）。
 pub const OAK_LOG_BLOCK_ID: u16 = registry_id(mc_registry::BLOCKS, "minecraft:oak_log") as u16;
 pub const OAK_LEAVES_BLOCK_ID: u16 = registry_id(mc_registry::BLOCKS, "minecraft:oak_leaves") as u16;
+/// `Blocks.OAK_SAPLING.defaultBlockState()`（stage=0）：`data/777/blocks.json` 的
+/// `oak_sapling.default_state_id=30`（P23 种植用；长成树/骨粉留后续）。
+pub const OAK_SAPLING_BLOCK_ID: u16 = registry_id(mc_registry::BLOCKS, "minecraft:oak_sapling") as u16;
 pub const COAL_ORE_BLOCK_ID: u16 = registry_id(mc_registry::BLOCKS, "minecraft:coal_ore") as u16;
 pub const IRON_ORE_BLOCK_ID: u16 = registry_id(mc_registry::BLOCKS, "minecraft:iron_ore") as u16;
 /// `Blocks.WHEAT.defaultBlockState()`（age=0）：`data/777/blocks.json` 的
@@ -251,6 +254,7 @@ mod tests {
             ("minecraft:sand", 121, SAND_BLOCK_ID),
             ("minecraft:oak_log", 140, OAK_LOG_BLOCK_ID),
             ("minecraft:oak_leaves", 294, OAK_LEAVES_BLOCK_ID),
+            ("minecraft:oak_sapling", 30, OAK_SAPLING_BLOCK_ID),
             ("minecraft:coal_ore", 136, COAL_ORE_BLOCK_ID),
             ("minecraft:iron_ore", 134, IRON_ORE_BLOCK_ID),
             ("minecraft:wheat", 6867, WHEAT_CROP_BASE_ID),

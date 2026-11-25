@@ -191,18 +191,20 @@ pub fn decide_place(
     })
 }
 
-/// P22 种植判定（手持 `wheat_seeds` 对草方块/泥土**顶面**右键）：
+/// P22 种植判定（手持 `wheat_seeds` 对草方块/泥土**顶面**右键）；
+/// P23 起树苗（`oak_sapling`）复用同一路径（`plant_id` 区分）：
 /// 要求：face=顶面(+Y)，被点是草/泥土，目标（被点上方 1 格）是空气、
 /// y/视距/距离合法；否则回滚重发目标现状（非法 face 只 ack）。
-/// 成功时目标落 0 阶段小麦（`WHEAT_CROP_BASE_ID`，真实 ID 见 `mc_world` 文档）。
-/// 判定内已落子，调用方负责：缓存失效 + 发 BlockUpdate/Ack + 生长登记 +
-/// 扣种子 + 投递事件（复用 `apply_block_outcome`，走 P21 广播）。
+/// 成功时目标落 `plant_id`（小麦传 `WHEAT_CROP_BASE_ID`，树苗传 `OAK_SAPLING_BLOCK_ID`）。
+/// 判定内已落子，调用方负责：缓存失效 + 发 BlockUpdate/Ack + 生长登记（仅小麦）+
+/// 扣手持 + 投递事件（复用 `apply_block_outcome`，走 P21 广播）。
 pub fn decide_plant(
     world: Option<&MutableWorld>,
     eye: (f64, f64, f64),
     center: mc_core::ChunkPos,
     radius: i32,
     act: &packets::UseItemOn,
+    plant_id: u16,
 ) -> Option<BlockEditOutcome> {
     let world = world?;
     // 只要顶面：face=1(+Y)；其它 face（含非法）只 ack，不改世界。
@@ -239,10 +241,10 @@ pub fn decide_plant(
             drops: Vec::new(),
         });
     }
-    let old = world.set(tx, ty, tz, mc_world::WHEAT_CROP_BASE_ID);
+    let old = world.set(tx, ty, tz, plant_id);
     Some(BlockEditOutcome {
         sequence: act.sequence,
-        changes: vec![BlockChange { x: tx, y: ty, z: tz, old_id: old, new_id: mc_world::WHEAT_CROP_BASE_ID }],
+        changes: vec![BlockChange { x: tx, y: ty, z: tz, old_id: old, new_id: plant_id }],
         drops: Vec::new(),
     })
 }
@@ -641,7 +643,7 @@ mod tests {
             world_border_hit: false,
             sequence: 31,
         };
-        let out = decide_plant(Some(&world), eye, center, 2, &act).unwrap();
+        let out = decide_plant(Some(&world), eye, center, 2, &act, mc_world::WHEAT_CROP_BASE_ID).unwrap();
         assert_eq!(out.sequence, 31);
         assert_eq!(
             out.changes,
@@ -654,6 +656,42 @@ mod tests {
         let gen = world.generate_chunk(mc_world::chunk_of_block(x, z));
         assert_eq!(gen.heights[col], y, "wheat must not move the terrain height");
         assert_eq!(gen.motion_heights[col], y + 2 - mc_world::MIN_Y, "motion follows the wheat top");
+    }
+
+    #[test]
+    fn plant_sapling_on_grass_top_lands_oak_sapling() {
+        let (world, feet, center) = dig_fixture();
+        let (x, y, z) = grass_top();
+        let eye = eye_of(feet);
+        // 树苗复用种植路径：点草方块顶面，上方空气落树苗方块（30）。
+        let act = packets::UseItemOn {
+            hand: 0,
+            x,
+            y,
+            z,
+            face: 1,
+            cursor_x: 0.5,
+            cursor_y: 1.0,
+            cursor_z: 0.5,
+            inside_block: false,
+            world_border_hit: false,
+            sequence: 32,
+        };
+        let out =
+            decide_plant(Some(&world), eye, center, 2, &act, mc_world::OAK_SAPLING_BLOCK_ID).unwrap();
+        assert_eq!(out.sequence, 32);
+        assert_eq!(
+            out.changes,
+            vec![BlockChange { x, y: y + 1, z, old_id: 0, new_id: mc_world::OAK_SAPLING_BLOCK_ID }]
+        );
+        assert_eq!(world.get(x, y + 1, z), mc_world::OAK_SAPLING_BLOCK_ID);
+        // 挖掉种下的树苗：原样返还树苗物品（可再种，不断链）。
+        let drops =
+            mc_world::drops_for_block(mc_world::OAK_SAPLING_BLOCK_ID, x, y + 1, z, world.seed());
+        assert_eq!(
+            drops,
+            vec![mc_world::Drop { item_id: mc_world::drops::ITEM_OAK_SAPLING, count: 1 }]
+        );
     }
 
     #[test]
@@ -676,33 +714,33 @@ mod tests {
         };
         // 侧面/底面：只 ack，不落子。
         for face in [0, 2, 3, 4, 5, 9] {
-            let out = decide_plant(Some(&world), eye, center, 2, &base(face)).unwrap();
+            let out = decide_plant(Some(&world), eye, center, 2, &base(face), mc_world::WHEAT_CROP_BASE_ID).unwrap();
             assert!(out.changes.is_empty(), "face={face} must only ack");
             assert_eq!(world.get(x, y + 1, z), mc_world::AIR_BLOCK_ID);
         }
         // 被点是石头：回滚目标现状。
         world.set(x, y, z, mc_world::STONE_BLOCK_ID);
-        let out = decide_plant(Some(&world), eye, center, 2, &base(1)).unwrap();
+        let out = decide_plant(Some(&world), eye, center, 2, &base(1), mc_world::WHEAT_CROP_BASE_ID).unwrap();
         assert_eq!(out.changes[0].old_id, out.changes[0].new_id);
         assert_eq!(world.get(x, y + 1, z), mc_world::AIR_BLOCK_ID);
         world.set(x, y, z, mc_world::GRASS_BLOCK_ID);
         // 目标被占：回滚重发。
         world.set(x, y + 1, z, mc_world::STONE_BLOCK_ID);
         let before = world.override_count();
-        let out = decide_plant(Some(&world), eye, center, 2, &base(1)).unwrap();
+        let out = decide_plant(Some(&world), eye, center, 2, &base(1), mc_world::WHEAT_CROP_BASE_ID).unwrap();
         assert_eq!(out.changes[0].new_id, mc_world::STONE_BLOCK_ID);
         assert_eq!(world.override_count(), before);
         world.set(x, y + 1, z, mc_world::AIR_BLOCK_ID);
         // 泥土同样可种。
         world.set(x, y, z, mc_world::DIRT_BLOCK_ID);
-        let out = decide_plant(Some(&world), eye, center, 2, &base(1)).unwrap();
+        let out = decide_plant(Some(&world), eye, center, 2, &base(1), mc_world::WHEAT_CROP_BASE_ID).unwrap();
         assert_eq!(out.changes[0].new_id, mc_world::WHEAT_CROP_BASE_ID);
         // 超距/出视距/无世界。
         let far_eye = (eye.0 + 100.0, eye.1, eye.2);
-        let out = decide_plant(Some(&world), far_eye, center, 2, &base(1)).unwrap();
+        let out = decide_plant(Some(&world), far_eye, center, 2, &base(1), mc_world::WHEAT_CROP_BASE_ID).unwrap();
         assert_eq!(out.changes[0].old_id, out.changes[0].new_id);
         assert!(
-            decide_plant(None, eye, center, 2, &base(1)).is_none(),
+            decide_plant(None, eye, center, 2, &base(1), mc_world::WHEAT_CROP_BASE_ID).is_none(),
             "missing world must be ignored"
         );
     }

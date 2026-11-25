@@ -234,7 +234,8 @@ async fn play_loop(
             }
             Ok((id, payload)) if id == packets::PLAY_USE_ITEM_ON_C2S_ID => {
                 // P17 放置：目标 = 被点方块 + face 偏移；非法回滚重发。
-                // P18：手持映射决定材料；空手/无映射（如种子/圆石）只 ack 不落子，成功后扣 1 + 单槽同步。
+                // P18：手持映射决定材料；空手/无方块映射（如圆石/煤）只 ack 不落子，成功后扣 1 + 单槽同步。
+                // 种子/树苗走上面的种植专属路径，不经过这里。
                 // 与挖掘同理：判定前强制 flush，避免节流中的旧中心导致合法放置被回滚。
                 if let Err(e) = maybe_flush_view(
                     stream, profile, opts, &mut view, world, cache, mutable, &mut pending_view, true,
@@ -246,26 +247,33 @@ async fn play_loop(
                 }
                 match packets::UseItemOn::decode_body(&payload) {
                     Ok((act, _)) => {
-                        // P22：手持小麦种子对土壤顶面右键 → 种下（专属路径，不走方块映射）。
-                        let held_seeds: bool = opts
+                        // P22/P23：手持小麦种子或树苗对土壤顶面右键 → 种下（专属路径，不走方块映射）。
+                        // 树苗复用小麦的种植判定（仅 plant_id 不同），但不登记生长。
+                        let held_plant: Option<u16> = opts
                             .drops
                             .as_ref()
                             .and_then(|ds| ds.with_inventory(opts.conn_id, |inv| inv.held()).flatten())
-                            .is_some_and(|(item_id, _)| {
-                                item_id == mc_world::drops::ITEM_WHEAT_SEEDS
+                            .and_then(|(item_id, _)| {
+                                if item_id == mc_world::drops::ITEM_WHEAT_SEEDS {
+                                    Some(mc_world::WHEAT_CROP_BASE_ID)
+                                } else if item_id == mc_world::drops::ITEM_OAK_SAPLING {
+                                    Some(mc_world::OAK_SAPLING_BLOCK_ID)
+                                } else {
+                                    None
+                                }
                             });
-                        if held_seeds {
+                        if let Some(plant_id) = held_plant {
                             if let Some(outcome) = decide_plant(
                                 mutable,
                                 eye_of(last_pos),
                                 view.center(),
                                 view.radius(),
                                 &act,
+                                plant_id,
                             ) {
                                 if mutable.is_some() {
                                     let planted = outcome.changes.iter().any(|c| {
-                                        c.new_id == mc_world::WHEAT_CROP_BASE_ID
-                                            && c.old_id != c.new_id
+                                        c.new_id == plant_id && c.old_id != c.new_id
                                     });
                                     if let Err(e) = apply_block_outcome(
                                         stream, addr, profile, opts, cache, &outcome,
@@ -277,8 +285,11 @@ async fn play_loop(
                                     }
                                     if planted {
                                         if let Some(ds) = &opts.drops {
-                                            if let Some(c) = outcome.changes.first() {
-                                                ds.plant_crop(c.x, c.y, c.z);
+                                            // 仅小麦登记生长；树苗长成树留后续。
+                                            if plant_id == mc_world::WHEAT_CROP_BASE_ID {
+                                                if let Some(c) = outcome.changes.first() {
+                                                    ds.plant_crop(c.x, c.y, c.z);
+                                                }
                                             }
                                             let consumed = ds.with_inventory(opts.conn_id, |inv| {
                                                 inv.consume_held()

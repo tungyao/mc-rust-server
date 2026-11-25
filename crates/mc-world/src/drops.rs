@@ -11,6 +11,7 @@
 //! | sand(121) | sand(88)×1 |
 //! | oak_log(140) | oak_log(163)×1 |
 //! | oak_leaves(294) | 1/8 oak_sapling(77)×1，否则 1/8 stick(1060)×1（world+pos hash） |
+//! | oak_sapling(30) | oak_sapling(77)×1 |
 //! | coal_ore(136) | coal(1010)×1 |
 //! | iron_ore(134) | raw_iron(1017)×1 |
 //! | wheat age<7 | wheat_seeds(1065)×1 |
@@ -20,7 +21,7 @@
 
 use crate::{
     COAL_ORE_BLOCK_ID, DIRT_BLOCK_ID, GRASS_BLOCK_ID, IRON_ORE_BLOCK_ID, OAK_LEAVES_BLOCK_ID,
-    OAK_LOG_BLOCK_ID, SAND_BLOCK_ID, STONE_BLOCK_ID, WHEAT_MAX_AGE,
+    OAK_LOG_BLOCK_ID, OAK_SAPLING_BLOCK_ID, SAND_BLOCK_ID, STONE_BLOCK_ID, WHEAT_MAX_AGE,
 };
 
 /// `minecraft:item` 注册表 ID，编译期从 `mc_registry::ITEMS`（由 `build.rs` 从
@@ -88,6 +89,8 @@ pub fn drops_for_block(block_id: u16, x: i32, y: i32, z: i32, seed: i64) -> Vec<
         }
         COAL_ORE_BLOCK_ID => vec![Drop { item_id: ITEM_COAL, count: 1 }],
         IRON_ORE_BLOCK_ID => vec![Drop { item_id: ITEM_RAW_IRON, count: 1 }],
+        // P23 树苗：挖掉种下的树苗原样返还（与小麦未熟口径一致；长成树/树叶 decay 留后续）。
+        OAK_SAPLING_BLOCK_ID => vec![Drop { item_id: ITEM_OAK_SAPLING, count: 1 }],
         // P22 小麦：成熟（age=7）掉小麦×1 + 种子 1~2（hash 最低位决定，无随机状态）；
         // 未熟只掉种子×1。耕地/精准采集等差异见 HANDOFF §5。
         id if crate::wheat_age(id).is_some() => {
