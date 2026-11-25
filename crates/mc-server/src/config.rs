@@ -13,6 +13,9 @@ pub const DEFAULT_SEED: i64 = mc_world::DEFAULT_SEED;
 pub const DEFAULT_COMPRESSION_THRESHOLD: i32 = -1;
 /// 默认存档目录：可变世界 override 落盘位置（`overrides-<seed>.dat`）。
 pub const DEFAULT_WORLD_DIR: &str = "world";
+/// 默认管理面板监听地址：只听回环（无鉴权下的唯一缓解，禁止改为 0.0.0.0，
+/// 除非前置反向代理做鉴权）。
+pub const DEFAULT_ADMIN_BIND: &str = "127.0.0.1:25566";
 
 #[derive(Debug, Clone, Resource, Serialize, Deserialize)]
 #[serde(default)]
@@ -26,6 +29,8 @@ pub struct ServerConfig {
     pub compression_threshold: i32,
     /// 存档目录：P17 override 落盘位置；旧 toml 缺键时按默认 `world` 补齐。
     pub world_dir: String,
+    /// 管理面板监听地址：默认只听回环；旧 toml 缺键时按默认补齐。
+    pub admin_bind: String,
 }
 
 impl Default for ServerConfig {
@@ -38,6 +43,7 @@ impl Default for ServerConfig {
             seed: DEFAULT_SEED,
             compression_threshold: DEFAULT_COMPRESSION_THRESHOLD,
             world_dir: DEFAULT_WORLD_DIR.to_string(),
+            admin_bind: DEFAULT_ADMIN_BIND.to_string(),
         }
     }
 }
@@ -103,10 +109,12 @@ mod tests {
         assert_eq!(cfg.seed, DEFAULT_SEED);
         assert_eq!(cfg.compression_threshold, DEFAULT_COMPRESSION_THRESHOLD, "compression stays disabled by default");
         assert_eq!(cfg.world_dir, DEFAULT_WORLD_DIR);
+        assert_eq!(cfg.admin_bind, DEFAULT_ADMIN_BIND, "admin panel listens on loopback by default");
         // 文件已落盘，且内容可再解析
         let text = std::fs::read_to_string(&p).unwrap();
         assert!(text.contains("view_distance"));
         assert!(text.contains("compression_threshold"));
+        assert!(text.contains("admin_bind"), "fresh toml must carry the admin bind");
         let again = ServerConfig::load_or_create(&p).unwrap();
         assert_eq!(again.view_distance, cfg.view_distance);
         assert_eq!(again.seed, cfg.seed);
@@ -125,6 +133,7 @@ mod tests {
         let cfg = ServerConfig::load_or_create(&p).unwrap();
         assert_eq!(cfg.compression_threshold, -1, "old toml must keep old plain-frame behavior");
         assert_eq!(cfg.world_dir, DEFAULT_WORLD_DIR, "old toml saves to default world dir");
+        assert_eq!(cfg.admin_bind, DEFAULT_ADMIN_BIND, "old toml gets loopback admin bind");
         assert_eq!(cfg.max_players, 7);
         let _ = std::fs::remove_file(&p);
     }
@@ -152,6 +161,7 @@ mod tests {
             seed: 987654321,
             compression_threshold: 256,
             world_dir: "world-test".into(),
+            admin_bind: "127.0.0.1:25567".into(),
         };
         std::fs::write(&p, toml::to_string_pretty(&cfg).unwrap()).unwrap();
         let back = ServerConfig::load_or_create(&p).unwrap();
@@ -161,6 +171,7 @@ mod tests {
         assert_eq!(back.seed, 987654321);
         assert_eq!(back.compression_threshold, 256);
         assert_eq!(back.world_dir, "world-test");
+        assert_eq!(back.admin_bind, "127.0.0.1:25567");
         let _ = std::fs::remove_file(&p);
     }
 

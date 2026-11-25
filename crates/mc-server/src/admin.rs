@@ -1,0 +1,699 @@
+//! admin: P25 后台管理面板 HTTP 服务，只兼容 26.3/777。
+//!
+//! 挂法（计划 §5.1）：独立 `std::thread`（名 `mc-admin`）+ 阻塞式 `std::net::TcpListener`，
+//! 与 25565 游戏端口完全分离，默认只听回环（`server.toml` 的 `admin_bind`）。
+//! 只支持 `GET/POST` + 路径 + `Content-Length` + JSON 体；无鉴权（风险见计划 §6.1）。
+//!
+//! 并发守则（计划 §5.3/§6.2）：管理线程只碰三把锁的短临界区（内存拷贝 + 组包），
+//! 持锁期间不碰网络/磁盘；`hub.snapshot` 先快照、丢锁后再 `unicast`；
+//! `save_to_dir` 调用时调用方不持任何锁。
+//!
+//! M3 范围（计划 §6.4 fallback）：`clientbound.play/disconnect` 与 `system_chat` 在
+//! `crates/mc-protocol` 尚无 S2C 编码器（包 ID 虽在数据表里，包体 NBT 无抓包真值），
+//! 不许猜字节——
+//! - 踢人走"admin 指令通道"备选：`BroadcastHub::kick` 经 outbox 发踢人信号，
+//!   `play_loop` 下个节拍主动退出，走与断线一致的清理路径（无需踢出包）；
+//! - 广播（系统消息）无可靠编码器，本轮只返回 501 + TODO，不发包。
+//! TODO(P25-followup): 抓包核对 777 `system_chat` 包体后实现 `/api/broadcast` 真发包。
+
+use std::io::{Read, Write};
+use std::net::{TcpListener, TcpStream};
+use std::path::PathBuf;
+use std::sync::{
+    Arc,
+    atomic::{AtomicBool, Ordering},
+};
+use std::time::Duration;
+
+use serde::Deserialize;
+
+/// 管理线程共享状态（与游戏线程共享的 `Arc`，`main.rs` 组装）。
+#[derive(Debug, Clone)]
+pub struct AdminState {
+    pub hub: Arc<mc_network::BroadcastHub>,
+    pub drops: Arc<mc_network::DropState>,
+    pub mutable: Arc<mc_world::MutableWorld>,
+    pub seed: i64,
+    pub world_dir: PathBuf,
+    pub view_distance: i32,
+}
+
+/// 发物品数量上限：单次最多 10 组（64×10，按 64/栈自动拆多槽）。
+pub const GIVE_MAX_COUNT: i32 = 640;
+
+/// HTTP 响应（`route` 纯构造，`serve` 只负责写出）。
+pub struct AdminResponse {
+    pub status: u16,
+    pub content_type: &'static str,
+    pub body: Vec<u8>,
+}
+
+impl AdminResponse {
+    fn json(status: u16, value: serde_json::Value) -> Self {
+        Self { status, content_type: "application/json", body: value.to_string().into_bytes() }
+    }
+
+    fn err(status: u16, msg: impl Into<String>) -> Self {
+        Self::json(status, serde_json::json!({"ok": false, "error": msg.into()}))
+    }
+
+    fn html(body: &'static str) -> Self {
+        Self { status: 200, content_type: "text/html; charset=utf-8", body: body.as_bytes().to_vec() }
+    }
+}
+
+fn reason(status: u16) -> &'static str {
+    match status {
+        200 => "OK",
+        400 => "Bad Request",
+        404 => "Not Found",
+        500 => "Internal Server Error",
+        501 => "Not Implemented",
+        _ => "Error",
+    }
+}
+
+fn write_response(stream: &mut TcpStream, resp: &AdminResponse) {
+    let head = format!(
+        "HTTP/1.1 {} {}\r\nContent-Type: {}\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+        resp.status,
+        reason(resp.status),
+        resp.content_type,
+        resp.body.len()
+    );
+    let _ = stream.write_all(head.as_bytes());
+    let _ = stream.write_all(&resp.body);
+    let _ = stream.flush();
+}
+
+/// 解析后的最小 HTTP 请求（只取路由/查询/体）。
+pub struct HttpRequest {
+    pub method: String,
+    pub path: String,
+    pub query: String,
+    pub body: Vec<u8>,
+}
+
+fn find_head_end(buf: &[u8]) -> Option<usize> {
+    buf.windows(4).position(|w| w == b"\r\n\r\n").map(|p| p + 4)
+}
+
+/// 纯函数：解析请求头（首行 + `Content-Length`），返回 (方法, 路径, 查询串, 体长)。
+fn parse_head(head: &str) -> Result<(String, String, String, usize), String> {
+    let mut lines = head.split("\r\n");
+    let first = lines.next().ok_or("empty request")?;
+    let mut parts = first.split_whitespace();
+    let method = parts.next().ok_or("no method")?.to_string();
+    let target = parts.next().ok_or("no target")?.to_string();
+    if parts.next().is_none() {
+        return Err("no version".to_string());
+    }
+    if method != "GET" && method != "POST" {
+        return Err(format!("unsupported method: {method}"));
+    }
+    let (path, query) = match target.find('?') {
+        Some(i) => (target[..i].to_string(), target[i + 1..].to_string()),
+        None => (target, String::new()),
+    };
+    let mut content_len = 0usize;
+    for line in lines {
+        if line.is_empty() {
+            continue;
+        }
+        if let Some(v) = line.split_once(':') {
+            if v.0.trim().eq_ignore_ascii_case("content-length") {
+                content_len = v.1.trim().parse().map_err(|_| "bad content-length")?;
+            }
+        }
+    }
+    Ok((method, path, query, content_len))
+}
+
+fn read_http_request(stream: &mut TcpStream) -> Result<HttpRequest, String> {
+    let mut buf = Vec::new();
+    let mut tmp = [0u8; 1024];
+    loop {
+        if buf.len() > 65536 {
+            return Err("head too large".to_string());
+        }
+        let n = stream.read(&mut tmp).map_err(|e| format!("read: {e}"))?;
+        if n == 0 {
+            return Err("eof".to_string());
+        }
+        buf.extend_from_slice(&tmp[..n]);
+        if let Some(hend) = find_head_end(&buf) {
+            let head = std::str::from_utf8(&buf[..hend]).map_err(|_| "bad utf8".to_string())?;
+            let (method, path, query, content_len) = parse_head(head)?;
+            if content_len > 1024 * 1024 {
+                return Err("body too large".to_string());
+            }
+            while buf.len() < hend + content_len {
+                let n = stream.read(&mut tmp).map_err(|e| format!("read body: {e}"))?;
+                if n == 0 {
+                    return Err("eof in body".to_string());
+                }
+                buf.extend_from_slice(&tmp[..n]);
+                if buf.len() > hend + 1024 * 1024 {
+                    return Err("body too large".to_string());
+                }
+            }
+            let body = buf[hend..hend + content_len].to_vec();
+            return Ok(HttpRequest { method, path, query, body });
+        }
+    }
+}
+
+/// 最小 query/百分号解码（用户名只含 `[A-Za-z0-9_]`，解码是兜底）。
+fn pct_decode(s: &str) -> String {
+    let mut out = Vec::with_capacity(s.len());
+    let b = s.as_bytes();
+    let mut i = 0;
+    while i < b.len() {
+        if b[i] == b'%' && i + 2 < b.len() {
+            if let (Some(h), Some(l)) = (hex(b[i + 1]), hex(b[i + 2])) {
+                out.push(h * 16 + l);
+                i += 3;
+                continue;
+            }
+        }
+        if b[i] == b'+' {
+            out.push(b' ');
+        } else {
+            out.push(b[i]);
+        }
+        i += 1;
+    }
+    String::from_utf8_lossy(&out).into_owned()
+}
+
+fn hex(c: u8) -> Option<u8> {
+    match c {
+        b'0'..=b'9' => Some(c - b'0'),
+        b'a'..=b'f' => Some(c - b'a' + 10),
+        b'A'..=b'F' => Some(c - b'A' + 10),
+        _ => None,
+    }
+}
+
+fn query_param(query: &str, key: &str) -> Option<String> {
+    query.split('&').find_map(|kv| {
+        let (k, v) = kv.split_once('=').unwrap_or((kv, ""));
+        if k == key {
+            Some(pct_decode(v))
+        } else {
+            None
+        }
+    })
+}
+
+/// 由 `username`（精确匹配，大小写敏感）或 `conn_id` 解析在线连接。
+/// 先快照后丢锁（计划 §6.2），返回 `(conn_id, username)`。
+fn resolve_conn(
+    state: &AdminState,
+    username: Option<&str>,
+    conn_id: Option<u64>,
+) -> Result<(u64, String), String> {
+    if let Some(name) = username {
+        if name.is_empty() {
+            return Err("username must not be empty".to_string());
+        }
+        match state.hub.find_conn_by_name(name) {
+            Some(c) => Ok((c, name.to_string())),
+            None => Err(format!("offline: {name}")),
+        }
+    } else if let Some(c) = conn_id {
+        if !state.hub.contains(c) {
+            return Err(format!("offline conn {c}"));
+        }
+        let name = state
+            .hub
+            .snapshot()
+            .into_iter()
+            .find(|e| e.conn_id == c)
+            .map(|e| e.username)
+            .unwrap_or_default();
+        Ok((c, name))
+    } else {
+        Err("username or conn_id required".to_string())
+    }
+}
+
+/// 物品名（`minecraft:xxx` 或短名）或数字 id → 数字 id；未知拒绝（不静默回退）。
+fn resolve_item(s: &str) -> Result<i32, String> {
+    let t = s.trim();
+    if t.is_empty() {
+        return Err("item required".to_string());
+    }
+    if let Ok(n) = t.parse::<i32>() {
+        if n > 0 && mc_registry::item_name(n as u32).is_some() {
+            return Ok(n);
+        }
+        return Err(format!("unknown item: {s}"));
+    }
+    match mc_registry::item_id(t) {
+        Some(id) => Ok(id as i32),
+        None => Err(format!("unknown item: {s}")),
+    }
+}
+
+#[derive(Debug, Deserialize)]
+struct GiveReq {
+    username: Option<String>,
+    conn_id: Option<u64>,
+    item: Option<String>,
+    count: Option<i32>,
+}
+
+#[derive(Debug, Deserialize)]
+struct KickReq {
+    username: Option<String>,
+    conn_id: Option<u64>,
+}
+
+fn handle_online(state: &AdminState) -> AdminResponse {
+    // 读锁内只拷贝快照（`snapshot` 内部处理），丢锁后组 JSON。
+    let mut entries = state.hub.snapshot();
+    entries.sort_by_key(|e| e.conn_id);
+    let online: Vec<serde_json::Value> = entries
+        .iter()
+        .map(|e| {
+            serde_json::json!({
+                "conn_id": e.conn_id,
+                "username": e.username,
+                "addr": e.addr,
+                "pos": [e.pos.0, e.pos.1, e.pos.2],
+                "online_secs": e.online_secs,
+            })
+        })
+        .collect();
+    AdminResponse::json(
+        200,
+        serde_json::json!({"ok": true, "online": online, "count": online.len()}),
+    )
+}
+
+fn handle_world(state: &AdminState) -> AdminResponse {
+    AdminResponse::json(
+        200,
+        serde_json::json!({
+            "ok": true,
+            "seed": state.seed,
+            "online": state.hub.len(),
+            "override_count": state.mutable.override_count(),
+            "dirty_chunks": state.mutable.dirty_len(),
+            "drop_tick": state.drops.tick_count(),
+            "world_dir": state.world_dir.display().to_string(),
+            "view_distance": state.view_distance,
+        }),
+    )
+}
+
+fn handle_give(state: &AdminState, body: &[u8]) -> AdminResponse {
+    let req: GiveReq = match serde_json::from_slice(body) {
+        Ok(r) => r,
+        Err(_) => return AdminResponse::err(400, "bad json"),
+    };
+    let count = req.count.unwrap_or(1);
+    if !(1..=GIVE_MAX_COUNT).contains(&count) {
+        return AdminResponse::err(400, format!("count must be 1..={GIVE_MAX_COUNT}"));
+    }
+    let item_id = match req.item.as_deref().map(resolve_item) {
+        Some(Ok(id)) => id,
+        Some(Err(e)) => return AdminResponse::err(400, e),
+        None => return AdminResponse::err(400, "item required"),
+    };
+    let (conn, user) = match resolve_conn(state, req.username.as_deref(), req.conn_id) {
+        Ok(v) => v,
+        Err(e) => return AdminResponse::err(400, e),
+    };
+    // 计划 §5.3：背包锁内只做 `add_item`（结果带出）；落盘在锁外；
+    // 组包纯函数；最后 unicast。永不丢物品：写入+落盘先生效，投递失败只影响即时显示。
+    let leftover = match state.drops.with_inventory(conn, |inv| inv.add_item(item_id, count)) {
+        Some(l) => l,
+        None => return AdminResponse::err(400, format!("offline conn {conn}")),
+    };
+    state.drops.save_inventory(conn, &user);
+    let delivered = match mc_network::login_route::drop_sync::build_full_inventory_body(
+        &state.drops,
+        conn,
+    ) {
+        Some(body) => {
+            state.hub.unicast(conn, mc_protocol::packets::PLAY_SET_CONTAINER_CONTENT_S2C_ID, body)
+        }
+        None => false,
+    };
+    AdminResponse::json(
+        200,
+        serde_json::json!({"ok": true, "leftover": leftover, "delivered": delivered}),
+    )
+}
+
+fn handle_inventory(state: &AdminState, query: &str) -> AdminResponse {
+    let username = query_param(query, "username");
+    let conn_id = query_param(query, "conn_id").and_then(|s| s.parse::<u64>().ok());
+    let (conn, user) = match resolve_conn(state, username.as_deref(), conn_id) {
+        Ok(v) => v,
+        Err(e) => return AdminResponse::err(400, e),
+    };
+    let Some((selected, slots)) =
+        state.drops.with_inventory(conn, |inv| (inv.selected(), inv.to_protocol_slots()))
+    else {
+        return AdminResponse::err(400, format!("offline conn {conn}"));
+    };
+    let filled: Vec<[i64; 3]> = slots
+        .iter()
+        .enumerate()
+        .filter_map(|(i, s)| {
+            if s.is_empty() {
+                None
+            } else {
+                Some([i as i64, s.item_id as i64, s.count as i64])
+            }
+        })
+        .collect();
+    AdminResponse::json(
+        200,
+        serde_json::json!({
+            "ok": true,
+            "username": user,
+            "conn_id": conn,
+            "selected": selected,
+            "slots": filled,
+        }),
+    )
+}
+
+fn handle_kick(state: &AdminState, body: &[u8]) -> AdminResponse {
+    let req: KickReq = match serde_json::from_slice(body) {
+        Ok(r) => r,
+        Err(_) => return AdminResponse::err(400, "bad json"),
+    };
+    let (conn, user) = match resolve_conn(state, req.username.as_deref(), req.conn_id) {
+        Ok(v) => v,
+        Err(e) => return AdminResponse::err(400, e),
+    };
+    if state.hub.kick(conn) {
+        AdminResponse::json(200, serde_json::json!({"ok": true, "kicked": true, "conn_id": conn, "username": user}))
+    } else {
+        AdminResponse::err(400, format!("offline conn {conn}"))
+    }
+}
+
+fn handle_save(state: &AdminState) -> AdminResponse {
+    // 沿用 autosave 语义：无脏 chunk 不碰盘。
+    if state.mutable.dirty_len() == 0 {
+        return AdminResponse::json(
+            200,
+            serde_json::json!({"ok": true, "saved": false, "overrides": state.mutable.override_count()}),
+        );
+    }
+    match state.mutable.save_to_dir(&state.world_dir) {
+        Ok(n) => AdminResponse::json(200, serde_json::json!({"ok": true, "saved": true, "overrides": n})),
+        Err(e) => AdminResponse::err(500, format!("save failed: {e}")),
+    }
+}
+
+/// 路由（纯构造响应；M1 只读：`/` + `/api/online` + `/api/world`）。
+pub fn route(req: &HttpRequest, state: &AdminState) -> AdminResponse {
+    match (req.method.as_str(), req.path.as_str()) {
+        ("GET", "/") => AdminResponse::html(include_str!("admin_page.html")),
+        ("GET", "/api/online") => handle_online(state),
+        ("GET", "/api/world") => handle_world(state),
+        ("GET", "/api/inventory") => handle_inventory(state, &req.query),
+        ("POST", "/api/give") => handle_give(state, &req.body),
+        ("POST", "/api/kick") => handle_kick(state, &req.body),
+        ("POST", "/api/save") => handle_save(state),
+        ("POST", "/api/broadcast") => AdminResponse::err(
+            501,
+            "broadcast TODO: no verified system_chat S2C encoder for 777, refusing to guess bytes",
+        ),
+        _ => AdminResponse::err(404, "not found"),
+    }
+}
+
+fn handle_one(stream: &mut TcpStream, state: &AdminState) {
+    let resp = match read_http_request(stream) {
+        Ok(req) => route(&req, state),
+        Err(e) => AdminResponse::err(400, e),
+    };
+    write_response(stream, &resp);
+}
+
+/// 管理监听循环（`main.rs` 起独立线程跑这个；`shutdown` 由主循环/Ctrl-C 置位）。
+/// `bind` 失败只记错返回（故障隔离：绝不影响 25565 游戏端口）。
+pub fn serve_admin(bind: &str, state: AdminState, shutdown: Arc<AtomicBool>) {
+    let listener = match TcpListener::bind(bind) {
+        Ok(l) => l,
+        Err(e) => {
+            tracing::error!("admin bind {bind} failed ({e}), panel disabled, game server keeps running");
+            return;
+        }
+    };
+    tracing::info!("admin panel listening on {}", listener.local_addr().map(|a| a.to_string()).unwrap_or_default());
+    serve_admin_on(listener, state, shutdown);
+}
+
+/// 已绑定 listener 上的服务循环（测试用 `:0` 临时端口时直接调这个）。
+pub fn serve_admin_on(listener: TcpListener, state: AdminState, shutdown: Arc<AtomicBool>) {
+    let _ = listener.set_nonblocking(true);
+    loop {
+        if shutdown.load(Ordering::SeqCst) {
+            break;
+        }
+        match listener.accept() {
+            Ok((mut stream, _)) => {
+                let _ = stream.set_read_timeout(Some(Duration::from_secs(5)));
+                handle_one(&mut stream, &state);
+            }
+            Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => {
+                std::thread::sleep(Duration::from_millis(50));
+            }
+            Err(e) => {
+                tracing::warn!("admin accept failed ({e})");
+                std::thread::sleep(Duration::from_millis(100));
+            }
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::sync::atomic::{AtomicU64, Ordering};
+
+    static SEQ: AtomicU64 = AtomicU64::new(0);
+
+    fn test_state() -> AdminState {
+        // 每个用例独立存档目录：背包落盘按 (dir,user,seed) 隔离，并行/复跑不串味。
+        let n = SEQ.fetch_add(1, Ordering::SeqCst);
+        let base = std::env::temp_dir().join(format!("mc-admin-ut-{}-{n}", std::process::id()));
+        AdminState {
+            hub: Arc::new(mc_network::BroadcastHub::new()),
+            drops: Arc::new(mc_network::DropState::new(base.clone(), 777)),
+            mutable: Arc::new(mc_world::MutableWorld::new(777)),
+            seed: 777,
+            world_dir: base.join("world"),
+            view_distance: 2,
+        }
+    }
+
+    fn get(path: &str) -> HttpRequest {
+        let (path, query) = match path.find('?') {
+            Some(i) => (path[..i].to_string(), path[i + 1..].to_string()),
+            None => (path.to_string(), String::new()),
+        };
+        HttpRequest { method: "GET".into(), path, query, body: Vec::new() }
+    }
+
+    fn post(path: &str, body: &str) -> HttpRequest {
+        HttpRequest { method: "POST".into(), path: path.into(), query: String::new(), body: body.as_bytes().to_vec() }
+    }
+
+    fn body_json(resp: &AdminResponse) -> serde_json::Value {
+        serde_json::from_slice(&resp.body).unwrap()
+    }
+
+    #[test]
+    fn parse_head_routes_and_reads_content_length() {
+        let (m, p, q, n) =
+            parse_head("POST /api/give?x=1 HTTP/1.1\r\nContent-Length: 12\r\n").unwrap();
+        assert_eq!((m.as_str(), p.as_str(), q.as_str(), n), ("POST", "/api/give", "x=1", 12));
+        assert!(parse_head("DELETE / HTTP/1.1\r\n").is_err(), "only GET/POST are supported");
+        assert!(parse_head("GET").is_err());
+    }
+
+    #[test]
+    fn unknown_paths_404_and_bad_json_400() {
+        let st = test_state();
+        assert_eq!(route(&get("/nope"), &st).status, 404);
+        assert_eq!(route(&post("/api/give", "{oops"), &st).status, 400);
+        assert_eq!(route(&post("/api/kick", ""), &st).status, 400);
+        // M1 只读端点：空服也 200。
+        let w = route(&get("/api/world"), &st);
+        assert_eq!(w.status, 200);
+        let v = body_json(&w);
+        assert_eq!(v["ok"], true);
+        assert_eq!(v["seed"], 777);
+        assert_eq!(v["online"], 0);
+        let o = route(&get("/api/online"), &st);
+        assert_eq!(body_json(&o)["count"], 0);
+        let index = route(&get("/"), &st);
+        assert_eq!(index.status, 200);
+        assert!(index.body.windows(6).any(|w| w == b"fetch("), "page must drive the API with fetch");
+    }
+
+    #[test]
+    fn give_rejects_unknown_item_bad_count_and_offline() {
+        let st = test_state();
+        // 未知物品 400（名称与数字 id 都要拦）。
+        let r = route(&post("/api/give", r#"{"username":"Nobody","item":"minecraft:not_a_thing","count":1}"#), &st);
+        assert_eq!(r.status, 400);
+        let r = route(&post("/api/give", r#"{"username":"Nobody","item":"999999","count":1}"#), &st);
+        assert_eq!(r.status, 400);
+        assert_eq!(body_json(&r)["ok"], false);
+        // 数量越界 400。
+        for bad in ["0", "-3", "641"] {
+            let r = route(
+                &post("/api/give", &format!(r#"{{"username":"Nobody","item":"stone","count":{bad}}}"#)),
+                &st,
+            );
+            assert_eq!(r.status, 400, "count={bad} must be rejected");
+        }
+        // 缺物品 400；离线用户 400（用户名精确匹配，大小写敏感）。
+        let r = route(&post("/api/give", r#"{"username":"Nobody","count":1}"#), &st);
+        assert_eq!(r.status, 400);
+        st.hub.register_with_name(
+            5,
+            crossbeam_channel::unbounded().0,
+            2,
+            (0.0, 64.0, 0.0),
+            "Somebody".into(),
+            "127.0.0.1:1".into(),
+        );
+        let r = route(&post("/api/give", r#"{"username":"somebody","item":"stone","count":1}"#), &st);
+        assert_eq!(r.status, 400, "name match must be case-sensitive");
+        // kick/broadcast/save 的离线与降级语义。
+        let r = route(&post("/api/kick", r#"{"username":"Nobody"}"#), &st);
+        assert_eq!(r.status, 400);
+        let r = route(&post("/api/broadcast", r#"{"text":"hi"}"#), &st);
+        assert_eq!(r.status, 501, "broadcast has no verified encoder, must stay disabled");
+        let r = route(&get("/api/inventory?username=Nobody"), &st);
+        assert_eq!(r.status, 400);
+    }
+
+    #[test]
+    fn give_writes_save_and_delivers_to_online_conn() {
+        let st = test_state();
+        let (tx, rx) = crossbeam_channel::unbounded();
+        st.hub.register_with_name(11, tx, 2, (0.0, 64.0, 0.0), "Giver".into(), "127.0.0.1:2".into());
+        st.drops.load_inventory(11, "Giver");
+        // 短名与 minecraft: 全名都要能用；count 缺省=1。
+        let r = route(&post("/api/give", r#"{"username":"Giver","item":"cobblestone"}"#), &st);
+        assert_eq!(r.status, 200);
+        let v = body_json(&r);
+        assert_eq!(v, serde_json::json!({"ok": true, "leftover": 0, "delivered": true}));
+        // unicast 出去的正是 Content 包（id 对、包体可解、含刚发的物）。
+        let pkt = rx.try_recv().expect("give must unicast a sync packet");
+        assert_eq!(pkt.id, mc_protocol::packets::PLAY_SET_CONTAINER_CONTENT_S2C_ID);
+        let (content, _) = mc_protocol::packets::SetContainerContent::decode_body(&pkt.body).unwrap();
+        let cobble = mc_registry::item_id("minecraft:cobblestone").unwrap() as i32;
+        assert!(content.slots.iter().any(|s| s.item_id == cobble && s.count == 1));
+        // 复核端点看到同一终态；落盘文件存在（永不丢物品：掉线重进也在）。
+        let r = route(&get("/api/inventory?username=Giver"), &st);
+        assert_eq!(r.status, 200);
+        let inv = body_json(&r);
+        assert_eq!(inv["conn_id"], 11);
+        assert!(inv["slots"].as_array().unwrap().iter().any(|s| s[1] == cobble && s[2] == 1));
+        let dir = st.drops.save_dir();
+        assert!(mc_world::PlayerInventory::save_path(&dir, "Giver", 777).exists());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn give_reports_leftover_when_full_and_undelivered_when_gone() {
+        let st = test_state();
+        let stone = mc_registry::item_id("minecraft:stone").unwrap() as i32;
+        // 背包可填充槽（27 主 + 9 快捷 + 1 副手）中空的 36 格全部塞满石头
+        //（槽 36 已有开局石头，故只填 36 次；0-8 合成格 add_item 永不碰）。
+        st.drops.load_inventory(21, "Full");
+        st.drops.with_inventory(21, |inv| {
+            for _ in 0..36 {
+                assert_eq!(inv.add_item(stone, 64), 0);
+            }
+        });
+        let (tx, rx) = crossbeam_channel::unbounded();
+        st.hub.register_with_name(21, tx, 2, (0.0, 64.0, 0.0), "Full".into(), "127.0.0.1:3".into());
+        // 满包：64 个 dirt 一个都装不下，leftover 如实返回 64，但包仍投递（全量同步）。
+        let r = route(
+            &post("/api/give", r#"{"username":"Full","item":"minecraft:dirt","count":64}"#),
+            &st,
+        );
+        assert_eq!(r.status, 200);
+        let v = body_json(&r);
+        assert_eq!(v["leftover"], 64);
+        assert_eq!(v["delivered"], true);
+        assert!(rx.try_recv().is_ok());
+        // 对端已走（receiver 丢了）：写入+落盘仍生效，delivered=false。
+        drop(rx);
+        st.hub.register_with_name(
+            22,
+            crossbeam_channel::unbounded().0,
+            2,
+            (0.0, 64.0, 0.0),
+            "Gone".into(),
+            "127.0.0.1:4".into(),
+        );
+        st.drops.load_inventory(22, "Gone");
+        let (tx2, rx2) = crossbeam_channel::unbounded::<mc_network::QueuedPacket>();
+        drop(rx2);
+        st.hub.unregister(22);
+        st.hub.register_with_name(22, tx2, 2, (0.0, 64.0, 0.0), "Gone".into(), "127.0.0.1:4".into());
+        let r = route(&post("/api/give", r#"{"username":"Gone","item":"stone","count":5}"#), &st);
+        assert_eq!(r.status, 200);
+        let v = body_json(&r);
+        assert_eq!(v["leftover"], 0);
+        assert_eq!(v["delivered"], false, "dead outbox must report undelivered");
+        // 但背包终态可查（永不丢物品）。
+        let inv = route(&get("/api/inventory?username=Gone"), &st);
+        let stone_total: i64 = body_json(&inv)["slots"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter(|s| s[1] == stone as i64)
+            .map(|s| s[2].as_i64().unwrap())
+            .sum();
+        assert!(stone_total >= 5 + 64, "starter stone + given stone must persist, got {stone_total}");
+        let _ = std::fs::remove_dir_all(st.drops.save_dir());
+    }
+
+    #[test]
+    fn kick_removes_online_entry_and_save_respects_dirty() {
+        let st = test_state();
+        let (tx, rx) = crossbeam_channel::unbounded();
+        st.hub.register_with_name(31, tx, 2, (0.0, 64.0, 0.0), "KickMe".into(), "127.0.0.1:5".into());
+        assert_eq!(body_json(&route(&get("/api/online"), &st))["count"], 1);
+        let r = route(&post("/api/kick", r#"{"username":"KickMe"}"#), &st);
+        assert_eq!(r.status, 200);
+        assert_eq!(body_json(&r)["kicked"], true);
+        let pkt = rx.try_recv().unwrap();
+        assert_eq!(pkt.id, mc_network::ADMIN_KICK_PACKET_ID);
+        // 干净世界：save 不碰盘。
+        let dir = st.world_dir.clone();
+        let _ = std::fs::remove_dir_all(&dir);
+        let r = route(&post("/api/save", ""), &st);
+        assert_eq!(r.status, 200);
+        let v = body_json(&r);
+        assert_eq!(v["saved"], false);
+        assert!(!mc_world::MutableWorld::save_path(&dir, 777).exists());
+        // 脏世界：找一格与石头不同的位置落子（基底恰为石头时会保稀疏删条目），
+        // save 落盘且 overrides 对得上。
+        let y = (60..300)
+            .find(|&y| st.mutable.get(1, y, 1) != mc_world::STONE_BLOCK_ID)
+            .expect("must find a non-stone cell");
+        st.mutable.set(1, y, 1, mc_world::STONE_BLOCK_ID);
+        let r = route(&post("/api/save", ""), &st);
+        assert_eq!(body_json(&r), serde_json::json!({"ok": true, "saved": true, "overrides": 1}));
+        assert!(mc_world::MutableWorld::save_path(&dir, 777).exists());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+}

@@ -11,7 +11,7 @@ pub mod login_route;
 pub mod play_events;
 pub mod status_route;
 
-pub use broadcast::{BroadcastHub, QueuedPacket};
+pub use broadcast::{OnlineEntry, ADMIN_KICK_PACKET_ID, BroadcastHub, QueuedPacket};
 pub use chunk_cache::{
     encode_chunk_data_body, encode_chunk_data_body_mutable, ChunkCache, ChunkCacheStats,
     DEFAULT_CHUNK_CACHE_CAPACITY,

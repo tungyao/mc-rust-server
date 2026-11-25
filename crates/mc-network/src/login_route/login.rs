@@ -388,13 +388,16 @@ async fn enter_play_inner(
     send_join_inventory(stream, profile, opts).await;
     // P21 广播队列：Join 序列完成后注册，保证接收方已持有完整视距区块，
     // 广播包不会排在区块包前面；初始位置取出生点，移动包随后更新。
+    // P25：带上用户名/地址，管理面板 `/api/online` 直接读快照。
     let outbox = opts.hub.as_ref().map(|hub| {
         let (tx, rx) = crossbeam_channel::unbounded::<QueuedPacket>();
-        hub.register(
+        hub.register_with_name(
             opts.conn_id,
             tx,
             radius,
             (spawn.0 as f64 + 0.5, spawn.1 as f64, spawn.2 as f64 + 0.5),
+            profile.username.clone(),
+            addr.to_string(),
         );
         rx
     });

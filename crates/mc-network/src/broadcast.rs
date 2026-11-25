@@ -21,6 +21,7 @@
 use mc_core::ChunkPos;
 use std::collections::HashMap;
 use std::sync::RwLock;
+use std::time::Instant;
 
 /// 排队给其它连接 `play_loop` 代写的原始 S2C 包（包 ID + 未压缩包体；
 ///
@@ -35,7 +36,31 @@ struct HubConn {
     tx: crossbeam_channel::Sender<QueuedPacket>,
     radius: i32,
     pos: (f64, f64, f64),
+    /// P25 管理面板：Join 完成时的用户名（离线模式大小写精确匹配即身份）。
+    username: String,
+    /// P25 管理面板：对端地址（`SocketAddr` 字符串形式，仅展示/诊断用）。
+    addr: String,
+    /// P25 管理面板：注册时刻（`snapshot` 由此算在线时长）。
+    since: Instant,
 }
+
+/// P25 管理面板在线条目（`snapshot` 快照的一行；`pos` 为 hub 记录的最近位置）。
+#[derive(Debug, Clone)]
+pub struct OnlineEntry {
+    pub conn_id: u64,
+    pub username: String,
+    pub addr: String,
+    pub pos: (f64, f64, f64),
+    pub radius: i32,
+    /// 注册至今的秒数（快照时刻计算）。
+    pub online_secs: u64,
+}
+
+/// P25 管理面板踢人信号：不是真实包 ID（真实包 ID 均为非负 varint），
+/// `play_loop` 在 `drain_outbox` 看到它即主动退出走统一清理路径
+/// （`unload`/`unregister`/`Disconnect`，与断线完全一致）。
+/// 这就是计划 §6.4 的备选"admin 指令通道"：不断线猜包、不手写踢出包体。
+pub const ADMIN_KICK_PACKET_ID: i32 = -1;
 
 /// 全服共享的广播 hub（`Arc` 进 `NetConfig`/`PlayOptions`）。
 pub struct BroadcastHub {
@@ -71,10 +96,55 @@ impl BroadcastHub {
         radius: i32,
         pos: (f64, f64, f64),
     ) {
+        self.register_with_name(conn_id, tx, radius, pos, String::new(), String::new());
+    }
+
+    /// P25：带用户名/地址的注册（Play Join 完成后调用；旧 `register` 保留给旧单测）。
+    pub fn register_with_name(
+        &self,
+        conn_id: u64,
+        tx: crossbeam_channel::Sender<QueuedPacket>,
+        radius: i32,
+        pos: (f64, f64, f64),
+        username: String,
+        addr: String,
+    ) {
         self.conns
             .write()
             .unwrap_or_else(|p| p.into_inner())
-            .insert(conn_id, HubConn { tx, radius, pos });
+            .insert(conn_id, HubConn { tx, radius, pos, username, addr, since: Instant::now() });
+    }
+
+    /// P25：在线快照（读锁内只做内存拷贝，丢锁后算时长；调用方拿到快照后再
+    /// `unicast`/`broadcast`，绝不在持 hub 读锁时调它们，见计划 §6.2）。
+    pub fn snapshot(&self) -> Vec<OnlineEntry> {
+        let now = Instant::now();
+        self.conns
+            .read()
+            .unwrap_or_else(|p| p.into_inner())
+            .iter()
+            .map(|(id, c)| OnlineEntry {
+                conn_id: *id,
+                username: c.username.clone(),
+                addr: c.addr.clone(),
+                pos: c.pos,
+                radius: c.radius,
+                online_secs: now.duration_since(c.since).as_secs(),
+            })
+            .collect()
+    }
+
+    /// P25：按用户名精确匹配（大小写敏感）找 conn_id；重名/离线返回 `None`。
+    /// 离线模式同名即同一身份：先后上线只会留一个 hub 条目（旧连接退出即注销），
+    /// 同时在线的同名连接取 conn_id 最大者（最新注册）。
+    pub fn find_conn_by_name(&self, username: &str) -> Option<u64> {
+        self.conns
+            .read()
+            .unwrap_or_else(|p| p.into_inner())
+            .iter()
+            .filter(|(_, c)| c.username == username)
+            .map(|(id, _)| *id)
+            .max()
     }
 
     /// 注销连接（`enter_play_with_options` 退出路径，与 `Disconnect` 投递同点，
@@ -116,6 +186,12 @@ impl BroadcastHub {
             Some(tx) => tx.try_send(QueuedPacket { id, body }).is_ok(),
             None => false,
         }
+    }
+
+    /// P25 踢人：向目标连接排一个踢出信号，其 `play_loop` 在下个节拍（≤50ms）
+    /// 看到后主动退出，走与断线完全一致的清理路径。返回 `false` = 已离线。
+    pub fn kick(&self, conn_id: u64) -> bool {
+        self.unicast(conn_id, ADMIN_KICK_PACKET_ID, Vec::new())
     }
 
     /// 向事件区块视距内的其它连接各排队一份（`except` 本人不收；`Ack` 不要走这里）。
@@ -195,5 +271,67 @@ mod tests {
         assert_eq!(hub.len(), 1);
         assert!(!hub.unicast(2, 0x08, vec![]));
         hub.unregister(2);
+    }
+
+    #[test]
+    fn snapshot_reports_name_addr_pos_and_uptime() {
+        let hub = BroadcastHub::new();
+        let (atx, _arx) = crossbeam_channel::unbounded();
+        hub.register(1, atx, 2, (369.5, 73.0, 381.5));
+        // 旧 register 用户名/地址为空，快照仍可用（位置/时长正常）。
+        let snap = hub.snapshot();
+        assert_eq!(snap.len(), 1);
+        assert_eq!(snap[0].conn_id, 1);
+        assert!(snap[0].username.is_empty());
+        assert_eq!(snap[0].pos, (369.5, 73.0, 381.5));
+        assert_eq!(snap[0].radius, 2);
+    }
+
+    #[test]
+    fn register_with_name_snapshot_and_find_by_name() {
+        let hub = BroadcastHub::new();
+        let (atx, _arx) = crossbeam_channel::unbounded();
+        let (btx, _brx) = crossbeam_channel::unbounded();
+        hub.register_with_name(
+            7,
+            atx,
+            4,
+            (1.5, 64.0, 2.5),
+            "Steve".into(),
+            "127.0.0.1:50001".into(),
+        );
+        hub.register_with_name(9, btx, 4, (3.5, 64.0, 4.5), "Alex".into(), "127.0.0.1:50002".into());
+        let mut snap = hub.snapshot();
+        snap.sort_by_key(|e| e.conn_id);
+        assert_eq!(snap.len(), 2);
+        assert_eq!(snap[0].username, "Steve");
+        assert_eq!(snap[0].addr, "127.0.0.1:50001");
+        assert_eq!(snap[1].username, "Alex");
+        // 精确匹配：大小写敏感。
+        assert_eq!(hub.find_conn_by_name("Steve"), Some(7));
+        assert_eq!(hub.find_conn_by_name("steve"), None);
+        assert_eq!(hub.find_conn_by_name("Nobody"), None);
+        // 位置更新后快照跟随。
+        hub.update_pos(7, (10.5, 70.0, 20.5));
+        let e = hub.snapshot().into_iter().find(|e| e.conn_id == 7).unwrap();
+        assert_eq!(e.pos, (10.5, 70.0, 20.5));
+        // 注销后快照消失、按名查找同步消失（无幽灵在线）。
+        hub.unregister(7);
+        assert!(hub.snapshot().iter().all(|e| e.conn_id != 7));
+        assert_eq!(hub.find_conn_by_name("Steve"), None);
+    }
+
+    #[test]
+    fn kick_signals_only_target_and_fails_when_offline() {
+        let hub = BroadcastHub::new();
+        let (atx, arx) = crossbeam_channel::unbounded();
+        let (btx, brx) = crossbeam_channel::unbounded();
+        hub.register_with_name(1, atx, 2, (0.0, 64.0, 0.0), "A".into(), "x".into());
+        hub.register_with_name(2, btx, 2, (0.0, 64.0, 0.0), "B".into(), "y".into());
+        assert!(hub.kick(1));
+        let pkt = arx.try_recv().unwrap();
+        assert_eq!(pkt.id, super::ADMIN_KICK_PACKET_ID);
+        assert!(brx.try_recv().is_err(), "kick must not disturb other connections");
+        assert!(!hub.kick(999), "kick of offline conn must fail");
     }
 }

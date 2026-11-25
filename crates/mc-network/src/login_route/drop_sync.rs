@@ -218,13 +218,28 @@ pub(crate) async fn send_full_inventory(
     opts: &PlayOptions,
     drops: &DropState,
 ) -> io::Result<()> {
-    let (slots, carried, state) = drops
-        .with_inventory(opts.conn_id, |inv| {
-            (inv.to_protocol_slots(), inv.cursor_slot(), inv.next_state())
-        })
-        .unwrap_or_else(|| {
-            (vec![packets::Slot::empty(); packets::PLAYER_INVENTORY_SLOT_COUNT], packets::Slot::empty(), 1)
-        });
+    let body = build_full_inventory_body(drops, opts.conn_id).unwrap_or_else(|| {
+        let mut body = Vec::new();
+        packets::SetContainerContent {
+            window_id: packets::PLAYER_INVENTORY_WINDOW_ID,
+            state_id: 1,
+            slots: vec![packets::Slot::empty(); packets::PLAYER_INVENTORY_SLOT_COUNT],
+            carried: packets::Slot::empty(),
+        }
+        .encode_body(&mut body);
+        body
+    });
+    write_packet_any(stream, packets::PLAY_SET_CONTAINER_CONTENT_S2C_ID, &body, opts.threshold)
+        .await
+}
+
+/// P25 管理面板：组全量背包同步包体（纯函数，不碰 socket、不落盘）。
+/// 返回 `None` = 该 conn 已无背包（已下线/从未 Join）；调用方（管理线程）据此
+/// 判定 delivered。背包锁临界区内一次拷贝 + 组包，`next_state` 单调递增。
+pub fn build_full_inventory_body(drops: &DropState, conn_id: u64) -> Option<Vec<u8>> {
+    let (slots, carried, state) = drops.with_inventory(conn_id, |inv| {
+        (inv.to_protocol_slots(), inv.cursor_slot(), inv.next_state())
+    })?;
     let mut body = Vec::new();
     packets::SetContainerContent {
         window_id: packets::PLAYER_INVENTORY_WINDOW_ID,
@@ -233,8 +248,7 @@ pub(crate) async fn send_full_inventory(
         carried,
     }
     .encode_body(&mut body);
-    write_packet_any(stream, packets::PLAY_SET_CONTAINER_CONTENT_S2C_ID, &body, opts.threshold)
-        .await
+    Some(body)
 }
 
 /// 单槽同步（放置消耗后）。
@@ -482,4 +496,45 @@ pub(crate) async fn sync_view_entities(
         }
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::sync::atomic::{AtomicU64, Ordering};
+
+    static SEQ: AtomicU64 = AtomicU64::new(0);
+
+    fn unique_dir(tag: &str) -> std::path::PathBuf {
+        let n = SEQ.fetch_add(1, Ordering::SeqCst);
+        std::env::temp_dir().join(format!("mc-drop-body-{}-{tag}-{n}", std::process::id()))
+    }
+
+    #[test]
+    fn full_inventory_body_matches_inventory_state() {
+        let dir = unique_dir("inv");
+        let drops = DropState::new(dir.clone(), 1);
+        // 未 Join 的 conn：无背包，组包返回 None（管理线程据此判 delivered=false）。
+        assert!(build_full_inventory_body(&drops, 42).is_none());
+        drops.load_inventory(42, "body-test");
+        // 新背包开局：hotbar 槽 36 有 64 石头（item 1）。
+        let body = build_full_inventory_body(&drops, 42).expect("joined conn must have a body");
+        let (content, _) = packets::SetContainerContent::decode_body(&body).unwrap();
+        assert_eq!(content.window_id, packets::PLAYER_INVENTORY_WINDOW_ID);
+        assert_eq!(content.slots.len(), packets::PLAYER_INVENTORY_SLOT_COUNT);
+        assert_eq!(content.slots[36], packets::Slot { count: 64, item_id: 1 });
+        assert_eq!(content.carried, packets::Slot::empty());
+        // 加 cobble 后重组包：新包体含新增物，且 state_id 单调递增。
+        let cobble = mc_world::drops::ITEM_COBBLESTONE;
+        drops.with_inventory(42, |inv| inv.add_item(cobble, 65));
+        let body2 = build_full_inventory_body(&drops, 42).unwrap();
+        let (c2, _) = packets::SetContainerContent::decode_body(&body2).unwrap();
+        assert!(c2.state_id > content.state_id, "state_id must be monotonic");
+        let total: i32 =
+            c2.slots.iter().filter(|s| s.item_id == cobble).map(|s| s.count).sum();
+        assert_eq!(total, 65, "added cobble must appear in the sync body");
+        drops.unload_inventory(42, "body-test");
+        assert!(build_full_inventory_body(&drops, 42).is_none(), "after unload no body");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
 }

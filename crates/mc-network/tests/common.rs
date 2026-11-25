@@ -1,3 +1,4 @@
+#![allow(dead_code)]
 //! Play 集成测试共享脚手架（`play_stream.rs` / `play_actions.rs` 共用）。
 use mc_network::{NetConfig, PlayEvent, serve};
 use mc_protocol::packets::{self, Handshake, HandshakeNextState, HANDSHAKE_PACKET_ID};
