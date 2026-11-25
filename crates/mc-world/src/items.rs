@@ -380,4 +380,41 @@ mod tests {
         both.sort();
         assert_eq!(both, vec![1001, 1002]);
     }
+
+    /// R4 回归（服务端状态级验证，真机手感 T1–T13 仍需人工确认）：
+    /// 水平漂移跨到相邻列后，支撑被挖空只能用「生成时的原列」重算，
+    /// 不能用漂移后的列；`chunk` 随位置更新，但 `support` 的 x/z 不跟着漂。
+    #[test]
+    fn resume_fall_keeps_original_support_column_after_horizontal_drift() {
+        let mut es = ItemEntities::new();
+        // 原列 (0,0)，支撑方块 (0,68,0)。从高处落下 + 明显水平速度，保证跨列。
+        spawn_one(&mut es, 1001, 0.5, 100.0, 0.5, 69.0);
+        let original_support = es.get(1001).unwrap().support;
+        assert_eq!(original_support, Some((0, 68, 0)));
+        {
+            let e = es.entities.iter_mut().find(|e| e.id == 1001).unwrap();
+            e.vel = (0.5, 0.25, 0.4);
+        }
+        let mut landed = false;
+        for _ in 0..300 {
+            es.tick();
+            if es.get(1001).unwrap().on_ground {
+                landed = true;
+                break;
+            }
+        }
+        assert!(landed, "drop must land before its support is dug");
+        let e = es.get(1001).unwrap();
+        let drifted_col = (e.pos.0.floor() as i32, e.pos.2.floor() as i32);
+        assert_ne!(drifted_col, (0, 0), "horizontal velocity must cross into a neighbouring column");
+        assert_eq!(e.support, original_support, "resting support stays on the original column");
+
+        // 原列支撑被挖空 → resume_fall 只更新 y，x/z 必须仍是原列。
+        assert!(es.find_unsupported(|_| false).contains(&(1001, original_support.unwrap())));
+        assert!(es.resume_fall(1001, 67.0));
+        let e = es.get(1001).unwrap();
+        assert_eq!(e.support, Some((0, 66, 0)), "x/z must not follow the drifted column");
+        assert_eq!(e.rest_y, 67.0, "rest_y must follow the new support height");
+        assert!(!e.on_ground, "support loss must resume falling");
+    }
 }

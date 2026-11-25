@@ -53,6 +53,9 @@ pub enum NetError {
     Io(#[from] std::io::Error),
 }
 
+/// 监听入口：全服唯一掉落物理 ticker 在此启动一次（启动逻辑保持不变）。
+/// `DropState::stop_global_tick` 是给测试/生命周期管理用的显式停止句柄，生产入口不调用它。
+/// 相关回归均为服务端状态级验证；真机手感 T1–T13 仍需人工确认。
 pub async fn serve(listener: TcpListener, tx: Sender<NewConnection>, config: NetConfig) -> Result<(), NetError> {
     info!("listening on {:?}", listener.local_addr()?);
     // P18 掉落物理：全服唯一 ticker 在这里启动一次（50ms）。各连接的 play_loop

@@ -1397,3 +1397,112 @@ async fn drop_recomputes_rest_y_when_support_is_dug() {
     drop(rx);
     let _ = std::fs::remove_dir_all(&dir);
 }
+
+/// R7 回归（服务端状态级验证，真机手感 T1–T13 仍需人工确认）：
+/// 掉落物出视距 → 收到 Remove 且 `known` 清除；走回视距 → 必须重新收到
+/// `PLAY_SPAWN_ENTITY_S2C_ID`（不是只收到位置同步包）且 `known` 恢复。
+/// 全部断言走真实 TCP 包流 + 服务端共享状态，不模拟客户端物理。
+#[tokio::test]
+async fn drop_leaves_view_then_respawns_on_return() {
+    use mc_network::DropState;
+    let dir = std::env::temp_dir().join(format!("mc-p18-viewreturn-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    let (tx, rx) = crossbeam_channel::unbounded::<PlayEvent>();
+    let mutable = Arc::new(MutableWorld::new(DEFAULT_SEED));
+    let cache = Arc::new(ChunkCache::new(DEFAULT_SEED, 64).with_mutable(Arc::clone(&mutable)));
+    let drops = Arc::new(DropState::new(dir.clone(), DEFAULT_SEED));
+    let config = NetConfig::new(100, "view-return".into(), Arc::new(AtomicUsize::new(0)))
+        .with_play_events(tx)
+        .with_view_distance(2)
+        .with_chunk_cache(cache)
+        .with_mutable_world(Arc::clone(&mutable))
+        .with_drops(Arc::clone(&drops));
+    let addr = spawn_server(config).await;
+    let mut s = login_and_join(addr, "ViewReturn", 2).await;
+
+    // Join 背包 Content 先消费掉。
+    let (id, _) = read_frame_timeout(&mut s, Duration::from_secs(5)).await.unwrap();
+    assert_eq!(id, packets::PLAY_SET_CONTAINER_CONTENT_S2C_ID);
+
+    let spawn = WorldGen::new(DEFAULT_SEED).spawn_pos();
+    let (fx, fz) = (spawn.0 as f64 + 0.5, spawn.2 as f64 + 0.5);
+    let (gx, gy, gz) = (spawn.0, spawn.1 - 1, spawn.2);
+    assert_eq!(mutable.get(gx, gy, gz), 9, "spawn footing must be grass_block(9)");
+
+    // 挖草出土：服务端 last_pos 默认就是出生点，无需先发移动包。
+    let mut body = Vec::new();
+    packets::PlayerAction { status: 2, x: gx, y: gy, z: gz, face: 1, sequence: 61 }
+        .encode_body(&mut body);
+    mc_network::framing::write_packet(&mut s, packets::PLAY_PLAYER_ACTION_C2S_ID, &body)
+        .await
+        .unwrap();
+
+    let mut drop_id = None;
+    for _ in 0..16 {
+        let (id, payload) = read_frame_timeout(&mut s, Duration::from_secs(5)).await.unwrap();
+        if id == packets::PLAY_SPAWN_ENTITY_S2C_ID {
+            drop_id = Some(packets::SpawnItemEntity::decode_body(&payload).unwrap().0.entity_id);
+            break;
+        }
+    }
+    let drop_id = drop_id.expect("dig must spawn a drop");
+    // Spawn 之后紧跟 SetEntityData（send_spawn 在写完两包后才 mark_known）。
+    let (id, _) = read_frame_timeout(&mut s, Duration::from_secs(5)).await.unwrap();
+    assert_eq!(id, packets::PLAY_SET_ENTITY_DATA_S2C_ID);
+
+    let conn_id = match next_event(&rx).await {
+        PlayEvent::BlockEdit { conn_id, .. } => conn_id,
+        other => panic!("expected block edit event, got {other:?}"),
+    };
+    let deadline = std::time::Instant::now() + Duration::from_secs(2);
+    while !drops.is_known(conn_id, drop_id) && std::time::Instant::now() < deadline {
+        tokio::time::sleep(Duration::from_millis(5)).await;
+    }
+    assert!(drops.is_known(conn_id, drop_id), "spawn must mark the drop known");
+
+    // 先离开掉落物 4 格（同 chunk，不触发视距批次），避免 delay 到期后被拾取。
+    send_pos_y(&mut s, fx + 4.0, 65.0, fz).await;
+    // 走出视距：出生 chunk 23 → chunk 27（半径 2，切比雪夫距离 4）。
+    send_pos_y(&mut s, 440.5, 65.0, fz).await;
+
+    let mut saw_remove = false;
+    for _ in 0..300 {
+        let (id, payload) = read_frame_timeout(&mut s, Duration::from_secs(5)).await.unwrap();
+        if id == packets::PLAY_REMOVE_ENTITIES_S2C_ID {
+            let (r, _) = packets::RemoveEntities::decode_body(&payload).unwrap();
+            if r.ids.contains(&drop_id) {
+                saw_remove = true;
+                break;
+            }
+        }
+    }
+    assert!(saw_remove, "leaving view must send RemoveEntities for the drop");
+    assert!(!drops.is_known(conn_id, drop_id), "RemoveEntities must unmark known");
+
+    // 走回原处附近（仍在 chunk 23、距掉落物 4 格，保证不会被立刻拾取）。
+    send_pos_y(&mut s, fx + 4.0, 65.0, fz).await;
+    let mut saw_spawn = false;
+    for _ in 0..300 {
+        let (id, payload) = read_frame_timeout(&mut s, Duration::from_secs(5)).await.unwrap();
+        if id == packets::PLAY_SPAWN_ENTITY_S2C_ID {
+            let (sp, _) = packets::SpawnItemEntity::decode_body(&payload).unwrap();
+            assert_eq!(sp.entity_id, drop_id, "return must respawn the same drop entity");
+            saw_spawn = true;
+            break;
+        }
+    }
+    assert!(
+        saw_spawn,
+        "re-entering view must send PLAY_SPAWN_ENTITY_S2C_ID, not just position updates"
+    );
+    // mark_known 在 Spawn + Data 两包写完后执行，轮询等服务端状态落定。
+    let deadline = std::time::Instant::now() + Duration::from_secs(2);
+    while !drops.is_known(conn_id, drop_id) && std::time::Instant::now() < deadline {
+        tokio::time::sleep(Duration::from_millis(5)).await;
+    }
+    assert!(drops.is_known(conn_id, drop_id), "respawn must restore known");
+
+    drop(s);
+    drop(rx);
+    let _ = std::fs::remove_dir_all(&dir);
+}

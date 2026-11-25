@@ -46,6 +46,9 @@ pub struct DropState {
     tick_count: AtomicU64,
     /// 全服 ticker 是否已启动（每份 DropState 至多一个）。
     tick_started: AtomicBool,
+    /// 当前代 ticker 的停止标志；每次 `start_global_tick` 装一个全新的 Arc。
+    /// `stop` 只置旧代标志，`restart` 装新标志，旧线程即使还在 sleep 也不会误读新标志。
+    stop_flag: Mutex<Option<Arc<AtomicBool>>>,
     save_dir: PathBuf,
     seed: i64,
 }
@@ -59,6 +62,7 @@ impl DropState {
             next_id: AtomicI32::new(FIRST_DROP_ENTITY_ID),
             tick_count: AtomicU64::new(0),
             tick_started: AtomicBool::new(false),
+            stop_flag: Mutex::new(None),
             save_dir,
             seed,
         }
@@ -79,17 +83,35 @@ impl DropState {
     ///   里也会被调用，本函数只在显式调用时启动，不依赖任何 runtime。
     /// - 重复调用只生效一次（返回 `false`）；多连接共享同一份 `Arc<DropState>`，
     ///   不会因为连接数增加而产生第二份物理 tick。
+    /// - 显式停止用 [`Self::stop_global_tick`]：线程在下一个 50ms 周期检查停止标志后
+    ///   退出（最多再等一个节拍，不再多跑一次 `physics_tick`）。停止后可再次 start：
+    ///   `tick_count` **不重置**、继续累加；实体/背包等服务端状态也原样保留。
+    /// - 每代 ticker 用独立的 `Arc<AtomicBool>`：stop 只影响旧代，restart 装新标志，
+    ///   旧线程即使仍在 sleep 也不会因共用标志被复位而变成第二个 ticker。
+    /// - 服务端状态级验证；真机手感 T1–T13 仍需人工确认。
     pub fn start_global_tick(self: &Arc<Self>, world: Arc<MutableWorld>) -> bool {
+        // 与 stop 共用同一把锁：tick_started 切换与 stop_flag 安装必须原子，
+        // 否则 stop 与 restart 交错时会误停新代，或留下一个无人能停的幽灵 ticker。
+        let mut guard = self.stop_flag.lock().unwrap_or_else(|p| p.into_inner());
         if self.tick_started.swap(true, Ordering::SeqCst) {
             return false;
         }
+        let stop = Arc::new(AtomicBool::new(false));
+        *guard = Some(Arc::clone(&stop));
+        drop(guard);
+
         let me = Arc::clone(self);
+        let thread_stop = Arc::clone(&stop);
         let spawned = std::thread::Builder::new()
             .name("mc-drop-tick".to_string())
             .spawn(move || {
+                let stop = thread_stop;
                 let period = Duration::from_millis(DROP_TICK_MS);
                 let mut next = Instant::now();
                 loop {
+                    if stop.load(Ordering::SeqCst) {
+                        break;
+                    }
                     next += period;
                     let now = Instant::now();
                     if next > now {
@@ -98,6 +120,9 @@ impl DropState {
                         // 落后超过一个节拍：重新对齐，避免忙等追帧。
                         next = now + period;
                     }
+                    if stop.load(Ordering::SeqCst) {
+                        break;
+                    }
                     me.physics_tick(&world);
                 }
             });
@@ -105,10 +130,32 @@ impl DropState {
             Ok(_) => true,
             Err(e) => {
                 warn!("start global drop tick failed ({e})");
+                stop.store(true, Ordering::SeqCst);
+                let mut guard = self.stop_flag.lock().unwrap_or_else(|p| p.into_inner());
                 self.tick_started.store(false, Ordering::SeqCst);
+                *guard = None;
                 false
             }
         }
+    }
+
+    /// 停止全服唯一的掉落物理 ticker（幂等）。
+    ///
+    /// - 返回 `true` 表示确实停了一个运行中的 ticker；`false` 表示当前没有 ticker。
+    /// - 只置停止标志、不 join：线程在下一个 50ms 检查点自行退出；`tick_count`
+    ///   不重置，实体/背包状态也不动。之后可再次调用 [`Self::start_global_tick`]，
+    ///   新代 ticker 从原计数继续累加。
+    /// - 服务端状态级验证；真机手感 T1–T13 仍需人工确认。
+    pub fn stop_global_tick(&self) -> bool {
+        // 与 start 同一把锁：先确认是哪一代、再置停，避免新代标志被旧 stop 误伤。
+        let guard = self.stop_flag.lock().unwrap_or_else(|p| p.into_inner());
+        if !self.tick_started.swap(false, Ordering::SeqCst) {
+            return false;
+        }
+        if let Some(stop) = guard.as_ref() {
+            stop.store(true, Ordering::SeqCst);
+        }
+        true
     }
 
     /// 全服唯一物理 tick：支撑被挖空的重算与 `ItemEntities::tick()` 在同一把写锁内，
@@ -267,5 +314,41 @@ mod tests {
         let e = snap.get(id).unwrap();
         assert_eq!(e.rest_y, 68.0, "rest_y must follow the next support down");
         assert!(!e.on_ground);
+    }
+
+    /// 停止句柄的可验证语义（服务端状态级验证，真机手感 T1–T13 仍需人工确认）：
+    /// 启动后 tick_count 增长 → stop 后不再增长 → 可再次 start 且计数继续累加。
+    #[test]
+    fn global_ticker_can_be_stopped_and_restarted() {
+        let world = Arc::new(MutableWorld::new(1));
+        let st = Arc::new(DropState::new(std::env::temp_dir(), 1));
+
+        assert!(st.start_global_tick(Arc::clone(&world)));
+        assert!(!st.start_global_tick(Arc::clone(&world)), "duplicate start must be rejected");
+
+        let c0 = st.tick_count();
+        let deadline = Instant::now() + Duration::from_secs(2);
+        while st.tick_count() < c0 + 2 && Instant::now() < deadline {
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        assert!(st.tick_count() >= c0 + 2, "started ticker must advance tick_count");
+
+        assert!(st.stop_global_tick(), "stop must report it stopped a live ticker");
+        assert!(!st.stop_global_tick(), "repeated stop is a no-op");
+        // 允许 stop 前已开始的最后一次 physics_tick 落地，之后再观察一个静默窗口。
+        std::thread::sleep(Duration::from_millis(100));
+        let stopped_at = st.tick_count();
+        std::thread::sleep(Duration::from_millis(200));
+        assert_eq!(st.tick_count(), stopped_at, "stopped ticker must not tick again");
+
+        assert!(st.start_global_tick(Arc::clone(&world)), "restart after stop must work");
+        assert!(!st.start_global_tick(Arc::clone(&world)), "restart still allows only one ticker");
+        let deadline = Instant::now() + Duration::from_secs(2);
+        while st.tick_count() < stopped_at + 2 && Instant::now() < deadline {
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        let after_restart = st.tick_count();
+        assert!(after_restart >= stopped_at + 2, "restarted ticker must keep ticking");
+        assert!(st.stop_global_tick(), "clean up the restarted ticker");
     }
 }
