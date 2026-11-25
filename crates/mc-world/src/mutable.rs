@@ -147,6 +147,28 @@ impl MutableWorld {
         old
     }
 
+    /// 原子条件写（CAS）：仅当当前方块仍为 `expected` 时写入 `id`，返回旧值；
+    /// 已被其它连接改动则返回 `None` 且不落子。用于挖掘的 get+set 去重
+    /// （两连接同时挖同一格只能有一个成功、只生成一份掉落物）。
+    pub fn set_if(&self, x: i32, y: i32, z: i32, expected: u16, id: u16) -> Option<u16> {
+        if !(MIN_Y..=WORLD_TOP_Y).contains(&y) {
+            return None;
+        }
+        let base = self.base_value(x, y, z);
+        let mut inner = self.lock_write();
+        let old = inner.overrides.get(&(x, y, z)).copied().unwrap_or(base);
+        if old != expected {
+            return None;
+        }
+        if id == base {
+            inner.overrides.remove(&(x, y, z));
+        } else {
+            inner.overrides.insert((x, y, z), id);
+        }
+        inner.dirty.insert(chunk_of_block(x, z));
+        Some(old)
+    }
+
     /// 基底单方块值（内部用：set 时判断是否可删条目；调用前已持写锁会死锁，
     /// 故本函数自己不再加锁，只做纯计算）。
     fn base_value(&self, x: i32, y: i32, z: i32) -> u16 {
@@ -227,7 +249,7 @@ impl MutableWorld {
     /// 挖洞穴或地下矿物时掉落物也停在挖掘点附近（而不是瞬移到地表）。全空列回落 MIN_Y。
     /// 单次 `generate_chunk` 扫描（调用方在 spawn 时算一次，tick 内不再查世界）。
     /// 生成后支撑被挖的悬空重算见 `mc_world::items::ItemEntity::support` 与
-    /// `login_route::tick_drops`（每 tick 检测并重算 rest_y）。
+    /// `DropState::start_global_tick`（全服唯一 ticker，每 50ms 检测并重算 rest_y）。
     pub fn drop_rest_y(&self, x: i32, z: i32, from_y: i32) -> i32 {
         let chunk = self.generate_chunk(chunk_of_block(x, z));
         let lx = x.rem_euclid(16) as usize;
@@ -433,6 +455,20 @@ mod tests {
         assert_eq!(m.get(x, y, z), base);
         assert_eq!(m.override_count(), 0, "setting base value must drop the entry");
         assert_eq!(m.dirty_len(), 1);
+    }
+
+    #[test]
+    fn set_if_is_atomic_and_rejects_stale_expected() {
+        let m = MutableWorld::new(DEFAULT_SEED);
+        let (x, y, z) = spawn_top(DEFAULT_SEED);
+        let base = m.get(x, y, z);
+        // 两个连接同时挖同一格：只有期望值匹配的那次能落子。
+        assert_eq!(m.set_if(x, y, z, base, AIR_BLOCK_ID), Some(base));
+        assert_eq!(m.set_if(x, y, z, base, AIR_BLOCK_ID), None, "stale CAS must not drop twice");
+        assert_eq!(m.get(x, y, z), AIR_BLOCK_ID);
+        // 期望为当前空气值时仍可继续写（后续放置走 set，CAS 只用于挖掘去重）。
+        assert_eq!(m.set_if(x, y, z, AIR_BLOCK_ID, STONE_BLOCK_ID), Some(AIR_BLOCK_ID));
+        assert_eq!(m.get(x, y, z), STONE_BLOCK_ID);
     }
 
     #[test]

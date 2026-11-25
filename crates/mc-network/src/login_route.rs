@@ -637,7 +637,9 @@ fn rollback(world: &MutableWorld, x: i32, y: i32, z: i32) -> BlockChange {
 /// - status 2（完成挖掘）：校验通过后破坏方块并按掉落表带出 drops。
 /// - status 1（取消）：只 ack。status 3..=7（丢弃/吃食/换手）：无世界影响，直接忽略。
 /// - 非法（越界/超距/出视距/空气/水）：回滚重发现状；`world` 为 None 时忽略不断线。
-/// 判定内已落子（`set`），调用方负责：缓存失效 + 发 BlockUpdate/Ack + 投递事件。
+/// - 完成挖掘用 `MutableWorld::set_if` 原子 CAS：两连接同时挖同一格只有一方成功并
+///   生成掉落，另一方拿到回滚（现状）且 `drops` 为空。
+/// 判定内已落子（`set_if`），调用方负责：缓存失效 + 发 BlockUpdate/Ack + 投递事件。
 pub fn decide_dig(
     world: Option<&MutableWorld>,
     eye: (f64, f64, f64),
@@ -676,14 +678,29 @@ pub fn decide_dig(
                     drops: Vec::new(),
                 });
             }
-            // 完成挖掘：真正破坏并带出掉落。
-            let old = world.set(x, y, z, mc_world::AIR_BLOCK_ID);
-            let drops = mc_world::drops_for_block(old, x, y, z, world.seed());
-            Some(BlockEditOutcome {
-                sequence: act.sequence,
-                changes: vec![BlockChange { x, y, z, old_id: old, new_id: mc_world::AIR_BLOCK_ID }],
-                drops,
-            })
+            // 完成挖掘：原子条件写。另一个连接已挖掉/改掉此格时 CAS 失败，
+            // 只回现状（不生成第二份掉落），避免 N 连接并发挖一格刷出 N 份物品。
+            match world.set_if(x, y, z, cur, mc_world::AIR_BLOCK_ID) {
+                Some(old) => {
+                    let drops = mc_world::drops_for_block(old, x, y, z, world.seed());
+                    Some(BlockEditOutcome {
+                        sequence: act.sequence,
+                        changes: vec![BlockChange {
+                            x,
+                            y,
+                            z,
+                            old_id: old,
+                            new_id: mc_world::AIR_BLOCK_ID,
+                        }],
+                        drops,
+                    })
+                }
+                None => Some(BlockEditOutcome {
+                    sequence: act.sequence,
+                    changes: vec![rollback(world, x, y, z)],
+                    drops: Vec::new(),
+                }),
+            }
         }
         packets::PLAYER_ACTION_CANCEL_DIG => {
             Some(BlockEditOutcome { sequence: act.sequence, changes: Vec::new(), drops: Vec::new() })
@@ -792,8 +809,9 @@ async fn apply_block_outcome(
 //
 // - 生成：decide_dig 的 drops → alloc id → drop_rest_y 落点 → ItemEntities::spawn
 //   → Spawn(0x01，带初速)+SetEntityData(0x65) 发给本连接；客户端自行模拟弹跳/静止。
-// - 下落：play_loop 每 50ms tick 一次（read 超时即 tick，不改变 10s 半开超时语义），
-//   服务端只维护权威位置用于拾取；不再每 tick 发 Teleport(0x23) 与客户端物理打架。
+// - 下落：全服唯一 ticker（`DropState::start_global_tick`，50ms）跑 ItemEntities::tick()
+//   与支撑重算/age/despawn，与在线连接数无关；连接侧每 50ms 只做拾取 + 视距补/卸 +
+//   despawn 清理 known。服务端只维护权威位置用于拾取，不发 Teleport 与客户端物理打架。
 //   despawn/出视距发 Remove(0x4E)，进视距补发 Spawn。
 // - 拾取：delay 到期 + 与脚位置 <1.5 → TakeItem(0x7F)+Remove，入库，全量 Content 同步。
 // - 背包：Join 全量 Content；放置成功 consume_held + 单槽 Slot 同步；C2S 0x36 切手持。
@@ -993,7 +1011,8 @@ async fn spawn_drops(
     Ok(())
 }
 
-/// 每 50ms tick：下落同步 + despawn + 拾取 + 入库同步。
+/// 每 50ms 连接侧同步（**不是**物理 tick）：视距补/卸 + despawn 清理 + 拾取 + 入库同步。
+/// 物理（下落/age/despawn/支撑重算）只由全服唯一 ticker 跑，本函数绝不调用 items.tick()。
 async fn tick_drops(
     stream: &mut TcpStream,
     opts: &PlayOptions,
@@ -1001,49 +1020,12 @@ async fn tick_drops(
     conn_user: &str,
     last_pos: (f64, f64, f64),
     view: &ChunkView,
-    world: &MutableWorld,
 ) -> io::Result<()> {
-    // 落地高度重算：静息中的掉落物若支撑方块被挖，重算 rest_y 并恢复下落。
-    // 否则会悬空在原高度（用户反馈的 TODO）。
-    let unsupported = {
-        let items = drops.items.lock().unwrap_or_else(|p| p.into_inner());
-        items.find_unsupported(|s| world.get(s.0, s.1, s.2) != mc_world::AIR_BLOCK_ID)
-    };
-    if !unsupported.is_empty() {
-        let mut items = drops.items.lock().unwrap_or_else(|p| p.into_inner());
-        for (id, s) in unsupported {
-            let new_rest = world.drop_rest_y(s.0, s.2, s.1) as f64;
-            items.resume_fall(id, new_rest);
-        }
-    }
-    let (moved, dead) = {
-        let mut items = drops.items.lock().unwrap_or_else(|p| p.into_inner());
-        items.tick()
-    };
-    // 视距一致性：不再每 tick 发 TeleportEntitySync。客户端按 Spawn 中的初速
-    // 自行模拟抛物线/落地弹跳/静止；服务端每 50ms 用绝对坐标覆盖客户端物理，
-    // 会与之反复打架，表现为掉落物“原地快速蹦跶几下”（用户反馈）。这里只做
-    // 进视距补 Spawn / 出视距发 Remove。
-    for id in moved {
-        let chunk = {
-            let items = drops.items.lock().unwrap_or_else(|p| p.into_inner());
-            items.get(id).map(|e| e.chunk)
-        };
-        let Some(chunk) = chunk else { continue };
-        if drop_in_view(view.center(), view.radius(), chunk) {
-            if !drops.is_known(opts.conn_id, id) {
-                send_spawn(stream, opts, drops, id).await?;
-            }
-        } else if drops.is_known(opts.conn_id, id) {
-            send_remove(stream, opts, drops, &[id]).await?;
-        }
-    }
-    // despawn：known 的发 Remove。
-    {
-        let gone: Vec<i32> = dead.into_iter().filter(|id| drops.is_known(opts.conn_id, *id)).collect();
-        send_remove(stream, opts, drops, &gone).await?;
-    }
+    // 视距一致性：遍历全量 ids（moved 仅供权威物理内部使用），进视距补 Spawn /
+    // 出视距发 Remove。不发 TeleportEntitySync，避免与客户端物理打架。
+    sync_view_entities(stream, opts, drops, view).await?;
     // 拾取：delay 到期 + 距离 <1.5 → TakeItem+Remove，入库，全量同步 + 刷盘。
+    // items.pickable + items.remove 在同一把锁内，连接间先到先得，天然互斥。
     let picked: Vec<(i32, i32, i32)> = {
         let mut items = drops.items.lock().unwrap_or_else(|p| p.into_inner());
         let ids = items.pickable(last_pos);
@@ -1055,24 +1037,36 @@ async fn tick_drops(
         }
         out
     };
-    if picked.is_empty() {
-        return Ok(());
-    }
-    for (id, _, count) in &picked {
-        let mut body = Vec::new();
-        packets::TakeItemEntity { collected_id: *id, collector_id: PLAYER_ENTITY_ID, count: *count }
+    if !picked.is_empty() {
+        for (id, _, count) in &picked {
+            let mut body = Vec::new();
+            packets::TakeItemEntity {
+                collected_id: *id,
+                collector_id: PLAYER_ENTITY_ID,
+                count: *count,
+            }
             .encode_body(&mut body);
-        write_packet_any(stream, packets::PLAY_PICKUP_ITEM_S2C_ID, &body, opts.threshold).await?;
+            write_packet_any(stream, packets::PLAY_PICKUP_ITEM_S2C_ID, &body, opts.threshold).await?;
+        }
+        let gone: Vec<i32> = picked.iter().map(|(id, _, _)| *id).collect();
+        send_remove(stream, opts, drops, &gone).await?;
+        for (_, item_id, count) in picked {
+            drops.with_inventory(opts.conn_id, |inv| {
+                inv.add_item(item_id, count);
+            });
+        }
+        send_full_inventory(stream, opts, drops).await?;
+        drops.save_inventory(opts.conn_id, conn_user);
     }
-    let gone: Vec<i32> = picked.iter().map(|(id, _, _)| *id).collect();
+    // despawn 清理放在拾取之后：全局 ticker 移除的过期实体、以及其它连接刚捡走的
+    // 实体，本连接都能在同一 tick 按 known 差集补发 Remove（拾取自己发的已 unmark，
+    // 不会重复）。
+    let known = drops.known_ids(opts.conn_id);
+    let gone: Vec<i32> = {
+        let items = drops.items.lock().unwrap_or_else(|p| p.into_inner());
+        known.into_iter().filter(|id| items.get(*id).is_none()).collect()
+    };
     send_remove(stream, opts, drops, &gone).await?;
-    for (_, item_id, count) in picked {
-        drops.with_inventory(opts.conn_id, |inv| {
-            inv.add_item(item_id, count);
-        });
-    }
-    send_full_inventory(stream, opts, drops).await?;
-    drops.save_inventory(opts.conn_id, conn_user);
     Ok(())
 }
 
@@ -1204,7 +1198,7 @@ async fn play_loop(
     // 否则客户端 30s 收不到 0x2D 会 “连接超时” 断开（2026-11-23 真机实测）。
     let mut last_keepalive = Instant::now();
     let conn_user = user_tag(profile);
-    // P18 掉落 tick 节拍：按墙钟每 50ms 跑一次物理/拾取。
+    // P18 掉落同步节拍：按墙钟每 50ms 跑一次连接侧拾取/视距同步（物理在全局 ticker）。
     // 注意不能只放在读超时分支——原版客户端每 tick 都发移动包（静止也有 StatusOnly），
     // 包流不断时 50ms 超时永不触发，tick 会被饿死：pickup_delay 减不下去，
     // 掉落物看得见但永远捡不起来（P18 回归：busy 连接拾取测试）。
@@ -1229,11 +1223,9 @@ async fn play_loop(
                     debug!("play uuid={} view flush failed ({e}), closing", profile.uuid);
                     break;
                 }
-                if let (Some(ds), Some(world)) = (&opts.drops, mutable) {
-                    if let Err(e) =
-                        tick_drops(stream, opts, ds, &conn_user, last_pos, &view, world).await
-                    {
-                        debug!("play uuid={} drop tick failed ({e}), closing", profile.uuid);
+                if let Some(ds) = &opts.drops {
+                    if let Err(e) = tick_drops(stream, opts, ds, &conn_user, last_pos, &view).await {
+                        debug!("play uuid={} drop sync failed ({e}), closing", profile.uuid);
                         break;
                     }
                 }
@@ -1497,13 +1489,12 @@ async fn play_loop(
             debug!("play uuid={} view flush failed ({e}), closing", profile.uuid);
             break;
         }
-        // 包流不断时也按 50ms 节拍跑掉落 tick，防止读超时分支饿死。
+        // 包流不断时也按 50ms 节拍跑连接侧同步（拾取/视距），防止读超时分支饿死。
+        // 物理 tick 不在这里：全服唯一 ticker 独立运行，不随连接数翻倍。
         if last_drop_tick.elapsed() >= Duration::from_millis(50) {
-            if let (Some(ds), Some(world)) = (&opts.drops, mutable) {
-                if let Err(e) =
-                    tick_drops(stream, opts, ds, &conn_user, last_pos, &view, world).await
-                {
-                    debug!("play uuid={} drop tick failed ({e}), closing", profile.uuid);
+            if let Some(ds) = &opts.drops {
+                if let Err(e) = tick_drops(stream, opts, ds, &conn_user, last_pos, &view).await {
+                    debug!("play uuid={} drop sync failed ({e}), closing", profile.uuid);
                     break;
                 }
             }
@@ -1798,6 +1789,37 @@ mod tests {
             out.drops,
             vec![mc_world::Drop { item_id: mc_world::drops::ITEM_DIRT, count: 1 }]
         );
+    }
+
+    #[test]
+    fn concurrent_finish_dig_on_one_block_drops_once() {
+        // R1：两连接同时挖同一格，set_if 的 CAS 只允许一方成功，不能刷出双份掉落。
+        let world = Arc::new(MutableWorld::new(DEFAULT_SEED));
+        let s = WorldGen::new(DEFAULT_SEED).spawn_pos();
+        let (x, y, z) = (s.0, s.1 - 1, s.2);
+        let feet = (s.0 as f64 + 0.5, s.1 as f64, s.2 as f64 + 0.5);
+        let center = mc_world::chunk_of_block(x, z);
+        let act = packets::PlayerAction {
+            status: packets::PLAYER_ACTION_FINISH_DIG, x, y, z, face: 1, sequence: 7,
+        };
+        let barrier = Arc::new(std::sync::Barrier::new(2));
+        let handles: Vec<_> = (0..2)
+            .map(|_| {
+                let world = Arc::clone(&world);
+                let barrier = Arc::clone(&barrier);
+                std::thread::spawn(move || {
+                    barrier.wait();
+                    decide_dig(Some(&world), eye_of(feet), center, 2, &act).unwrap()
+                })
+            })
+            .collect();
+        let outcomes: Vec<_> = handles.into_iter().map(|h| h.join().unwrap()).collect();
+        assert_eq!(
+            outcomes.iter().filter(|o| !o.drops.is_empty()).count(),
+            1,
+            "two concurrent FINISH_DIG must not produce two drops: {outcomes:?}"
+        );
+        assert_eq!(world.get(x, y, z), mc_world::AIR_BLOCK_ID, "block must be dug exactly once");
     }
 
     #[test]

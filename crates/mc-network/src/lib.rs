@@ -28,6 +28,7 @@ pub use login_route::{
 pub use play_events::PlayEvent;
 
 use crossbeam_channel::Sender;
+use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 use tokio::net::TcpListener;
 use tracing::{debug, info};
@@ -54,6 +55,16 @@ pub enum NetError {
 
 pub async fn serve(listener: TcpListener, tx: Sender<NewConnection>, config: NetConfig) -> Result<(), NetError> {
     info!("listening on {:?}", listener.local_addr()?);
+    // P18 掉落物理：全服唯一 ticker 在这里启动一次（50ms）。各连接的 play_loop
+    // 只做拾取/视距同步，绝不调用 ItemEntities::tick()，否则 N 连接 = N 倍速物理。
+    // 独立 std::thread，不依赖 tokio runtime；DropState::new 在单测里依然无副作用。
+    if let (Some(drops), Some(world)) = (&config.drops, &config.mutable_world) {
+        if drops.start_global_tick(Arc::clone(world)) {
+            info!("global drop physics ticker started ({}ms)", drop_state::DROP_TICK_MS);
+        } else {
+            debug!("global drop physics ticker already running");
+        }
+    }
     loop {
         let (socket, addr) = listener.accept().await?;
         let conn_id = next_conn_id();

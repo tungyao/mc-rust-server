@@ -894,6 +894,89 @@ async fn drop_pickup_works_on_busy_connection() {
     let _ = std::fs::remove_dir_all(&dir);
 }
 
+/// R1 回归：两连接同时在线时物理只 tick 一次。
+/// 旧实现每个 play_loop 都 `items.tick()`：双连接 = 2 倍速（拾取延迟 0.5s→0.25s、
+/// despawn 5min→2.5min）。本用例同时断言全局 tick 计数约为 20/s、且掉落物的
+/// pickup_delay 在 300ms 后仍未归零（双连接旧实现此时已归零）。
+#[tokio::test]
+async fn two_connections_share_one_global_drop_physics_tick() {
+    use mc_network::DropState;
+    let dir = std::env::temp_dir().join(format!("mc-p18-twoconn-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    let (tx, rx) = crossbeam_channel::unbounded::<PlayEvent>();
+    let mutable = Arc::new(MutableWorld::new(DEFAULT_SEED));
+    let cache = Arc::new(ChunkCache::new(DEFAULT_SEED, 64).with_mutable(Arc::clone(&mutable)));
+    let drops = Arc::new(DropState::new(dir.clone(), DEFAULT_SEED));
+    let config = NetConfig::new(100, "drops-twoconn".into(), Arc::new(AtomicUsize::new(0)))
+        .with_play_events(tx)
+        .with_view_distance(2)
+        .with_chunk_cache(cache)
+        .with_mutable_world(Arc::clone(&mutable))
+        .with_drops(Arc::clone(&drops));
+    let addr = spawn_server(config).await;
+
+    // 两个连接都进 Play；各自消费 Join 的全量背包 Content。
+    let mut a = login_and_join(addr, "TwinA", 2).await;
+    let mut b = login_and_join(addr, "TwinB", 2).await;
+    for s in [&mut a, &mut b] {
+        let (id, _) = read_frame_timeout(s, Duration::from_secs(5)).await.unwrap();
+        assert_eq!(id, packets::PLAY_SET_CONTAINER_CONTENT_S2C_ID);
+    }
+
+    // 观察 700ms 内的物理 tick 数：全服唯一 ticker 应约 14 次；若每连接各跑一份
+    // 则会到 ~28 次，直接触发上界断言失败。
+    let tick0 = drops.tick_count();
+    let t0 = std::time::Instant::now();
+    tokio::time::sleep(Duration::from_millis(700)).await;
+    let elapsed_ms = t0.elapsed().as_millis() as u64;
+    let ticks = drops.tick_count() - tick0;
+    let expected = elapsed_ms / 50;
+    assert!(
+        ticks >= expected.saturating_sub(6),
+        "global physics ticker stalled: {ticks} ticks in {elapsed_ms}ms (expected ~{expected})"
+    );
+    assert!(
+        ticks <= expected + 6,
+        "two connections must not double physics: {ticks} ticks in {elapsed_ms}ms (expected ~{expected})"
+    );
+
+    // 再验证拾取延迟档位：A 挖脚下草 → 掉落 dirt；两连接都走开 3 格避免被捡。
+    let spawn = WorldGen::new(DEFAULT_SEED).spawn_pos();
+    let (fx, fy, fz) = (spawn.0 as f64 + 0.5, spawn.1 as f64, spawn.2 as f64 + 0.5);
+    let (gx, gy, gz) = (spawn.0, spawn.1 - 1, spawn.2);
+    send_pos_y(&mut a, fx, fy, fz).await;
+    let mut body = Vec::new();
+    packets::PlayerAction { status: 2, x: gx, y: gy, z: gz, face: 1, sequence: 21 }
+        .encode_body(&mut body);
+    mc_network::framing::write_packet(&mut a, packets::PLAY_PLAYER_ACTION_C2S_ID, &body)
+        .await
+        .unwrap();
+    let mut drop_id = None;
+    for _ in 0..8 {
+        let (id, payload) = read_frame_timeout(&mut a, Duration::from_secs(5)).await.unwrap();
+        if id == packets::PLAY_SPAWN_ENTITY_S2C_ID {
+            drop_id = Some(packets::SpawnItemEntity::decode_body(&payload).unwrap().0.entity_id);
+            break;
+        }
+    }
+    let drop_id = drop_id.expect("dig must spawn a drop");
+    send_pos_y(&mut a, fx + 3.0, fy, fz).await;
+    send_pos_y(&mut b, fx + 3.0, fy, fz).await;
+
+    // 300ms ≈ 6 次全局 tick：delay 应从 10 降到 ~4，但绝不能像双份 tick 那样归零。
+    tokio::time::sleep(Duration::from_millis(300)).await;
+    let delay = drops.items.lock().unwrap().get(drop_id).map(|e| e.pickup_delay);
+    assert!(
+        matches!(delay, Some(1..=10)),
+        "pickup_delay={delay:?} after 300ms: two connections must not accelerate physics"
+    );
+
+    drop(a);
+    drop(b);
+    drop(rx);
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
 /// P18.1 端到端：拾取进快捷栏 → 拖拽换槽（ContainerClick）→ 切手持 → 放出对应方块。
 /// 回归“拖了但服务端没收到、放出隔壁石头”的分叉 bug。
 #[tokio::test]

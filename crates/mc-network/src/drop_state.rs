@@ -12,13 +12,18 @@
 //!   因离线模式 uuid 每次随机，见 `mc_world::inventory` 文档）。
 //! - `known`：conn_id → 该连接已见实体（视距过滤：离开视距发 Remove，进入补发）。
 
-use mc_world::{ItemEntities, PlayerInventory};
+use mc_world::{ItemEntities, MutableWorld, PlayerInventory};
 use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
 use std::sync::{
-    Mutex,
-    atomic::{AtomicI32, Ordering},
+    Arc, Mutex,
+    atomic::{AtomicBool, AtomicI32, AtomicU64, Ordering},
 };
+use std::time::{Duration, Instant};
+use tracing::warn;
+
+/// 全服掉落物物理节拍（ms）：只由 [`DropState::start_global_tick`] 的一个 ticker 驱动。
+pub const DROP_TICK_MS: u64 = 50;
 
 /// 掉落物 entity_id 起始（避开 LoginPlay entity_id=1）。
 pub const FIRST_DROP_ENTITY_ID: i32 = 1000;
@@ -28,12 +33,19 @@ pub const PLAYER_ENTITY_ID: i32 = 1;
 pub const STARTER_STONE_COUNT: i32 = mc_world::inventory::STARTER_COUNT;
 
 /// net 线程共享的掉落/背包状态（`Arc` 进 `PlayOptions`）。
+///
+/// 物理权威（下落/age/despawn/支撑重算）只由 [`Self::start_global_tick`] 启动的
+/// **单个** ticker 驱动，与本文件的连接态无关；每个连接只做拾取/视距同步。
 #[derive(Debug)]
 pub struct DropState {
     pub items: Mutex<ItemEntities>,
     inventories: Mutex<HashMap<u64, PlayerInventory>>,
     known: Mutex<HashMap<u64, HashSet<i32>>>,
     next_id: AtomicI32,
+    /// 物理 tick 次数（只统计 `ItemEntities::tick()`，与在线连接数无关；测试可观测）。
+    tick_count: AtomicU64,
+    /// 全服 ticker 是否已启动（每份 DropState 至多一个）。
+    tick_started: AtomicBool,
     save_dir: PathBuf,
     seed: i64,
 }
@@ -45,6 +57,8 @@ impl DropState {
             inventories: Mutex::new(HashMap::new()),
             known: Mutex::new(HashMap::new()),
             next_id: AtomicI32::new(FIRST_DROP_ENTITY_ID),
+            tick_count: AtomicU64::new(0),
+            tick_started: AtomicBool::new(false),
             save_dir,
             seed,
         }
@@ -52,6 +66,63 @@ impl DropState {
 
     pub fn seed(&self) -> i64 {
         self.seed
+    }
+
+    /// 全服物理 tick 次数；仅 `physics_tick` 递增，连接侧不会改动。
+    pub fn tick_count(&self) -> u64 {
+        self.tick_count.load(Ordering::Relaxed)
+    }
+
+    /// 启动全服唯一的掉落物理 ticker（50ms 一次）：支撑重算 + 物理 + despawn。
+    ///
+    /// - 用独立 `std::thread` 而非 tokio task：`DropState::new` 在单测（无 runtime）
+    ///   里也会被调用，本函数只在显式调用时启动，不依赖任何 runtime。
+    /// - 重复调用只生效一次（返回 `false`）；多连接共享同一份 `Arc<DropState>`，
+    ///   不会因为连接数增加而产生第二份物理 tick。
+    pub fn start_global_tick(self: &Arc<Self>, world: Arc<MutableWorld>) -> bool {
+        if self.tick_started.swap(true, Ordering::SeqCst) {
+            return false;
+        }
+        let me = Arc::clone(self);
+        let spawned = std::thread::Builder::new()
+            .name("mc-drop-tick".to_string())
+            .spawn(move || {
+                let period = Duration::from_millis(DROP_TICK_MS);
+                let mut next = Instant::now();
+                loop {
+                    next += period;
+                    let now = Instant::now();
+                    if next > now {
+                        std::thread::sleep(next - now);
+                    } else {
+                        // 落后超过一个节拍：重新对齐，避免忙等追帧。
+                        next = now + period;
+                    }
+                    me.physics_tick(&world);
+                }
+            });
+        match spawned {
+            Ok(_) => true,
+            Err(e) => {
+                warn!("start global drop tick failed ({e})");
+                self.tick_started.store(false, Ordering::SeqCst);
+                false
+            }
+        }
+    }
+
+    /// 全服唯一物理 tick：支撑被挖空的重算与 `ItemEntities::tick()` 在同一把写锁内，
+    /// 避免连接侧看到「已解除静息但还没下落」的中间态。
+    fn physics_tick(&self, world: &MutableWorld) {
+        let mut items = self.items.lock().unwrap_or_else(|p| p.into_inner());
+        let unsupported = items
+            .find_unsupported(|s| world.get(s.0, s.1, s.2) != mc_world::AIR_BLOCK_ID);
+        for (id, s) in unsupported {
+            let new_rest = world.drop_rest_y(s.0, s.2, s.1) as f64;
+            items.resume_fall(id, new_rest);
+        }
+        items.tick();
+        self.tick_count.fetch_add(1, Ordering::Relaxed);
     }
 
     /// 分配全局唯一 entity_id（永不复用）。
@@ -163,5 +234,38 @@ mod tests {
         assert!(st.is_known(9, 1001));
         st.unmark_known(9, 1001);
         assert!(!st.is_known(9, 1001));
+    }
+
+    #[test]
+    fn physics_tick_counts_once_and_recovers_dug_support() {
+        use mc_world::MutableWorld;
+        let world = MutableWorld::new(1);
+        let st = DropState::new(std::env::temp_dir(), 1);
+        let id = st.alloc_id();
+        // 支撑面 y=69（方块 (0,68,0)），掉落物落到该高度后静息。
+        world.set(0, 68, 0, mc_world::STONE_BLOCK_ID);
+        {
+            let mut items = st.items.lock().unwrap();
+            items.spawn(id, 55, 1, 0.5, 70.0, 0.5, 69.0).unwrap();
+        }
+        for _ in 0..200 {
+            st.physics_tick(&world);
+        }
+        assert_eq!(st.tick_count(), 200);
+        let snap = st.items.lock().unwrap();
+        let e = snap.get(id).unwrap();
+        assert!(e.on_ground, "drop must rest on the support block");
+        assert_eq!(e.support, Some((0, 68, 0)));
+        drop(snap);
+
+        // 挖掉支撑、留下更低一层：下一次全局 tick 必须重算并恢复下落。
+        world.set(0, 68, 0, mc_world::AIR_BLOCK_ID);
+        world.set(0, 67, 0, mc_world::STONE_BLOCK_ID);
+        st.physics_tick(&world);
+        assert_eq!(st.tick_count(), 201, "one tick call = one count, independent of connections");
+        let snap = st.items.lock().unwrap();
+        let e = snap.get(id).unwrap();
+        assert_eq!(e.rest_y, 68.0, "rest_y must follow the next support down");
+        assert!(!e.on_ground);
     }
 }
