@@ -510,7 +510,7 @@ $natives = 'C:\Users\qwe\AppData\Local\Temp\mc263natives'
     `PLAYER_ACTION_DROP_ALL_ITEMS=4`/`DROP_ITEM=5`（与 jar ordinal 一致，单测断言）；
     `play_entity.rs` 新增 `CLICK_THROW=4`；`inventory.rs` 新增 `throw_held`/`throw_from_slot`
    （含单测：单扔/整扔/清空、button 语义、光标非空无操作、越界拒绝）；
-    `login_route.rs` 新增 `spawn_thrown_items`/`handle_throw_action` + 两处接线
+    `login_route/{mod.rs,drop_sync.rs}` 新增 `spawn_thrown_items`/`handle_throw_action` + 两处接线
     （PlayerAction 4/5 恒回 Ack；ContainerClick THROW 全量同步 + 刷盘）。
     `play_stream.rs` 新增 3 个 e2e（单扔→整扔、空手只 ack、容器 THROW 含光标无操作）。
     遗留 TODO：原版真机复验（Q/背包 Q 手感、扔出物抛物线/落地/拾取、空手 Q 不断连）；
@@ -531,7 +531,7 @@ crates/mc-protocol/src/packets/
   play_sync.rs               PlayerPositionSync/KeepAlive/C2S 移动包
   data/*_777.bin             LoginPlay / PositionSync / UpdateTags 抓包
 crates/mc-network/src/
-  login_route.rs             PlayOptions（+mutable_world/+drops）、发送序列、`(2r+1)^2` 块、KeepAlive/动态区块/移动/Disconnect 事件、P17 decide_dig/decide_place（+P18 drops 带出）+ BlockUpdate/Ack 即时回包 + P18 掉落生成/50ms tick/拾取/背包同步接线 + P19 Q 扔（PlayerAction 4/5 + ContainerClick THROW）
+  login_route/               Play 接线目录：login.rs（登录/Join序列）+ mod.rs（play_loop）+ block_edit.rs（decide_dig/decide_place + BlockUpdate/Ack）+ drop_sync.rs（掉落生成/50ms tick/拾取/背包同步 + P19 Q扔）+ view_sync.rs（视距节流/flush）
   drop_state.rs              P18 DropState：ItemEntities + conn_id→背包 + entity_id 自增 + known 视距集 + 用户名键存档
   chunk_view.rs              clamp_view_radius/view_chunk_count、per-connection 视距集合/去重/跨区块 add/remove 规划
   chunk_cache.rs             共享已编码 ChunkData 0x2E 包体缓存（Mutex+HashMap+FIFO，默认 1024；`bodies` rayon 并行批量；P17 `with_mutable` + `invalidate`）
