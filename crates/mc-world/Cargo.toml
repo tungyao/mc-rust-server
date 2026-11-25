@@ -7,6 +7,7 @@ license.workspace = true
 [dependencies]
 mc-core = { workspace = true }
 mc-protocol = { workspace = true }
+mc-registry = { workspace = true }
 thiserror.workspace = true
 serde.workspace = true
 rayon.workspace = true

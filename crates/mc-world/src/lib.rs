@@ -52,24 +52,50 @@ pub const WORLD_SEED: i64 = worldgen::DEFAULT_SEED;
 pub const SPAWN_BLOCK_X: i32 = 369;
 pub const SPAWN_BLOCK_Z: i32 = 381;
 
-/// 方块 ID 与 26.3 `reports/blocks.json` 的全局 blockstate ID 对齐：
+/// 编译期 ID 查表：直接读 `mc-registry` 由 `build.rs` 从 `data/777/*.json` 生成的
+/// 静态注册表，语义与 `mc_registry::block_id` / `mc_registry::item_id` 一致。
+/// 这两个公开查询函数内部用 `format!` 做短名补全，不是 `const fn`；这里在生成的
+/// 表上做等价的 const 线性查找，使 ID 既是编译期常量，又随数据 codegen 自动漂移。
+/// 名称缺失时编译期 panic，不允许静默回退到旧的硬编码值。
+const fn registry_id(table: &[(u32, &str)], name: &str) -> u32 {
+    let needle = name.as_bytes();
+    let mut i = 0;
+    while i < table.len() {
+        let (id, candidate) = table[i];
+        let haystack = candidate.as_bytes();
+        if haystack.len() == needle.len() {
+            let mut j = 0;
+            while j < needle.len() {
+                if haystack[j] != needle[j] {
+                    break;
+                }
+                j += 1;
+            }
+            if j == needle.len() {
+                return id;
+            }
+        }
+        i += 1;
+    }
+    panic!("mc-registry generated table is missing a required name");
+}
+
+/// 方块 ID 来自 `mc_registry::BLOCKS` 的 26.3 全局 blockstate ID（default_state_id）：
 /// air=0、stone=1、grass_block（snowy=false）=9、dirt=10。
 /// 这些 ID 也用于 Configuration 中回放的 `minecraft:block` 注册表。
-/// P16 新增的水/沙/树/矿 ID 来自 26.3 客户端 jar 实测
-/// （`SharedConstants.tryDetectVersion(); Bootstrap.bootStrap(); Block.getId(block.defaultBlockState())`），
-/// 与 air/stone/grass/dirt 的已知值一致，可直接信任。
-pub const AIR_BLOCK_ID: u16 = 0;
-pub const STONE_BLOCK_ID: u16 = 1;
-pub const GRASS_BLOCK_ID: u16 = 9;
-pub const DIRT_BLOCK_ID: u16 = 10;
+/// 水/沙/树/矿 ID 同样来自该表（26.3 客户端 jar 实测值，见 `data/777/SOURCE.md`）。
+pub const AIR_BLOCK_ID: u16 = registry_id(mc_registry::BLOCKS, "minecraft:air") as u16;
+pub const STONE_BLOCK_ID: u16 = registry_id(mc_registry::BLOCKS, "minecraft:stone") as u16;
+pub const GRASS_BLOCK_ID: u16 = registry_id(mc_registry::BLOCKS, "minecraft:grass_block") as u16;
+pub const DIRT_BLOCK_ID: u16 = registry_id(mc_registry::BLOCKS, "minecraft:dirt") as u16;
 /// `Blocks.WATER.defaultBlockState()`（source，level=0）。
-pub const WATER_BLOCK_ID: u16 = 89;
-pub const SAND_BLOCK_ID: u16 = 121;
+pub const WATER_BLOCK_ID: u16 = registry_id(mc_registry::BLOCKS, "minecraft:water") as u16;
+pub const SAND_BLOCK_ID: u16 = registry_id(mc_registry::BLOCKS, "minecraft:sand") as u16;
 /// `Blocks.OAK_LOG.defaultBlockState()`（axis=y）。
-pub const OAK_LOG_BLOCK_ID: u16 = 140;
-pub const OAK_LEAVES_BLOCK_ID: u16 = 294;
-pub const COAL_ORE_BLOCK_ID: u16 = 136;
-pub const IRON_ORE_BLOCK_ID: u16 = 134;
+pub const OAK_LOG_BLOCK_ID: u16 = registry_id(mc_registry::BLOCKS, "minecraft:oak_log") as u16;
+pub const OAK_LEAVES_BLOCK_ID: u16 = registry_id(mc_registry::BLOCKS, "minecraft:oak_leaves") as u16;
+pub const COAL_ORE_BLOCK_ID: u16 = registry_id(mc_registry::BLOCKS, "minecraft:coal_ore") as u16;
+pub const IRON_ORE_BLOCK_ID: u16 = registry_id(mc_registry::BLOCKS, "minecraft:iron_ore") as u16;
 
 /// 按 y 分层的地形带：y <= GROUND_LEVEL 石头，61..=63 泥土，64 草方块，其余空气。
 pub const GROUND_LEVEL: i32 = 60;
@@ -191,6 +217,27 @@ pub fn chunk_light_bytes() -> Vec<u8> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn block_ids_come_from_registry_table() {
+        // 防止 codegen 数据漂移：编译期常量必须仍等于 26.3 实测值，
+        // 且与公开查询 API 的运行时结果一致。
+        for (name, expected, id) in [
+            ("minecraft:air", 0, AIR_BLOCK_ID),
+            ("minecraft:stone", 1, STONE_BLOCK_ID),
+            ("minecraft:grass_block", 9, GRASS_BLOCK_ID),
+            ("minecraft:dirt", 10, DIRT_BLOCK_ID),
+            ("minecraft:water", 89, WATER_BLOCK_ID),
+            ("minecraft:sand", 121, SAND_BLOCK_ID),
+            ("minecraft:oak_log", 140, OAK_LOG_BLOCK_ID),
+            ("minecraft:oak_leaves", 294, OAK_LEAVES_BLOCK_ID),
+            ("minecraft:coal_ore", 136, COAL_ORE_BLOCK_ID),
+            ("minecraft:iron_ore", 134, IRON_ORE_BLOCK_ID),
+        ] {
+            assert_eq!(id as u32, expected, "wrong blockstate ID for {name}");
+            assert_eq!(Some(id as u32), mc_registry::block_id(name));
+        }
+    }
 
     #[test]
     fn chunk_layer_correct() {

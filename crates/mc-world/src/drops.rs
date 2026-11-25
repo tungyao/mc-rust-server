@@ -21,16 +21,17 @@ use crate::{
     OAK_LOG_BLOCK_ID, SAND_BLOCK_ID, STONE_BLOCK_ID,
 };
 
-/// `minecraft:item` 注册表 ID（26.3 jar `BuiltInRegistries.ITEM` 实测）。
-pub const ITEM_STONE: i32 = 1;
-pub const ITEM_DIRT: i32 = 55;
-pub const ITEM_COBBLESTONE: i32 = 62;
-pub const ITEM_OAK_SAPLING: i32 = 77;
-pub const ITEM_SAND: i32 = 88;
-pub const ITEM_OAK_LOG: i32 = 163;
-pub const ITEM_COAL: i32 = 1010;
-pub const ITEM_STICK: i32 = 1060;
-pub const ITEM_RAW_IRON: i32 = 1017;
+/// `minecraft:item` 注册表 ID，编译期从 `mc_registry::ITEMS`（由 `build.rs` 从
+/// `data/777/items.json` 生成）查表，命名空间写法与 `mc_registry::item_id` 一致。
+pub const ITEM_STONE: i32 = crate::registry_id(mc_registry::ITEMS, "minecraft:stone") as i32;
+pub const ITEM_DIRT: i32 = crate::registry_id(mc_registry::ITEMS, "minecraft:dirt") as i32;
+pub const ITEM_COBBLESTONE: i32 = crate::registry_id(mc_registry::ITEMS, "minecraft:cobblestone") as i32;
+pub const ITEM_OAK_SAPLING: i32 = crate::registry_id(mc_registry::ITEMS, "minecraft:oak_sapling") as i32;
+pub const ITEM_SAND: i32 = crate::registry_id(mc_registry::ITEMS, "minecraft:sand") as i32;
+pub const ITEM_OAK_LOG: i32 = crate::registry_id(mc_registry::ITEMS, "minecraft:oak_log") as i32;
+pub const ITEM_COAL: i32 = crate::registry_id(mc_registry::ITEMS, "minecraft:coal") as i32;
+pub const ITEM_STICK: i32 = crate::registry_id(mc_registry::ITEMS, "minecraft:stick") as i32;
+pub const ITEM_RAW_IRON: i32 = crate::registry_id(mc_registry::ITEMS, "minecraft:raw_iron") as i32;
 
 /// 单种掉落：物品 + 数量。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -92,6 +93,26 @@ pub fn block_for_item(item_id: i32) -> Option<u16> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn item_ids_come_from_registry_table() {
+        // 防止 codegen 数据漂移：编译期常量必须仍等于 26.3 实测值，
+        // 且与公开查询 API 的运行时结果一致。
+        for (name, expected, id) in [
+            ("minecraft:stone", 1, ITEM_STONE),
+            ("minecraft:dirt", 55, ITEM_DIRT),
+            ("minecraft:cobblestone", 62, ITEM_COBBLESTONE),
+            ("minecraft:oak_sapling", 77, ITEM_OAK_SAPLING),
+            ("minecraft:sand", 88, ITEM_SAND),
+            ("minecraft:oak_log", 163, ITEM_OAK_LOG),
+            ("minecraft:coal", 1010, ITEM_COAL),
+            ("minecraft:stick", 1060, ITEM_STICK),
+            ("minecraft:raw_iron", 1017, ITEM_RAW_IRON),
+        ] {
+            assert_eq!(id as u32, expected, "wrong item ID for {name}");
+            assert_eq!(Some(id as u32), mc_registry::item_id(name));
+        }
+    }
 
     #[test]
     fn basic_drops_are_deterministic() {
