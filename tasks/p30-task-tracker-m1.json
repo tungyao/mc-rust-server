@@ -1,0 +1,16 @@
+{
+  "id": "p30-task-tracker-m1",
+  "title": "task tracker M1 file store",
+  "status": "done",
+  "owner": "main",
+  "priority": "p1",
+  "deps": [],
+  "branch": "",
+  "created": "2026-11-25T15:35:21+00:00",
+  "updated": "2026-11-25T15:35:34+00:00",
+  "detail": "file store + CLI + migrate 41 events",
+  "files": [
+    "scripts/task.py",
+    "tasks/"
+  ]
+}

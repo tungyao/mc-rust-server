@@ -58,3 +58,8 @@
 - [2026-11-25 22:00 UTC] agent=main task=throw-delay-fix status=done detail=thrown items now 40-tick pickup delay (vanilla parity), dig drops stay 10; spawn_with_velocity takes delay param; regression unit test; committed c97e34a pushed, server restarted
 - [2026-11-25 22:30 UTC] agent=main task=throw-arc-fix status=done detail=spawn offset 0.5->0.15 (head) + up bias 0.25->0.1 (flat arc); e2e/sim updated; committed 93620e8 pushed, server restarted
 - [2026-11-25 23:00 UTC] agent=main task=held-sync-fix status=done detail=Join now sends S2C set_held_slot 0x6B VarInt when selected!=0 (ID from packets.json, jar layout note); fixes looking-at-cobble-throwing-diamond after relog; regression e2e rejoin_syncs_selected_held_slot; committed adcc449 pushed, server restarted
+- [2026-11-25 15:35 UTC] agent=main task=p30-task-tracker-m1 status=todo detail=task tracker M1 file store files=
+- [2026-11-25 15:35 UTC] agent=main task=p30-task-tracker-m1 status=start detail=claim files=
+- [2026-11-25 15:35 UTC] agent=main task=p31-xp-orbs status=todo detail=XP orbs drop pickup files=
+- [2026-11-25 15:35 UTC] agent=main task=p32-broadcast-chat status=todo detail=broadcast real packet after 777 chat capture files=
+- [2026-11-25 15:35 UTC] agent=main task=p30-task-tracker-m1 status=done detail=file store + CLI + migrate 41 events files=scripts/task.py,tasks/

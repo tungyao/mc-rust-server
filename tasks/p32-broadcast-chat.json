@@ -1,0 +1,13 @@
+{
+  "id": "p32-broadcast-chat",
+  "title": "broadcast real packet after 777 chat capture",
+  "status": "todo",
+  "owner": "",
+  "priority": "p2",
+  "deps": [],
+  "branch": "",
+  "created": "2026-11-25T15:35:21+00:00",
+  "updated": "2026-11-25T15:35:21+00:00",
+  "detail": "",
+  "files": []
+}
