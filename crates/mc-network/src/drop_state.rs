@@ -96,6 +96,11 @@ impl DropState {
         self.seed
     }
 
+    /// 背包存档目录（P25 管理面板测试定位落盘文件用；生产路径不变）。
+    pub fn save_dir(&self) -> PathBuf {
+        self.save_dir.clone()
+    }
+
     /// 全服物理 tick 次数；仅 `physics_tick` 递增，连接侧不会改动。
     pub fn tick_count(&self) -> u64 {
         self.tick_count.load(Ordering::Relaxed)

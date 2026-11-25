@@ -1,0 +1,130 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<title>MC Admin (26.3/777)</title>
+<style>
+body { font-family: monospace; max-width: 900px; margin: 1em auto; background: #111; color: #ddd; }
+h2 { border-bottom: 1px solid #444; padding-bottom: 4px; }
+table { border-collapse: collapse; width: 100%; }
+td, th { border: 1px solid #444; padding: 4px 8px; text-align: left; }
+button, input, select { font-family: monospace; background: #222; color: #ddd; border: 1px solid #555; padding: 4px 8px; }
+button:hover { background: #333; cursor: pointer; }
+.card { background: #1a1a1a; padding: 8px 12px; margin-bottom: 1em; }
+.warn { color: #fa0; }
+pre { white-space: pre-wrap; }
+</style>
+</head>
+<body>
+<h1>MC Admin 面板（只听本机 · 无鉴权 · 禁止暴露公网）</h1>
+
+<div class="card">
+<h2>世界状态（5s 轮询）</h2>
+<pre id="world">loading…</pre>
+<button onclick="saveNow()">立即存档</button>
+<span id="saveMsg"></span>
+</div>
+
+<div class="card">
+<h2>在线玩家（2s 轮询）</h2>
+<table><thead><tr><th>conn</th><th>用户名</th><th>地址</th><th>位置</th><th>在线(s)</th><th>操作</th></tr></thead>
+<tbody id="online"></tbody></table>
+</div>
+
+<div class="card">
+<h2>发放物品</h2>
+<label>玩家 <select id="giveUser"></select></label>
+<label>物品 <input id="giveItem" list="items" value="minecraft:cobblestone" size="28"></label>
+<datalist id="items">
+<option value="minecraft:stone"></option>
+<option value="minecraft:dirt"></option>
+<option value="minecraft:cobblestone"></option>
+<option value="minecraft:oak_log"></option>
+<option value="minecraft:coal"></option>
+<option value="minecraft:raw_iron"></option>
+<option value="minecraft:wheat_seeds"></option>
+<option value="minecraft:oak_sapling"></option>
+</datalist>
+<label>数量(1-640) <input id="giveCount" type="number" value="64" min="1" max="640"></label>
+<button onclick="give()">发放</button>
+<span id="giveMsg"></span>
+</div>
+
+<div class="card">
+<h2>查看背包</h2>
+<label>玩家 <select id="invUser"></select></label>
+<button onclick="showInv()">查询</button>
+<pre id="inv"></pre>
+</div>
+
+<div class="card">
+<h2>广播</h2>
+<p class="warn">未实现：777 system_chat 包体无抓包真值，不猜字节（见计划 §6.4）。接口返回 501。</p>
+</div>
+
+<script>
+async function jget(p) { const r = await fetch(p); return r.json(); }
+async function jpost(p, b) {
+  const r = await fetch(p, {method: 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify(b)});
+  return {status: r.status, body: await r.json()};
+}
+async function refreshWorld() {
+  try { document.getElementById('world').textContent = JSON.stringify(await jget('/api/world'), null, 1); }
+  catch (e) { document.getElementById('world').textContent = 'fetch failed: ' + e; }
+}
+async function refreshOnline() {
+  try {
+    const o = await jget('/api/online');
+    const tb = document.getElementById('online');
+    tb.innerHTML = '';
+    const users = [];
+    for (const p of o.online) {
+      users.push(p.username);
+      const tr = document.createElement('tr');
+      tr.innerHTML = '<td>' + p.conn_id + '</td><td>' + p.username + '</td><td>' + p.addr +
+        '</td><td>' + p.pos.map(v => v.toFixed(1)).join(',') + '</td><td>' + p.online_secs + '</td>';
+      const td = document.createElement('td');
+      const kb = document.createElement('button');
+      kb.textContent = '踢人';
+      kb.onclick = (function(name) { return async function() {
+        if (!confirm('踢掉 ' + name + '？')) return;
+        const r = await jpost('/api/kick', {username: name});
+        alert(JSON.stringify(r.body));
+        refreshOnline();
+      }; })(p.username);
+      td.appendChild(kb);
+      tr.appendChild(td);
+      tb.appendChild(tr);
+    }
+    for (const id of ['giveUser', 'invUser']) {
+      const sel = document.getElementById(id);
+      const cur = sel.value;
+      sel.innerHTML = '';
+      for (const u of users) { const op = document.createElement('option'); op.value = u; op.textContent = u; sel.appendChild(op); }
+      if (users.includes(cur)) sel.value = cur;
+    }
+  } catch (e) { /* next poll retries */ }
+}
+async function give() {
+  const r = await jpost('/api/give', {
+    username: document.getElementById('giveUser').value,
+    item: document.getElementById('giveItem').value,
+    count: parseInt(document.getElementById('giveCount').value, 10),
+  });
+  document.getElementById('giveMsg').textContent = 'HTTP ' + r.status + ' ' + JSON.stringify(r.body);
+}
+async function showInv() {
+  const u = document.getElementById('invUser').value;
+  document.getElementById('inv').textContent = JSON.stringify(await jget('/api/inventory?username=' + encodeURIComponent(u)), null, 1);
+}
+async function saveNow() {
+  const r = await jpost('/api/save', {});
+  document.getElementById('saveMsg').textContent = JSON.stringify(r.body);
+  refreshWorld();
+}
+refreshWorld(); refreshOnline();
+setInterval(refreshWorld, 5000);
+setInterval(refreshOnline, 2000);
+</script>
+</body>
+</html>

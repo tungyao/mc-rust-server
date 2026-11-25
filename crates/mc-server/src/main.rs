@@ -1,5 +1,6 @@
 //! mc-server: Bevy App组装 + 50ms主循环，只兼容26.3/777
-//! 模块：config/resources/systems/net_thread/play/movement/persist
+//! 模块：config/resources/systems/net_thread/play/movement/persist/admin
+mod admin;
 mod config;
 mod movement;
 mod net_thread;
@@ -51,6 +52,8 @@ fn main() {
     );
     // P18 掉落物实体 + 背包：net 线程共享状态（存档与 overrides 同目录、seed 隔离）。
     let drop_state = std::sync::Arc::new(mc_network::DropState::new(world_dir.clone().into(), cfg.seed));
+    // P25 管理面板：与游戏线程共享的 hub（在线映射唯一来源，计划 §5.2 推荐方案）。
+    let hub = Arc::new(mc_network::BroadcastHub::new());
     let net_config = mc_network::NetConfig::new(cfg.max_players, cfg.motd.clone(), Arc::clone(&online.0))
         .with_view_distance(cfg.view_distance)
         .with_seed(cfg.seed)
@@ -58,13 +61,18 @@ fn main() {
         .with_play_events(play_tx)
         .with_chunk_cache(chunk_cache)
         .with_mutable_world(Arc::clone(&mutable))
-        .with_drops(Arc::clone(&drop_state));
+        .with_drops(Arc::clone(&drop_state))
+        .with_hub(Arc::clone(&hub));
     info!(
         "config view_distance={} effective_view_radius={} seed={} compression_threshold={}",
         cfg.view_distance, cfg.effective_view_distance(), cfg.seed, cfg.compression_threshold
     );
     let (tx, rx) = unbounded::<mc_network::NewConnection>();
     let mut app = App::new();
+    // P25：cfg 进 Resource 前先把管理面板要的字段拷出来（`cfg` move 后不可再借）。
+    let admin_bind = cfg.admin_bind.clone();
+    let admin_seed = cfg.seed;
+    let admin_view_distance = cfg.view_distance;
     app.insert_resource(cfg);
     app.insert_resource(TickCounter::default());
     app.insert_resource(online);
@@ -98,6 +106,21 @@ fn main() {
     let shutdown = Arc::new(AtomicBool::new(false));
     let shutdown_net = Arc::clone(&shutdown);
     std::thread::spawn(move || net_thread::run_net_thread(bind, tx, shutdown_net, net_config));
+    // P25 管理面板：独立线程 + 独立监听（默认 127.0.0.1:25566），故障隔离：
+    // admin 线程崩了/端口被占都不影响 25565 游戏线程。
+    let admin_state = admin::AdminState {
+        hub: Arc::clone(&hub),
+        drops: Arc::clone(&drop_state),
+        mutable: Arc::clone(&mutable),
+        seed: admin_seed,
+        world_dir: world_dir.clone().into(),
+        view_distance: admin_view_distance,
+    };
+    let shutdown_admin = Arc::clone(&shutdown);
+    std::thread::Builder::new()
+        .name("mc-admin".to_string())
+        .spawn(move || admin::serve_admin(&admin_bind, admin_state, shutdown_admin))
+        .expect("spawn mc-admin thread");
     let tick_dur = Duration::from_millis(mc_core::TICK_MS);
     info!("main loop tick={}ms (26.3 only)", mc_core::TICK_MS);
     loop {

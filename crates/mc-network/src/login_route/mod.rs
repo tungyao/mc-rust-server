@@ -15,7 +15,7 @@ use self::block_edit::{apply_block_outcome, eye_of};
 use self::drop_sync::{handle_throw_action, send_full_inventory, send_held_slot, spawn_drops, spawn_thrown_items, tick_drops};
 use self::login::{emit_play_event, read_packet_any, user_tag, write_packet_any};
 use self::view_sync::{maybe_flush_view, queue_view_move, PendingViewMove};
-use crate::broadcast::QueuedPacket;
+use crate::broadcast::{QueuedPacket, ADMIN_KICK_PACKET_ID};
 use crate::chunk_cache::ChunkCache;
 use crate::chunk_view::ChunkView;
 use crate::play_events::PlayEvent;
@@ -37,6 +37,12 @@ async fn drain_outbox(
 ) -> io::Result<()> {
     let Some(rx) = outbox else { return Ok(()) };
     while let Ok(pkt) = rx.try_recv() {
+        // P25 踢人信号：不是真实包，直接把错误抛给 `play_loop` 走统一清理
+        // （`unload`/`unregister`/`Disconnect`），客户端看到 TCP 关闭即回大厅。
+        if pkt.id == ADMIN_KICK_PACKET_ID {
+            debug!("play conn_id={} kicked by admin, closing", opts.conn_id);
+            return Err(io::Error::new(io::ErrorKind::ConnectionAborted, "kicked by admin"));
+        }
         write_packet_any(stream, pkt.id, &pkt.body, opts.threshold).await?;
     }
     Ok(())
