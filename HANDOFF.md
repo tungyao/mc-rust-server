@@ -119,7 +119,7 @@ $natives = 'C:\Users\qwe\AppData\Local\Temp\mc263natives'
   判定规则仍是服务端规则（非客户端 claims）。ECS 通过共享 `Arc<MutableWorld>` 看到同一世界，
   只负责刷盘（见下）。`PlayEvent::BlockEdit` 投递给 ECS 只做日志/未来多人钩子，
   脏标记已在 `MutableWorld::set` 内记录。
-- 规则（创造风格）：`Player Action` status 0/2 → 即时破坏（落 air）；status 1 → 只 ack；
+- 规则（生存风格，26.3 jar ordinal）：`Player Action` status 0(START) → 只 ack（客户端播破坏进度动画）；status 3(STOP，进度满后）→ 即时破坏（落 air）；status 2(ABORT，松开鼠标）→ 只 ack 不落子；status 1(CHANGE 朝向）→ 直接忽略；
   3–7（丢弃/吃食/换手）无世界影响，直接忽略。`Use Item On` 目标 = 被点方块 + face 偏移，
   被点须实心（非空气/水）、目标须可替换（空气/水）、y∈[-64,319]、目标 chunk 在视距内、
   眼到被点中心 ≤6.5（`MAX_REACH`，原版约 6 + 0.5 网络余量）→ 落服务端默认材料（石头 1）；
@@ -127,7 +127,7 @@ $natives = 'C:\Users\qwe\AppData\Local\Temp\mc263natives'
 - 落子后同 socket 即时发 `BlockUpdate`（变更/回滚都发，保证操作者视角立即一致）再发 `Ack(seq)`；
   失效对应 chunk 缓存。`play_loop` 跟踪 `last_pos`（移动包更新，初值出生点），`eye = feet + 1.62`。
 - `world` 为 None（旧入口/单测无世界）时交互包只忽略不断线——旧行为与 Play 链路不受影响。
-- 单测：挖草/完成都破坏、挖空气·超距·出视距·y越界回滚且不加条目、cancel 只 ack、3–7/无世界忽略；
+- 单测：挖草/完成都破坏、挖空气·超距·出视距·y越界回滚且不加条目、ABORT(2)/CHANGE(1) 不落子、4+/无世界忽略；
   点泥土顶放置成功、目标被占/点空气/非法face/超距回滚；socket 端到端（见 §4）。
 - P18：`BlockEditOutcome` 新增 `drops: Vec<Drop>`（仅挖掘成功时非空，回滚/cancel 为空；
   `world.seed()` 内部取 seed 算树叶概率）。`decide_place` 签名不变，材料由调用方按手持选定。
@@ -439,7 +439,7 @@ $natives = 'C:\Users\qwe\AppData\Local\Temp\mc263natives'
       抛物线/落地与原版一致、拾取仍正常；
     - `spawn_drops` 删除 `drop_in_view` 门禁 + `drop_rest_y` 从被挖方块向下找支撑
       → 验证走远挖地表/树下/地下方块都稳定掉落且落在挖掘点附近；
-    - `decide_dig` 的 START_DIG(0) 只 ack、仅 FINISH_DIG(2) 破坏
+    - `decide_dig` 的 START_DIG(0) 只 ack、仅 STOP(3) 破坏（旧代码把 ABORT(2) 当完成，松开即碎；已按 jar 枚举修正 1/2/3）
       → 验证原版破坏进度动画正常完成并触发 FINISH_DIG（脚本 e2e 已覆盖，真机未验）。
     脚本端到端已全部通过（含模拟原版逐步走远→START→FINISH 全流程）；**原版 26.3 真机复验待做**。
     另：走远会瞬时补发大量区块（radius=10 跨 23 区块约 1035 包/~20MB），掉落 Spawn 排在

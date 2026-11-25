@@ -94,7 +94,7 @@
 
 | 方向 | 包 | 777 ID | 线格式（本服实现） |
 |---|---|---|---|
-| C2S | Player Action（挖/取消/完成） | `0x29` | Status VarInt + Position + Face Byte + Sequence VarInt；status 0=开始/2=完成/1=取消/3–7=丢弃等（无世界影响） |
+| C2S | Player Action（挖/取消/完成） | `0x29` | Status VarInt + Position + Face Byte + Sequence VarInt；26.3 jar ordinal：0=开始/1=换朝向（忽略）/2=取消(ABORT)/3=完成(STOP)/4+=丢弃等（无世界影响）。旧文档曾误写 1=取消/2=完成，导致松开鼠标即破坏（P18.2 修） |
 | C2S | Use Item On（放置） | `0x42` | Hand VarInt + Position + Face VarInt + 3×Float + 2×Bool + Sequence VarInt |
 | C2S | Use Item（空手使用） | `0x43` | Hand VarInt + Sequence VarInt + Yaw/Pitch Float（只 ack） |
 | C2S | Punch（挥拳） | `0x2E` | 空包体，只忽略 |

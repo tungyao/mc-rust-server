@@ -37,12 +37,18 @@ pub const PLAY_BLOCK_UPDATE_S2C_ID: i32 = super::packet_id("clientbound.play", "
 /// S2C Acknowledge Block Change（确认方块变更序列号）包 ID（777 CB `0x04`）。
 pub const PLAY_BLOCK_CHANGED_ACK_S2C_ID: i32 = super::packet_id("clientbound.play", "block_changed_ack");
 
-/// Player Action Status：开始挖掘（创造模式下客户端只发这个，视为已完成）。
+/// Player Action Status：开始挖掘（26.3 jar `ServerboundPlayerActionPacket$Action` ordinal 0；
+/// 创造模式下客户端只发这个，视为已完成）。
 pub const PLAYER_ACTION_START_DIG: i32 = 0;
-/// Player Action Status：取消挖掘。
-pub const PLAYER_ACTION_CANCEL_DIG: i32 = 1;
-/// Player Action Status：完成挖掘（生存模式按住挖完）。
-pub const PLAYER_ACTION_FINISH_DIG: i32 = 2;
+/// Player Action Status：换挖掘朝向（26.3 新增 `CHANGE_DESTROY_DIRECTION` ordinal 1；
+/// 只 ack，不改世界——之前误标为取消，见 P18.2 修）。
+pub const PLAYER_ACTION_CHANGE_DIRECTION: i32 = 1;
+/// Player Action Status：取消挖掘（26.3 `ABORT_DESTROY_BLOCK` ordinal 2；
+/// 之前误标为完成，导致松开鼠标即破坏，见 P18.2 修）。
+pub const PLAYER_ACTION_CANCEL_DIG: i32 = 2;
+/// Player Action Status：完成挖掘（26.3 `STOP_DESTROY_BLOCK` ordinal 3；
+/// 生存模式按住挖完、客户端进度满后才发；之前误标为 2，把 ABORT 当完成处理）。
+pub const PLAYER_ACTION_FINISH_DIG: i32 = 3;
 
 /// 方块坐标 pack：26 位 x + 26 位 z + 12 位 y（见 wiki Data types/Position）。
 /// `((x & 0x3FFFFFF) << 38) | ((z & 0x3FFFFFF) << 12) | (y & 0xFFF)`。
@@ -361,9 +367,12 @@ mod tests {
     }
 
     #[test]
-    fn dig_start_status_is_zero_and_cancel_is_one() {
+    fn dig_status_matches_jar_enum_order() {
+        // 26.3 jar `ServerboundPlayerActionPacket$Action` 声明顺序：
+        // START=0, CHANGE_DESTROY_DIRECTION=1, ABORT=2, STOP=3（`readEnum` 按 ordinal 编解码）。
         assert_eq!(PLAYER_ACTION_START_DIG, 0);
-        assert_eq!(PLAYER_ACTION_CANCEL_DIG, 1);
-        assert_eq!(PLAYER_ACTION_FINISH_DIG, 2);
+        assert_eq!(PLAYER_ACTION_CHANGE_DIRECTION, 1);
+        assert_eq!(PLAYER_ACTION_CANCEL_DIG, 2);
+        assert_eq!(PLAYER_ACTION_FINISH_DIG, 3);
     }
 }

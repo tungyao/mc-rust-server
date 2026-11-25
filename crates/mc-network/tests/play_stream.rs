@@ -530,7 +530,7 @@ async fn dig_and_place_roundtrip_with_blockupdate_ack_and_persistence() {
 
     // 挖：Player Action finish digging，seq=11 → BlockUpdate(air) + Ack(11)。
     let mut body = Vec::new();
-    packets::PlayerAction { status: 2, x: gx, y: gy, z: gz, face: 1, sequence: 11 }
+    packets::PlayerAction { status: 3, x: gx, y: gy, z: gz, face: 1, sequence: 11 }
         .encode_body(&mut body);
     mc_network::framing::write_packet(&mut s, packets::PLAY_PLAYER_ACTION_C2S_ID, &body)
         .await
@@ -640,7 +640,7 @@ async fn dig_spawns_pickable_drop_and_inventory_syncs() {
 
     // 挖草：BlockUpdate(air) + Ack + Spawn(掉落物) + Data(dirt×1)。
     let mut body = Vec::new();
-    packets::PlayerAction { status: 2, x: gx, y: gy, z: gz, face: 1, sequence: 11 }
+    packets::PlayerAction { status: 3, x: gx, y: gy, z: gz, face: 1, sequence: 11 }
         .encode_body(&mut body);
     mc_network::framing::write_packet(&mut s, packets::PLAY_PLAYER_ACTION_C2S_ID, &body)
         .await
@@ -795,7 +795,7 @@ async fn drop_pickup_works_on_busy_connection() {
     // 挖草显式站位后开挖。
     send_pos_y(&mut s, fx, fy, fz).await;
     let mut body = Vec::new();
-    packets::PlayerAction { status: 2, x: gx, y: gy, z: gz, face: 1, sequence: 11 }
+    packets::PlayerAction { status: 3, x: gx, y: gy, z: gz, face: 1, sequence: 11 }
         .encode_body(&mut body);
     mc_network::framing::write_packet(&mut s, packets::PLAY_PLAYER_ACTION_C2S_ID, &body)
         .await
@@ -946,7 +946,7 @@ async fn two_connections_share_one_global_drop_physics_tick() {
     let (gx, gy, gz) = (spawn.0, spawn.1 - 1, spawn.2);
     send_pos_y(&mut a, fx, fy, fz).await;
     let mut body = Vec::new();
-    packets::PlayerAction { status: 2, x: gx, y: gy, z: gz, face: 1, sequence: 21 }
+    packets::PlayerAction { status: 3, x: gx, y: gy, z: gz, face: 1, sequence: 21 }
         .encode_body(&mut body);
     mc_network::framing::write_packet(&mut a, packets::PLAY_PLAYER_ACTION_C2S_ID, &body)
         .await
@@ -1016,7 +1016,7 @@ async fn drag_then_place_uses_held_block() {
     send_pos_y(&mut s, fx, fy, fz).await;
     // 挖草出土，站着等拾取（快捷栏优先 → 槽 37）。
     let mut body = Vec::new();
-    packets::PlayerAction { status: 2, x: gx, y: gy, z: gz, face: 1, sequence: 11 }
+    packets::PlayerAction { status: 3, x: gx, y: gy, z: gz, face: 1, sequence: 11 }
         .encode_body(&mut body);
     mc_network::framing::write_packet(&mut s, packets::PLAY_PLAYER_ACTION_C2S_ID, &body)
         .await
@@ -1118,7 +1118,7 @@ async fn dig_far_from_spawn_still_spawns_drop() {
     }
 
     let mut body = Vec::new();
-    packets::PlayerAction { status: 2, x: gx, y: gy, z: gz, face: 1, sequence: 21 }
+    packets::PlayerAction { status: 3, x: gx, y: gy, z: gz, face: 1, sequence: 21 }
         .encode_body(&mut body);
     mc_network::framing::write_packet(&mut s, packets::PLAY_PLAYER_ACTION_C2S_ID, &body)
         .await
@@ -1185,7 +1185,7 @@ async fn dig_underground_far_from_spawn_drops_near_the_hole() {
     }
 
     let mut body = Vec::new();
-    packets::PlayerAction { status: 2, x: gx, y: gy, z: gz, face: 1, sequence: 31 }
+    packets::PlayerAction { status: 3, x: gx, y: gy, z: gz, face: 1, sequence: 31 }
         .encode_body(&mut body);
     mc_network::framing::write_packet(&mut s, packets::PLAY_PLAYER_ACTION_C2S_ID, &body)
         .await
@@ -1285,7 +1285,7 @@ async fn vanilla_style_walk_then_dig_far_spawns_drop() {
     mc_network::framing::write_packet(&mut s, packets::PLAY_MOVE_POS_C2S_ID, &body).await.unwrap();
 
     let mut body = Vec::new();
-    packets::PlayerAction { status: 2, x: gx, y: gy, z: gz, face: 1, sequence: 41 }
+    packets::PlayerAction { status: 3, x: gx, y: gy, z: gz, face: 1, sequence: 41 }
         .encode_body(&mut body);
     mc_network::framing::write_packet(&mut s, packets::PLAY_PLAYER_ACTION_C2S_ID, &body).await.unwrap();
 
@@ -1344,7 +1344,7 @@ async fn drop_recomputes_rest_y_when_support_is_dug() {
 
     // 挖草 → 掉落 dirt。
     let mut body = Vec::new();
-    packets::PlayerAction { status: 2, x: gx, y: gy, z: gz, face: 1, sequence: 51 }
+    packets::PlayerAction { status: 3, x: gx, y: gy, z: gz, face: 1, sequence: 51 }
         .encode_body(&mut body);
     mc_network::framing::write_packet(&mut s, packets::PLAY_PLAYER_ACTION_C2S_ID, &body).await.unwrap();
     let mut drop_id = None;
@@ -1431,7 +1431,7 @@ async fn drop_leaves_view_then_respawns_on_return() {
 
     // 挖草出土：服务端 last_pos 默认就是出生点，无需先发移动包。
     let mut body = Vec::new();
-    packets::PlayerAction { status: 2, x: gx, y: gy, z: gz, face: 1, sequence: 61 }
+    packets::PlayerAction { status: 3, x: gx, y: gy, z: gz, face: 1, sequence: 61 }
         .encode_body(&mut body);
     mc_network::framing::write_packet(&mut s, packets::PLAY_PLAYER_ACTION_C2S_ID, &body)
         .await

@@ -630,12 +630,12 @@ fn rollback(world: &MutableWorld, x: i32, y: i32, z: i32) -> BlockChange {
     BlockChange { x, y, z, old_id: cur, new_id: cur }
 }
 
-/// 挖掘权威判定（Player Action 0x29）。
-/// - status 0（开始挖掘）：只校验并 ack，**不破坏方块**。原版生存模式下客户端会播放
-///   破坏进度动画，挖掘完成时才发 status 2；在这里即时破坏会导致“点一下就没”（与
-///   原版不一致，见用户反馈）。
-/// - status 2（完成挖掘）：校验通过后破坏方块并按掉落表带出 drops。
-/// - status 1（取消）：只 ack。status 3..=7（丢弃/吃食/换手）：无世界影响，直接忽略。
+/// 挖掘权威判定（Player Action 0x29；status 按 26.3 jar `Action` ordinal）。
+/// - status 0（START 开始挖掘）：只校验并 ack，**不破坏方块**。原版生存模式下客户端会播放
+///   破坏进度动画，进度满后才发 status 3；在这里即时破坏会导致“点一下就没”（与原版不一致）。
+/// - status 3（STOP 完成挖掘）：校验通过后破坏方块并按掉落表带出 drops。
+/// - status 2（ABORT 取消）：只 ack。status 1（CHANGE 朝向）：直接忽略（客户端不走预测）。
+///   status 4+（丢弃/吃食/换手）：无世界影响，直接忽略。
 /// - 非法（越界/超距/出视距/空气/水）：回滚重发现状；`world` 为 None 时忽略不断线。
 /// - 完成挖掘用 `MutableWorld::set_if` 原子 CAS：两连接同时挖同一格只有一方成功并
 ///   生成掉落，另一方拿到回滚（现状）且 `drops` 为空。
@@ -1292,8 +1292,9 @@ async fn play_loop(
                 }
             }
             Ok((id, payload)) if id == packets::PLAY_PLAYER_ACTION_C2S_ID => {
-                // 挖掘：服务端权威判定 + BlockUpdate/Ack 回包；仅 FINISH_DIG 真落子
-                // （START_DIG 只 ack，让客户端播放原版破坏进度动画）。
+                // 挖掘：服务端权威判定 + BlockUpdate/Ack 回包；仅 STOP(3) 真落子
+                // （START(0) 只 ack，让客户端播放原版破坏进度动画；ABORT(2) 只 ack 不落子，
+                // 之前把 1/2 当取消/完成，松开鼠标即破坏；CHANGE(1) 直接忽略）。
                 // 成功掉落同步生成物品实体（Spawn+Data，含初速，客户端自行模拟弹跳）。
                 // 判定前强制 flush：保证 view.center() 已跟上玩家（出视距误回滚），
                 // 也保证区块包先于 BlockUpdate/Spawn 到达客户端。
@@ -1834,20 +1835,48 @@ mod tests {
             eye,
             center,
             2,
-            &packets::PlayerAction { status: 2, x, y, z, face: 1, sequence: 1 },
+            &packets::PlayerAction {
+                status: packets::PLAYER_ACTION_FINISH_DIG, x, y, z, face: 1, sequence: 1,
+            },
         )
         .unwrap();
         assert!(air_out.drops.is_empty(), "rollback must not drop");
-        // cancel 只 ack，无掉落。
+        // cancel(ABORT=2) 只 ack，无掉落。
         let cancel = decide_dig(
             Some(&world),
             eye,
             center,
             2,
-            &packets::PlayerAction { status: 1, x, y, z, face: 0, sequence: 8 },
+            &packets::PlayerAction {
+                status: packets::PLAYER_ACTION_CANCEL_DIG, x, y, z, face: 0, sequence: 8,
+            },
         )
         .unwrap();
         assert!(cancel.drops.is_empty());
+    }
+
+    #[test]
+    fn abort_and_direction_change_never_break() {
+        // P18.2 回归：ABORT(2) 是松开鼠标，不是完成——绝不能落子；
+        // CHANGE(1) 直接忽略（客户端不走预测，不用 ack）。
+        let (world, feet, center) = dig_fixture();
+        let (x, y, z) = grass_top();
+        let eye = eye_of(feet);
+        let abort = packets::PlayerAction {
+            status: packets::PLAYER_ACTION_CANCEL_DIG, x, y, z, face: 1, sequence: 9,
+        };
+        let out = decide_dig(Some(&world), eye, center, 2, &abort).unwrap();
+        assert!(out.changes.is_empty(), "ABORT must not break the block");
+        assert!(out.drops.is_empty());
+        assert_eq!(world.get(x, y, z), mc_world::GRASS_BLOCK_ID);
+        let change = packets::PlayerAction {
+            status: packets::PLAYER_ACTION_CHANGE_DIRECTION, x, y, z, face: 1, sequence: 10,
+        };
+        assert!(
+            decide_dig(Some(&world), eye, center, 2, &change).is_none(),
+            "CHANGE direction must be ignored without ack"
+        );
+        assert_eq!(world.get(x, y, z), mc_world::GRASS_BLOCK_ID);
     }
 
     #[test]
@@ -1862,7 +1891,9 @@ mod tests {
             eye,
             center,
             2,
-            &packets::PlayerAction { status: 2, x, y, z, face: 1, sequence: 1 },
+            &packets::PlayerAction {
+                    status: packets::PLAYER_ACTION_FINISH_DIG, x, y, z, face: 1, sequence: 1,
+                },
         )
         .unwrap();
         assert_eq!(air_out.changes.len(), 1);
@@ -1874,7 +1905,9 @@ mod tests {
             eye,
             center,
             2,
-            &packets::PlayerAction { status: 2, x: x + 100, y, z, face: 1, sequence: 2 },
+            &packets::PlayerAction {
+                status: packets::PLAYER_ACTION_FINISH_DIG, x: x + 100, y, z, face: 1, sequence: 2,
+            },
         )
         .unwrap();
         assert_eq!(far.changes[0].old_id, far.changes[0].new_id);
@@ -1911,13 +1944,15 @@ mod tests {
             eye,
             center,
             2,
-            &packets::PlayerAction { status: 1, x, y, z, face: 0, sequence: 8 },
+            &packets::PlayerAction {
+                status: packets::PLAYER_ACTION_CANCEL_DIG, x, y, z, face: 0, sequence: 8,
+            },
         )
         .unwrap();
         assert!(cancel.changes.is_empty(), "cancel must only ack");
         assert_eq!(cancel.sequence, 8);
         // 丢弃/吃食/换手：无世界影响，直接忽略（不 ack，避免误确认旧序列）。
-        for status in [3, 4, 5, 6, 7, 99] {
+        for status in [4, 5, 6, 7, 8, 99] {
             assert!(
                 decide_dig(
                     Some(&world),
@@ -1937,7 +1972,9 @@ mod tests {
                 eye,
                 center,
                 2,
-                &packets::PlayerAction { status: 2, x, y, z, face: 1, sequence: 1 },
+                &packets::PlayerAction {
+                    status: packets::PLAYER_ACTION_FINISH_DIG, x, y, z, face: 1, sequence: 1,
+                },
             )
             .is_none()
         );
