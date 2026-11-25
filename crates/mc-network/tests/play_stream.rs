@@ -916,6 +916,53 @@ async fn drag_then_place_uses_held_block() {
     let _ = std::fs::remove_dir_all(&dir);
 }
 
+/// P28.3 回归：切过槽又重进，Join 必须发 S2C 0x6B（VarInt 选中槽）纠正客户端。
+/// 客户端重进默认选中 0 格，服务端 `selected` 随存档恢复——不发就会"你看着选了 A，
+/// 服务端按 B 出手"（Q 从另一格扔东西/放错材料），且之后再无纠正机会。
+/// 新背包 selected=0 不发包（零包序影响，老测试零改动）。
+#[tokio::test]
+async fn rejoin_syncs_selected_held_slot() {
+    use mc_network::DropState;
+    let dir = std::env::temp_dir().join(format!("mc-heldsync-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    let (tx, rx) = crossbeam_channel::unbounded::<PlayEvent>();
+    let mutable = Arc::new(MutableWorld::new(DEFAULT_SEED));
+    let cache = Arc::new(ChunkCache::new(DEFAULT_SEED, 64).with_mutable(Arc::clone(&mutable)));
+    let drops = Arc::new(DropState::new(dir.clone(), DEFAULT_SEED));
+    let config = NetConfig::new(100, "heldsync".into(), Arc::new(AtomicUsize::new(0)))
+        .with_play_events(tx)
+        .with_view_distance(2)
+        .with_chunk_cache(cache)
+        .with_mutable_world(Arc::clone(&mutable))
+        .with_drops(Arc::clone(&drops));
+    let addr = spawn_server(config).await;
+    let mut s = login_and_join(addr, "HeldSyncer", 2).await;
+    let (id, _) = read_frame_timeout(&mut s, Duration::from_secs(5)).await.unwrap();
+    assert_eq!(id, packets::PLAY_SET_CONTAINER_CONTENT_S2C_ID);
+
+    // 切到 3 格（C2S Short BE），随后断线；存盘带走 selected=3。
+    let body = [0u8, 3u8];
+    mc_network::framing::write_packet(&mut s, packets::PLAY_SET_HELD_ITEM_C2S_ID, &body)
+        .await
+        .unwrap();
+    drop(s);
+    match next_event(&rx).await {
+        PlayEvent::Disconnect { .. } => {}
+        other => panic!("expected disconnect event, got {other:?}"),
+    }
+
+    // 同名重进：先 Content，再 S2C 0x6B（VarInt 3），客户端选中对齐服务端。
+    let mut s = login_and_join(addr, "HeldSyncer", 2).await;
+    let (id, _) = read_frame_timeout(&mut s, Duration::from_secs(5)).await.unwrap();
+    assert_eq!(id, packets::PLAY_SET_CONTAINER_CONTENT_S2C_ID);
+    let (id, payload) = read_frame_timeout(&mut s, Duration::from_secs(5)).await.unwrap();
+    assert_eq!(id, packets::PLAY_SET_HELD_SLOT_S2C_ID, "rejoin must sync selected slot");
+    assert_eq!(read_varint(&payload).unwrap().0, 3);
+    drop(s);
+    drop(rx);
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
 /// 回归：空手 / 手持无方块映射物品（如种子）右键不落子，只回 ack。
 /// 之前空手/未知物品回退放石头（P17 兼容），现按原版什么都不干。
 #[tokio::test]

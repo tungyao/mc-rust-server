@@ -416,6 +416,21 @@ async fn send_join_inventory(
     if let Err(e) = send_full_inventory(stream, opts, drops).await {
         debug!("play uuid={} join inventory send failed ({e})", profile.uuid);
     }
+    // P28.3 Join 选中同步：读盘恢复的 selected 经 S2C 0x6B 发给客户端。
+    // 客户端重进默认选中 0 格，不发会造成"你看着选了 A，服务端按 B 出手"
+    //（Q 扔错格/放错材料），且之后不再有纠正机会。
+    // 只在非零时发送：新背包 selected=0 与客户端默认一致，无需多一个包
+    //（所有既有 e2e 都是新背包，零包序影响）；切过槽又重进的才需要纠正。
+    let selected = drops.with_inventory(opts.conn_id, |inv| inv.selected());
+    if let Some(sel) = selected.filter(|s| *s != 0) {
+        let body = packets::encode_set_held_slot_s2c(sel);
+        if let Err(e) =
+            write_packet_any(stream, packets::PLAY_SET_HELD_SLOT_S2C_ID, &body, opts.threshold)
+                .await
+        {
+            debug!("play uuid={} join held sync failed ({e})", profile.uuid);
+        }
+    }
 }
 
 /// 压缩感知写包：threshold>=0 走压缩帧，否则普通帧。

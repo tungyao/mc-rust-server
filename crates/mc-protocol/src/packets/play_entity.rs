@@ -43,6 +43,16 @@ pub const PLAY_SET_CONTAINER_SLOT_S2C_ID: i32 = super::packet_id("clientbound.pl
 /// C2S Set Held Item / Click Container 的 ID 见 `play_block`
 ///（`PLAY_SET_HELD_ITEM_C2S_ID` 0x36 / `PLAY_CLICK_CONTAINER_C2S_ID` 0x12）：
 /// C2S 0x36 是 Short（本文件 `decode_set_held_item_c2s`），注意 S2C 同名包是 VarInt。
+/// S2C Set Held Slot：`set_held_slot`（clientbound.play=107=0x6B，生成表断言锁定）——
+/// 服务端→客户端同步选中快捷栏（VarInt 0..=8）；Join 时必发一次，对齐客户端默认选 0。
+pub const PLAY_SET_HELD_SLOT_S2C_ID: i32 = super::packet_id("clientbound.play", "set_held_slot");
+
+/// S2C Set Held Slot 包体：VarInt 选中槽 0..=8（越界由调用方保证不发送）。
+pub fn encode_set_held_slot_s2c(slot: u8) -> Vec<u8> {
+    let mut out = Vec::new();
+    write_varint(slot as i32, &mut out);
+    out
+}
 
 /// `minecraft:item` 在 EntityType 注册表中的位置，编译期从 `mc-registry` 由
 /// data/777/entities.json 生成的 ENTITIES 表派生（26.3 实测值 72）。
@@ -762,7 +772,17 @@ mod tests {
         assert_eq!(PLAY_SET_CONTAINER_SLOT_S2C_ID, 0x14);
         assert_eq!(super::super::play_block::PLAY_SET_HELD_ITEM_C2S_ID, 0x36);
         assert_eq!(super::super::play_block::PLAY_CLICK_CONTAINER_C2S_ID, 0x12);
+        assert_eq!(PLAY_SET_HELD_SLOT_S2C_ID, 0x6B);
         assert_eq!(ITEM_ENTITY_TYPE_ID, 72);
+    }
+
+    #[test]
+    fn set_held_slot_s2c_is_varint_roundtrip() {
+        // S2C 0x6B 包体是单个 VarInt（与 C2S 0x36 Short 不同，jar 布局，勿改）。
+        for slot in 0..=8u8 {
+            let b = encode_set_held_slot_s2c(slot);
+            assert_eq!(crate::read_varint(&b).unwrap().0, slot as i32);
+        }
     }
 
     #[test]
