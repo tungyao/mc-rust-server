@@ -6,7 +6,8 @@
 ## 1. 一句话现状
 
 **P18：掉落看得见、捡得起来、进背包看得见。** 挖方块按掉落表生成物品实体
-（AddEntity+SetEntityData），重力下落停在支撑面（Teleport 同步），靠近 <1.5 格
+（AddEntity+SetEntityData，Spawn 带真实初速），重力下落停在支撑面（客户端预测 +
+全服唯一 50ms tick；已移除每连接每 tick 的 TeleportEntitySync 覆盖），靠近 <1.5 格
 （delay 10 ticks 后）拾取（TakeItem 动画+Remove+入库+全量背包同步）；
 C2S SetHeldItem 切手持，放置按手持映射扣 1（单槽同步），未知/空手回退石头
 （P17 兼容）。背包存档 `world/player-<user>-<seed>.dat`（用户名键、seed 隔离），
