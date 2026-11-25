@@ -1922,3 +1922,105 @@ async fn p27_leaves_decay_after_trunk_removed() {
     drop(rx);
     let _ = std::fs::remove_dir_all(&dir);
 }
+
+/// P28 端到端（只追加）：先发旋转包朝 +X（yaw=-90 平视），再按 Q → Spawn 必须偏向面前
+/// （眼高 + 朝向×0.5 格），初速非零且指向 +X；数量语义与 P19 一致（1 个石头、槽 63、恒回 Ack）。
+#[tokio::test]
+async fn throw_with_look_flies_forward_with_velocity() {
+    use mc_network::DropState;
+    let dir = std::env::temp_dir().join(format!("mc-p28-throwdir-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    let mutable = Arc::new(MutableWorld::new(DEFAULT_SEED));
+    let cache = Arc::new(ChunkCache::new(DEFAULT_SEED, 64).with_mutable(Arc::clone(&mutable)));
+    let drops = Arc::new(DropState::new(dir.clone(), DEFAULT_SEED));
+    let config = NetConfig::new(100, "p28-throwdir".into(), Arc::new(AtomicUsize::new(0)))
+        .with_view_distance(2)
+        .with_chunk_cache(cache)
+        .with_mutable_world(Arc::clone(&mutable))
+        .with_drops(Arc::clone(&drops));
+    let addr = spawn_server(config).await;
+    let mut s = login_and_join(addr, "ThrowLook", 2).await;
+    let (id, _) = read_frame_timeout(&mut s, Duration::from_secs(5)).await.unwrap();
+    assert_eq!(id, packets::PLAY_SET_CONTAINER_CONTENT_S2C_ID);
+
+    let spawn = WorldGen::new(DEFAULT_SEED).spawn_pos();
+    let (fx, fy, fz) = (spawn.0 as f64 + 0.5, spawn.1 as f64, spawn.2 as f64 + 0.5);
+    // 朝 +X 平视（yaw=-90 → dir=(1,0,0)；原版 directionFromRotation 同构，单测已断言）。
+    let mut pkt = Vec::new();
+    packets::encode_move_posrot_packet(
+        &packets::MovePlayerPosRot {
+            x: fx,
+            y: fy,
+            z: fz,
+            yaw: -90.0,
+            pitch: 0.0,
+            on_ground: true,
+            horizontal_collision: false,
+        },
+        &mut pkt,
+    );
+    use tokio::io::AsyncWriteExt;
+    s.write_all(&pkt).await.unwrap();
+
+    // Q（DROP_ITEM=5，seq=81）：手持 64 石头 → 扔 1 个。
+    let mut body = Vec::new();
+    packets::PlayerAction { status: 5, x: spawn.0, y: spawn.1 - 1, z: spawn.2, face: 1, sequence: 81 }
+        .encode_body(&mut body);
+    mc_network::framing::write_packet(&mut s, packets::PLAY_PLAYER_ACTION_C2S_ID, &body)
+        .await
+        .unwrap();
+    // 扔完立刻走开 4 格（同 chunk），避免 10 ticks 后被自捡。
+    send_pos_y(&mut s, fx + 4.0, fy, fz).await;
+
+    let (mut saw_spawn, mut saw_data, mut saw_content, mut saw_ack) = (false, false, false, false);
+    for _ in 0..16 {
+        let (id, payload) = read_frame_timeout(&mut s, Duration::from_secs(5)).await.unwrap();
+        match id {
+            packets::PLAY_SPAWN_ENTITY_S2C_ID => {
+                let sp = packets::SpawnItemEntity::decode_body(&payload).unwrap().0;
+                assert!((sp.x - fx - 0.5).abs() < 0.01, "spawn must lead +X by 0.5, got x={}", sp.x);
+                assert!((sp.z - fz).abs() < 0.01, "flat +X throw must not drift in Z, got z={}", sp.z);
+                assert!(
+                    (sp.y - fy - mc_world::EYE_HEIGHT).abs() < 0.01,
+                    "spawn must be at eye height, got y={}",
+                    sp.y
+                );
+                assert!(
+                    (sp.vel.x - 0.06).abs() < 0.01,
+                    "forward speed must be +X 0.06, got {}",
+                    sp.vel.x
+                );
+                assert!(
+                    (sp.vel.y - 0.25).abs() < 0.01,
+                    "flat throw keeps the dig-drop up bias, got {}",
+                    sp.vel.y
+                );
+                assert!(sp.vel.z.abs() < 0.01, "flat +X throw must not drift in Z, got {}", sp.vel.z);
+                saw_spawn = true;
+            }
+            packets::PLAY_SET_ENTITY_DATA_S2C_ID => {
+                let (data, _) = packets::ItemEntityData::decode_body(&payload).unwrap();
+                assert_eq!(data.slot, packets::Slot { count: 1, item_id: 1 });
+                saw_data = true;
+            }
+            packets::PLAY_SET_CONTAINER_CONTENT_S2C_ID => {
+                let (c, _) = packets::SetContainerContent::decode_body(&payload).unwrap();
+                assert_eq!(c.slots[36], packets::Slot { count: 63, item_id: 1 });
+                assert_eq!(c.carried, packets::Slot::empty());
+                saw_content = true;
+            }
+            packets::PLAY_BLOCK_CHANGED_ACK_S2C_ID => {
+                if read_varint(&payload).unwrap().0 == 81 {
+                    saw_ack = true;
+                }
+            }
+            other => panic!("unexpected packet {other:#04x} after aimed Q throw"),
+        }
+        if saw_spawn && saw_data && saw_content && saw_ack {
+            break;
+        }
+    }
+    assert!(saw_spawn && saw_data && saw_content && saw_ack, "aimed Q must spawn ahead + sync + ack");
+    drop(s);
+    let _ = std::fs::remove_dir_all(&dir);
+}

@@ -651,6 +651,33 @@ $natives = 'C:\Users\qwe\AppData\Local\Temp\mc263natives'
       旧 25 项（play_stream 17 + play_actions 8）与旧 admin e2e 一字未动，全绿。
       遗留 TODO：原版真机复验（耕地手感/催熟手感/decay 可见性/苹果拾取）；
       踩耕地还原、水合加速、骨粉长草、decay 跨重启持久化。
+21. **P28 Q 扔按视角飞（本轮，未真机）**：
+    - **旋转包结论**：777 旋转包一直存在且包体已知——C2S `move_player_pos_rot`(0x1F) 与
+      `move_player_rot`(0x20)，ID 来自 `data/777/packets.json` 生成表（`packet_id("serverbound.play",
+      "move_player_pos_rot"/"move_player_rot")`，编译期断言 `0x1F`/`0x20`，
+      见 `play_sync.rs::c2s_movement_ids_are_0x1e_to_0x21_not_keepalive` 单测；与
+      `docs/packet-map-777.md` §4 的 minecraft.wiki Play serverbound 表 4 行一致：
+      0x1E Pos / 0x1F PosRot / 0x20 Rot / 0x21 StatusOnly）。之前不是包未知，
+      而是 `play_loop` 把 `Rot` 归入 `_` 忽略、只用 `Pos`/`PosRot` 更新 `last_pos`，
+      yaw/pitch 从未存过——所以 P19 扔出物只能掉在脚下。本轮把该分支接上，
+      无需抓包，不走"按最后移动方向"降级。
+    - **改动**：`play_loop` 新增 `last_look: (f32, f32)`（PosRot/Rot 更新，Pos/Flags 保持，
+      初始 `(0,0)` 平视 +Z；断线即丢，随连接生命期，无需清理）；`spawn_thrown_items`/
+      `handle_throw_action` 加 `look` 参（两处接线：PlayerAction Q 与 ContainerClick THROW）。
+      生成点 = 眼高（feet + `EYE_HEIGHT` 1.62）+ 朝向×0.5 格；初速 = 朝向×0.06 +
+      纵向基线 0.25（P18.2 `spawn` 默认 `vy=0.25`/水平 hash ±0.1 的同数量级下限——轻掷）。
+      拾取/合并/广播/数量语义全不动（`spawn_with_velocity` 新实体才带定向初速，
+      被合并吸收的不改既有速度；空手 Q/光标非空 THROW 仍只回包不落子）。
+    - **与原版差异（有意）**：原版 Q 扔初速约 0.3（眼位前方、飞数格），本服取 0.06 是因为
+      拾取延迟仅 10 ticks（0.5s）且半径 1.5——0.3 会飞出自捡半径，导致旧 e2e
+      `broadcast_thrown_drop_spawns_for_viewer_and_pickup_removes`（A 原地不动等拾取）
+      失败。轻掷落点在面前 ~1.3 格，站立 0.5s 可自捡；方向性由 0.5 格前置 + 非零初速体现。
+      TODO：加长自捡延迟/自扔暂不可捡（对齐原版手感）后，可把 `THROW_SPEED` 恢复到 0.3 量级；
+      空手 Q、背包开屏 Q（button 0/1、光标非空无操作）数量语义未动；真机复验扔手感/抛物线/落点。
+    - 测试：`drop_sync` 单测（四正向 + 垂直 + 45° 边界、`look_dir` 单位长；平扔初速口径；
+      400 ticks 物理仿真落点仍在自捡半径内）+ `items` 单测（显式初速保留/合并语义）+
+      `play_actions.rs` 只追加 1 个 e2e（PosRot yaw=-90 → Spawn x+0.5/眼高、vel≈(0.06,0.25,0)）。
+      旧 26 项（play_stream 17 + play_actions 9）一个字未动，全绿。
 
 ## 6. 关键文件
 
