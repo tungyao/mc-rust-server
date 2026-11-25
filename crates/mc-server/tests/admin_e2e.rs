@@ -279,3 +279,81 @@ async fn admin_give_kick_save_flow() {
     env.shutdown.store(true, Ordering::SeqCst);
     let _ = std::fs::remove_dir_all(env.world_dir.parent().unwrap());
 }
+
+// P29: 物品可视化——`/api/items` 200 + 中文字段；give 走新增 `item_id` 字段兼容
+//（响应旧字段形状不变）；背包 `slots` 旧字段不变 + `slots_detail` 中文明细。
+#[tokio::test]
+async fn admin_items_catalog_give_compat_and_inventory_detail() {
+    let env = boot().await;
+    // items：全量 1658，条目含 id/注册名/中文名/分类。
+    let (st, b) = http(env.admin, "GET", "/api/items", "").await;
+    assert_eq!(st, 200);
+    let v = j(&b);
+    assert_eq!(v["ok"], true);
+    assert_eq!(v["count"], 1658);
+    assert_eq!(v["items"].as_array().unwrap().len(), 1658);
+    let dirt_id = mc_registry::item_id("minecraft:dirt").unwrap() as i64;
+    let dirt = v["items"].as_array().unwrap().iter().find(|e| e["id"] == dirt_id).unwrap().clone();
+    assert_eq!(dirt["name"], "minecraft:dirt");
+    assert_eq!(dirt["name_zh"], "泥土");
+    assert_eq!(dirt["category"], "方块");
+    // 表外回退：注册名原样、分类“其他”。
+    let sword_id = mc_registry::item_id("minecraft:diamond_sword").unwrap() as i64;
+    let sword = v["items"].as_array().unwrap().iter().find(|e| e["id"] == sword_id).unwrap().clone();
+    assert_eq!(sword["name_zh"], "minecraft:diamond_sword");
+    assert_eq!(sword["category"], "其他");
+
+    let mut s = join(env.game, "ItemViewer").await;
+    let mut online = false;
+    for _ in 0..50 {
+        let (st, b) = http(env.admin, "GET", "/api/online", "").await;
+        assert_eq!(st, 200);
+        if j(&b)["count"] == 1 {
+            online = true;
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
+    assert!(online);
+    // give 新字段：数字 item_id 直发；响应旧字段精确兼容。
+    let (st, b) = http(
+        env.admin,
+        "POST",
+        "/api/give",
+        &format!(r#"{{"username":"ItemViewer","item_id":{dirt_id},"count":7}}"#),
+    )
+    .await;
+    assert_eq!(st, 200);
+    assert_eq!(j(&b), serde_json::json!({"ok": true, "leftover": 0, "delivered": true}));
+    // 客户端收到同步；复核 slots 旧字段不变 + slots_detail 中文对得上。
+    let mut synced = false;
+    for _ in 0..40 {
+        let (id, payload) = read_frame_timeout(&mut s, Duration::from_secs(5)).await.unwrap();
+        if id == packets::PLAY_SET_CONTAINER_CONTENT_S2C_ID {
+            let (c, _) = packets::SetContainerContent::decode_body(&payload).unwrap();
+            if c.slots.iter().any(|sl| sl.item_id as i64 == dirt_id && sl.count == 7) {
+                synced = true;
+                break;
+            }
+        }
+    }
+    assert!(synced);
+    let (st, b) = http(env.admin, "GET", "/api/inventory?username=ItemViewer", "").await;
+    assert_eq!(st, 200);
+    let inv = j(&b);
+    assert!(inv["slots"].as_array().unwrap().iter().any(|e| e[1] == dirt_id && e[2] == 7));
+    let d = inv["slots_detail"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|e| e["id"] == dirt_id && e["count"] == 7)
+        .expect("detail must carry the given dirt")
+        .clone();
+    assert_eq!(d["name"], "minecraft:dirt");
+    assert_eq!(d["name_zh"], "泥土");
+    assert_eq!(d["category"], "方块");
+
+    env.drops.stop_global_tick();
+    env.shutdown.store(true, Ordering::SeqCst);
+    let _ = std::fs::remove_dir_all(env.world_dir.parent().unwrap());
+}

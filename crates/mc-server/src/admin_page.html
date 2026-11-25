@@ -13,6 +13,14 @@ button:hover { background: #333; cursor: pointer; }
 .card { background: #1a1a1a; padding: 8px 12px; margin-bottom: 1em; }
 .warn { color: #fa0; }
 pre { white-space: pre-wrap; }
+.grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(110px, 1fr)); gap: 4px; margin-top: 6px; }
+.cell { background: #222; border: 1px solid #555; padding: 4px; text-align: center; cursor: pointer; }
+.cell:hover { background: #333; }
+.cell.sel { border-color: #fa0; background: #332d10; }
+.cell small { color: #888; display: block; font-size: 11px; word-break: break-all; }
+.cell.empty { background: #181818; color: #555; cursor: default; }
+.row { margin: 4px 0; }
+.hint { color: #888; font-size: 12px; }
 </style>
 </head>
 <body>
@@ -33,28 +41,31 @@ pre { white-space: pre-wrap; }
 
 <div class="card">
 <h2>发放物品</h2>
+<div class="row">
 <label>玩家 <select id="giveUser"></select></label>
-<label>物品 <input id="giveItem" list="items" value="minecraft:cobblestone" size="28"></label>
-<datalist id="items">
-<option value="minecraft:stone"></option>
-<option value="minecraft:dirt"></option>
-<option value="minecraft:cobblestone"></option>
-<option value="minecraft:oak_log"></option>
-<option value="minecraft:coal"></option>
-<option value="minecraft:raw_iron"></option>
-<option value="minecraft:wheat_seeds"></option>
-<option value="minecraft:oak_sapling"></option>
-</datalist>
 <label>数量(1-640) <input id="giveCount" type="number" value="64" min="1" max="640"></label>
+</div>
+<div class="row">
+<label>分类 <select id="giveCat" onchange="renderGiveGrid()"><option value="">全部</option></select></label>
+<label>搜索 <input id="giveQ" placeholder="中文名/注册名/id" size="24" oninput="renderGiveGrid()"></label>
+<span class="hint" id="giveCount2"></span>
+</div>
+<div id="giveGrid" class="grid"></div>
+<div class="row">已选：<span id="giveSel">minecraft:cobblestone</span>
 <button onclick="give()">发放</button>
-<span id="giveMsg"></span>
+<span id="giveMsg"></span></div>
 </div>
 
 <div class="card">
 <h2>查看背包</h2>
+<div class="row">
 <label>玩家 <select id="invUser"></select></label>
+<label>分类 <select id="invCat" onchange="renderInvGrid()"><option value="">全部</option></select></label>
+<label>关键词 <input id="invQ" placeholder="中文名/注册名" size="20" oninput="renderInvGrid()"></label>
 <button onclick="showInv()">查询</button>
-<pre id="inv"></pre>
+<span class="hint" id="invMsg"></span>
+</div>
+<div id="invGrid" class="grid"></div>
 </div>
 
 <div class="card">
@@ -63,10 +74,89 @@ pre { white-space: pre-wrap; }
 </div>
 
 <script>
+let CATALOG = [], BYID = {}, SEL = 'minecraft:cobblestone', LASTINV = null;
 async function jget(p) { const r = await fetch(p); return r.json(); }
 async function jpost(p, b) {
   const r = await fetch(p, {method: 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify(b)});
   return {status: r.status, body: await r.json()};
+}
+function matchQ(it, q) {
+  q = (q || '').trim().toLowerCase();
+  if (!q) return true;
+  return (it.name_zh || '').toLowerCase().includes(q) || (it.name || '').toLowerCase().includes(q) || String(it.id) === q;
+}
+async function loadItems() {
+  try {
+    const v = await jget('/api/items');
+    CATALOG = v.items || []; BYID = {};
+    for (const it of CATALOG) BYID[it.id] = it;
+    for (const id of ['giveCat', 'invCat']) {
+      const sel = document.getElementById(id);
+      const cats = [...new Set(CATALOG.map(i => i.category))].sort();
+      for (const c of cats) { const o = document.createElement('option'); o.value = c; o.textContent = c; sel.appendChild(o); }
+    }
+    renderGiveGrid();
+  } catch (e) { document.getElementById('giveMsg').textContent = 'items load failed: ' + e; }
+}
+function renderGiveGrid() {
+  const cat = document.getElementById('giveCat').value, q = document.getElementById('giveQ').value;
+  const g = document.getElementById('giveGrid'); g.innerHTML = '';
+  const list = CATALOG.filter(it => (!cat || it.category === cat) && matchQ(it, q));
+  const CAP = 240;
+  document.getElementById('giveCount2').textContent = '共 ' + list.length + ' 项' + (list.length > CAP ? '（只显示前' + CAP + '，请加过滤条件）' : '');
+  for (const it of list.slice(0, CAP)) {
+    const d = document.createElement('div');
+    d.className = 'cell' + (it.name === SEL ? ' sel' : '');
+    const b = document.createElement('div'); b.textContent = it.name_zh; d.appendChild(b);
+    const s = document.createElement('small'); s.textContent = it.name + ' #' + it.id; d.appendChild(s);
+    d.onclick = (function(nm) { return function() {
+      SEL = nm; document.getElementById('giveSel').textContent = nm; renderGiveGrid();
+    }; })(it.name);
+    g.appendChild(d);
+  }
+}
+async function give() {
+  const r = await jpost('/api/give', {
+    username: document.getElementById('giveUser').value,
+    item: SEL,
+    count: parseInt(document.getElementById('giveCount').value, 10),
+  });
+  document.getElementById('giveMsg').textContent = 'HTTP ' + r.status + ' ' + JSON.stringify(r.body);
+}
+async function showInv() {
+  const u = document.getElementById('invUser').value;
+  try {
+    LASTINV = await jget('/api/inventory?username=' + encodeURIComponent(u));
+    document.getElementById('invMsg').textContent = '';
+  } catch (e) { document.getElementById('invMsg').textContent = 'fetch failed: ' + e; LASTINV = null; }
+  renderInvGrid();
+}
+function renderInvGrid() {
+  const g = document.getElementById('invGrid'); g.innerHTML = '';
+  if (!LASTINV || !LASTINV.ok) return;
+  const cat = document.getElementById('invCat').value, q = (document.getElementById('invQ').value || '').trim();
+  const filtering = !!cat || !!q;
+  const det = {};
+  for (const d of (LASTINV.slots_detail || [])) det[d.slot] = d;
+  let shown = 0, total = 0;
+  for (let s = 0; s < 46; s++) {
+    const d = det[s];
+    if (d) {
+      total++;
+      if (cat && d.category !== cat) continue;
+      if (q && !matchQ(d, q)) continue;
+      shown++;
+      const c = document.createElement('div'); c.className = 'cell';
+      const b = document.createElement('div'); b.textContent = d.name_zh + ' ×' + d.count; c.appendChild(b);
+      const sm = document.createElement('small'); sm.textContent = '[' + s + '] ' + d.name; c.appendChild(sm);
+      g.appendChild(c);
+    } else if (!filtering) {
+      const c = document.createElement('div'); c.className = 'cell empty';
+      const b = document.createElement('div'); b.textContent = '[' + s + '] 空'; c.appendChild(b);
+      g.appendChild(c);
+    }
+  }
+  document.getElementById('invMsg').textContent = '非空 ' + total + ' 格' + (filtering ? '（显示 ' + shown + '）' : '');
 }
 async function refreshWorld() {
   try { document.getElementById('world').textContent = JSON.stringify(await jget('/api/world'), null, 1); }
@@ -105,24 +195,12 @@ async function refreshOnline() {
     }
   } catch (e) { /* next poll retries */ }
 }
-async function give() {
-  const r = await jpost('/api/give', {
-    username: document.getElementById('giveUser').value,
-    item: document.getElementById('giveItem').value,
-    count: parseInt(document.getElementById('giveCount').value, 10),
-  });
-  document.getElementById('giveMsg').textContent = 'HTTP ' + r.status + ' ' + JSON.stringify(r.body);
-}
-async function showInv() {
-  const u = document.getElementById('invUser').value;
-  document.getElementById('inv').textContent = JSON.stringify(await jget('/api/inventory?username=' + encodeURIComponent(u)), null, 1);
-}
 async function saveNow() {
   const r = await jpost('/api/save', {});
   document.getElementById('saveMsg').textContent = JSON.stringify(r.body);
   refreshWorld();
 }
-refreshWorld(); refreshOnline();
+loadItems(); refreshWorld(); refreshOnline();
 setInterval(refreshWorld, 5000);
 setInterval(refreshOnline, 2000);
 </script>

@@ -27,6 +27,8 @@ use std::time::Duration;
 
 use serde::Deserialize;
 
+use crate::admin_items;
+
 /// 管理线程共享状态（与游戏线程共享的 `Arc`，`main.rs` 组装）。
 #[derive(Debug, Clone)]
 pub struct AdminState {
@@ -55,6 +57,11 @@ impl AdminResponse {
 
     fn err(status: u16, msg: impl Into<String>) -> Self {
         Self::json(status, serde_json::json!({"ok": false, "error": msg.into()}))
+    }
+
+    /// 已序列化的缓存体直接透传（P29 `/api/items` 约几十 KB，只生成一次）。
+    fn raw(status: u16, body: Vec<u8>) -> Self {
+        Self { status, content_type: "application/json", body }
     }
 
     fn html(body: &'static str) -> Self {
@@ -261,6 +268,8 @@ struct GiveReq {
     username: Option<String>,
     conn_id: Option<u64>,
     item: Option<String>,
+    /// P29 新增：数字 id 直发（与 `item` 二选一，`item` 优先；旧字段不动）。
+    item_id: Option<i32>,
     count: Option<i32>,
 }
 
@@ -317,10 +326,20 @@ fn handle_give(state: &AdminState, body: &[u8]) -> AdminResponse {
     if !(1..=GIVE_MAX_COUNT).contains(&count) {
         return AdminResponse::err(400, format!("count must be 1..={GIVE_MAX_COUNT}"));
     }
-    let item_id = match req.item.as_deref().map(resolve_item) {
-        Some(Ok(id)) => id,
-        Some(Err(e)) => return AdminResponse::err(400, e),
-        None => return AdminResponse::err(400, "item required"),
+    // P29：`item`（名/数字串）优先，缺省时可用新增的 `item_id` 数字字段；响应形状不变。
+    let item_id = match (req.item.as_deref(), req.item_id) {
+        (Some(s), _) => match resolve_item(s) {
+            Ok(id) => id,
+            Err(e) => return AdminResponse::err(400, e),
+        },
+        (None, Some(n)) => {
+            if n > 0 && mc_registry::item_name(n as u32).is_some() {
+                n
+            } else {
+                return AdminResponse::err(400, format!("unknown item: {n}"));
+            }
+        }
+        (None, None) => return AdminResponse::err(400, "item required"),
     };
     let (conn, user) = match resolve_conn(state, req.username.as_deref(), req.conn_id) {
         Ok(v) => v,
@@ -371,6 +390,20 @@ fn handle_inventory(state: &AdminState, query: &str) -> AdminResponse {
             }
         })
         .collect();
+    // P29 新增：格子中文明细（`slots` 旧字段原样保留，只增不改）。
+    let detail: Vec<serde_json::Value> = filled
+        .iter()
+        .map(|s| {
+            let id = s[1] as u32;
+            let (name, zh, cat) = admin_items::item_info_by_id(id)
+                .map(|(n, z, c)| (n.to_string(), z.to_string(), c.to_string()))
+                .unwrap_or((format!("unknown:{id}"), format!("unknown:{id}"), "其他".to_string()));
+            serde_json::json!({
+                "slot": s[0], "id": s[1], "count": s[2],
+                "name": name, "name_zh": zh, "category": cat,
+            })
+        })
+        .collect();
     AdminResponse::json(
         200,
         serde_json::json!({
@@ -379,6 +412,7 @@ fn handle_inventory(state: &AdminState, query: &str) -> AdminResponse {
             "conn_id": conn,
             "selected": selected,
             "slots": filled,
+            "slots_detail": detail,
         }),
     )
 }
@@ -413,12 +447,18 @@ fn handle_save(state: &AdminState) -> AdminResponse {
     }
 }
 
+/// P29 物品清单（全量 1658 项，服务端一次生成缓存，页面按需取一次）。
+fn handle_items() -> AdminResponse {
+    AdminResponse::raw(200, admin_items::items_catalog_json().to_vec())
+}
+
 /// 路由（纯构造响应；M1 只读：`/` + `/api/online` + `/api/world`）。
 pub fn route(req: &HttpRequest, state: &AdminState) -> AdminResponse {
     match (req.method.as_str(), req.path.as_str()) {
         ("GET", "/") => AdminResponse::html(include_str!("admin_page.html")),
         ("GET", "/api/online") => handle_online(state),
         ("GET", "/api/world") => handle_world(state),
+        ("GET", "/api/items") => handle_items(),
         ("GET", "/api/inventory") => handle_inventory(state, &req.query),
         ("POST", "/api/give") => handle_give(state, &req.body),
         ("POST", "/api/kick") => handle_kick(state, &req.body),
@@ -695,5 +735,66 @@ mod tests {
         assert_eq!(body_json(&r), serde_json::json!({"ok": true, "saved": true, "overrides": 1}));
         assert!(mc_world::MutableWorld::save_path(&dir, 777).exists());
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn items_catalog_json_shape_and_cache() {
+        // 形状：ok/count/items，条目含 id/注册名/中文名/分类，全量 1658 不清退。
+        let st = test_state();
+        let r = route(&get("/api/items"), &st);
+        assert_eq!(r.status, 200);
+        let v = body_json(&r);
+        assert_eq!(v["ok"], true);
+        assert_eq!(v["count"], 1658);
+        let items = v["items"].as_array().unwrap();
+        assert_eq!(items.len(), 1658);
+        for it in items {
+            assert!(it["id"].is_u64(), "missing id: {it}");
+            assert!(it["name"].is_string(), "missing name: {it}");
+            assert!(it["name_zh"].is_string(), "missing name_zh: {it}");
+            assert!(it["category"].is_string(), "missing category: {it}");
+        }
+        let stone = items.iter().find(|e| e["name"] == "minecraft:stone").expect("stone in catalog");
+        assert_eq!(stone["name_zh"], "石头");
+        assert_eq!(stone["category"], "方块");
+        // 表外回退：注册名原样、分类“其他”。
+        let sword =
+            items.iter().find(|e| e["name"] == "minecraft:diamond_sword").expect("sword in catalog");
+        assert_eq!(sword["name_zh"], "minecraft:diamond_sword");
+        assert_eq!(sword["category"], "其他");
+        // 缓存：两次同一指针内容一致（OnceLock 只生成一次）。
+        let a = crate::admin_items::items_catalog_json().as_ptr();
+        let b = route(&get("/api/items"), &st).body.len();
+        assert_eq!(b, crate::admin_items::items_catalog_json().len());
+        assert_eq!(a, crate::admin_items::items_catalog_json().as_ptr());
+    }
+
+    #[test]
+    fn give_accepts_numeric_item_id_and_inventory_adds_detail() {
+        let st = test_state();
+        let (tx, _rx) = crossbeam_channel::unbounded();
+        st.hub.register_with_name(41, tx, 2, (0.0, 64.0, 0.0), "ItemUser".into(), "127.0.0.1:6".into());
+        st.drops.load_inventory(41, "ItemUser");
+        // P29 新增：数字 item_id 直发；旧响应形状精确不变（只增请求字段）。
+        let dirt = mc_registry::item_id("minecraft:dirt").unwrap() as i32;
+        let r = route(&post("/api/give", &format!(r#"{{"username":"ItemUser","item_id":{dirt},"count":5}}"#)), &st);
+        assert_eq!(r.status, 200);
+        assert_eq!(body_json(&r), serde_json::json!({"ok": true, "leftover": 0, "delivered": true}));
+        // 数字 id 越界仍 400；item 与 item_id 双缺仍 400。
+        let r = route(&post("/api/give", r#"{"username":"ItemUser","item_id":999999,"count":1}"#), &st);
+        assert_eq!(r.status, 400);
+        let r = route(&post("/api/give", r#"{"username":"ItemUser","count":1}"#), &st);
+        assert_eq!(r.status, 400);
+        // 复核：slots 旧字段原样 + slots_detail 中文明细。
+        let inv = route(&get("/api/inventory?username=ItemUser"), &st);
+        assert_eq!(inv.status, 200);
+        let v = body_json(&inv);
+        assert!(v["slots"].as_array().unwrap().iter().any(|s| s[1] == dirt as i64 && s[2] == 5));
+        let det = v["slots_detail"].as_array().unwrap();
+        let d = det.iter().find(|e| e["id"] == dirt as i64).expect("dirt in detail");
+        assert_eq!(d["name"], "minecraft:dirt");
+        assert_eq!(d["name_zh"], "泥土");
+        assert_eq!(d["category"], "方块");
+        let _ = std::fs::remove_dir_all(st.drops.save_dir());
     }
 }

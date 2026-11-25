@@ -1,6 +1,7 @@
 //! mc-server: Bevy App组装 + 50ms主循环，只兼容26.3/777
 //! 模块：config/resources/systems/net_thread/play/movement/persist/admin
 mod admin;
+mod admin_items;
 mod config;
 mod movement;
 mod net_thread;
