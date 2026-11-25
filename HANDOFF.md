@@ -415,10 +415,12 @@ $natives = 'C:\Users\qwe\AppData\Local\Temp\mc263natives'
    下轮补真 Anvil 时：读 `r.<rx>.<rz>.mca`（Region 头 + zlib NBT），写 Sections 的 block_states/biomes
    palette + MOTION_BLOCKING 高度图 + 空 block_entities；自有格式文件届时做一次性迁移或废弃。
    `save/load.rs` 的旧 `Chunk` 占位格式未动，与本存档无关。
-5. **放置按手持映射（P18 半步）**：`Set Held Item 0x36` 已按 Short 解析切手持
+5. **放置按手持映射**：`Set Held Item 0x36` 已按 Short 解析切手持
    （`Set Creative Mode Slot 0x39` 仍忽略，data component 需注册表驱动解码）；
-   放置材料 = 手持物品映射（stone/dirt/sand/oak_log→对应方块）+ 成功扣 1，
-   空手/未知物品回退石头且不扣（P17 兼容）；cobblestone 等无对应方块的掉落物暂不可放。
+   放置材料 = 手持物品映射（stone/dirt/sand/oak_log/cobblestone→对应方块，
+   树苗/小麦种子走种植专属路径）+ 成功扣 1，
+   空手/无方块映射（如煤/铁/木棍/小麦）只 ack 不落子（P18.3 去掉了 P17 石头回退；
+   圆石映射缺失曾导致客户端预测幽灵块，后已补齐，见 §5.22）。
    新背包开局送 64 石头（后续生存模式/创造背包替换）。
    创造/生存都按即时破坏处理（生存按住挖会触发两次：start 已破坏，
    finish 命中空气回滚重发空气，无副作用）。
@@ -682,6 +684,21 @@ $natives = 'C:\Users\qwe\AppData\Local\Temp\mc263natives'
       `play_actions.rs` 只追加 1 个 e2e（PosRot yaw=-90 → Spawn x+0.15/眼高、vel≈(0.06,0.1,0)）。
       旧 26 项（play_stream 17 + play_actions 9）一个字未动，全绿。
 
+22. **圆石放置映射补齐**：`block_for_item` 与 `PLACEABLE_BLOCK_IDS` 双双漏了圆石，
+    手持圆石右键只 ack（延续 P18.3 规则），客户端却预测落块+扣数，
+    随后被服务端纠正——看起来放下一瞬间消失、数还少了（管理页默认发放即圆石，必现）。
+    补 `ITEM_COBBLESTONE→COBBLESTONE_BLOCK_ID(14)` + 白名单 + 挖返还；
+    回归 e2e `placed_cobblestone_stays_and_dig_returns_cobble`。
+    现存可获得方块映射已审计齐全（不可放的煤/铁/木棍/小麦保持只 ack，符合原版）。
+
+23. **Join 选中槽同步（S2C `set_held_slot` 0x6B）**：服务端 `selected` 随存档恢复，
+    但客户端重进默认选中 0 格、之前从不同步——造成你看着选了圆石（1 格），
+    服务端却从钻石格（4 格）扔，Q 扔错格/放错材料。现 Join 时 selected≠0 则发
+    S2C 0x6B（VarInt 0..=8；ID 见 `data/777/packets.json` 生成表，
+    C2S Short vs S2C VarInt 区别见 jar 注释；新背包 selected=0 不发包，零包序影响）。
+    回归 e2e `rejoin_syncs_selected_held_slot`（切 3 格→断线→重进收到 0x6B=3）。
+    真机待验：重进后选中与下线前一致。
+
 ## 6. 关键文件
 
 ```
@@ -692,7 +709,7 @@ crates/mc-protocol/src/packets/
   block_tags_777.rs          300 个 block tag / 14825 项的回归数据
   play_chunk.rs              SetCenter/ChunkData/GameEvent/Batch/Unload（0x26 packed i64）
   play_block.rs              挖掘/放置 C2S（0x29/0x42/0x43/0x2E）+ BlockUpdate 0x08/Ack 0x04 + Position pack/unpack + P18 ClickContainer 0x12 常量 + P19 DROP_ALL/ITEM=4/5
-  play_entity.rs             P18 掉落/背包包：Spawn 0x01/SetData 0x65/Remove 0x4E/Teleport 0x23/PosDelta 0x36/TakeItem 0x7F/Content 0x12/SlotPkt 0x14 + Slot/LpVec3/元数据编解码 + C2S SetHeld Short 解析 + P19 CLICK_THROW=4
+  play_entity.rs             P18 掉落/背包包：Spawn 0x01/SetData 0x65/Remove 0x4E/Teleport 0x23/PosDelta 0x36/TakeItem 0x7F/Content 0x12/SlotPkt 0x14 + Slot/LpVec3/元数据编解码 + C2S SetHeld Short 解析 + P19 CLICK_THROW=4 + P28.3 S2C set_held_slot 0x6B
   play_login.rs              LoginPlay 777 布局 + 抓包往返测试
   play_sync.rs               PlayerPositionSync/KeepAlive/C2S 移动包
   data/*_777.bin             LoginPlay / PositionSync / UpdateTags 抓包
