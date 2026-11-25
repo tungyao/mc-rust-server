@@ -26,13 +26,14 @@ pub struct BlockDef {
     pub name: &'static str,
 }
 
-/// 旧 API（兼容保留）：仍返回最初 3 个条目及其历史 ID（air=0/stone=1/grass_block=2）。
+/// 旧 API（兼容保留）：仍返回最初 3 个条目，ID 为真实 blockstate ID
+/// （air=0 / stone=1 / grass_block=9，由生成表提供）。
 /// 新代码请使用 [`block_id`] / [`block_name`] 查询真实 blockstate ID。
 pub fn vanilla_blocks() -> HashMap<u32, BlockDef> {
     let mut m = HashMap::new();
     m.insert(0, BlockDef { id: 0, name: "minecraft:air" });
     m.insert(1, BlockDef { id: 1, name: "minecraft:stone" });
-    m.insert(2, BlockDef { id: 2, name: "minecraft:grass_block" });
+    m.insert(9, BlockDef { id: 9, name: "minecraft:grass_block" });
     m
 }
 

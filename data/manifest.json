@@ -2,5 +2,42 @@
   "version": "26.3",
   "protocol": 777,
   "data_version": 5023,
-  "data_dir": "777"
+  "data_dir": "777",
+  "vanilla_config": {
+    "registries": [
+      { "name": "minecraft:worldgen/biome", "file": "registry_00.bin" },
+      { "name": "minecraft:chat_type", "file": "registry_01.bin" },
+      { "name": "minecraft:trim_pattern", "file": "registry_02.bin" },
+      { "name": "minecraft:trim_material", "file": "registry_03.bin" },
+      { "name": "minecraft:wolf_variant", "file": "registry_04.bin" },
+      { "name": "minecraft:wolf_sound_variant", "file": "registry_05.bin" },
+      { "name": "minecraft:pig_variant", "file": "registry_06.bin" },
+      { "name": "minecraft:pig_sound_variant", "file": "registry_07.bin" },
+      { "name": "minecraft:frog_variant", "file": "registry_08.bin" },
+      { "name": "minecraft:cat_variant", "file": "registry_09.bin" },
+      { "name": "minecraft:cat_sound_variant", "file": "registry_10.bin" },
+      { "name": "minecraft:cow_sound_variant", "file": "registry_11.bin" },
+      { "name": "minecraft:cow_variant", "file": "registry_12.bin" },
+      { "name": "minecraft:chicken_sound_variant", "file": "registry_13.bin" },
+      { "name": "minecraft:chicken_variant", "file": "registry_14.bin" },
+      { "name": "minecraft:zombie_nautilus_variant", "file": "registry_15.bin" },
+      { "name": "minecraft:painting_variant", "file": "registry_16.bin" },
+      { "name": "minecraft:sulfur_cube_archetype", "file": "registry_17.bin" },
+      { "name": "minecraft:dimension_type", "file": "registry_18.bin" },
+      { "name": "minecraft:damage_type", "file": "registry_19.bin" },
+      { "name": "minecraft:banner_pattern", "file": "registry_20.bin" },
+      { "name": "minecraft:enchantment", "file": "registry_21.bin" },
+      { "name": "minecraft:jukebox_song", "file": "registry_22.bin" },
+      { "name": "minecraft:instrument", "file": "registry_23.bin" },
+      { "name": "minecraft:test_environment", "file": "registry_24.bin" },
+      { "name": "minecraft:test_instance", "file": "registry_25.bin" },
+      { "name": "minecraft:dialog", "file": "registry_26.bin" },
+      { "name": "minecraft:world_clock", "file": "registry_27.bin" },
+      { "name": "minecraft:timeline", "file": "registry_28.bin" },
+      { "name": "minecraft:decorated_pot_pattern", "file": "registry_29.bin" },
+      { "name": "minecraft:block_transformer", "file": "registry_30.bin" },
+      { "name": "minecraft:worldgen/block_state_provider", "file": "registry_31.bin" }
+    ],
+    "update_tags": "update_tags.bin"
+  }
 }

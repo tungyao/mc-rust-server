@@ -8,43 +8,8 @@
 //! 这样客户端拿到的注册表 = 原版服务端（空 KnownPacks）下发的完整集合，
 //! 不再依赖逐个手补 dimension/biome/damage_type 等最小条目。
 //! 重新生成：见 HANDOFF.md §9 的抓包步骤；只读数据，不要手改。
+//!
+//! 包体索引由 `data/manifest.json` 提供，`build.rs` 编译期生成到 `$OUT_DIR`；
+//! 本模块只负责引入生成结果，两个公开符号的名字/类型/顺序保持不变。
 
-/// 32 个 registry_data 包体，顺序与原版 SYNCHRONIZED_REGISTRIES 一致。
-pub static VANILLA_CONFIG_REGISTRY_BODIES_777: &[(&str, &[u8])] = &[
-    ("minecraft:worldgen/biome", include_bytes!(concat!(env!("CARGO_MANIFEST_DIR"), "/../../data/777/vanilla_config/registry_00.bin"))),
-    ("minecraft:chat_type", include_bytes!(concat!(env!("CARGO_MANIFEST_DIR"), "/../../data/777/vanilla_config/registry_01.bin"))),
-    ("minecraft:trim_pattern", include_bytes!(concat!(env!("CARGO_MANIFEST_DIR"), "/../../data/777/vanilla_config/registry_02.bin"))),
-    ("minecraft:trim_material", include_bytes!(concat!(env!("CARGO_MANIFEST_DIR"), "/../../data/777/vanilla_config/registry_03.bin"))),
-    ("minecraft:wolf_variant", include_bytes!(concat!(env!("CARGO_MANIFEST_DIR"), "/../../data/777/vanilla_config/registry_04.bin"))),
-    ("minecraft:wolf_sound_variant", include_bytes!(concat!(env!("CARGO_MANIFEST_DIR"), "/../../data/777/vanilla_config/registry_05.bin"))),
-    ("minecraft:pig_variant", include_bytes!(concat!(env!("CARGO_MANIFEST_DIR"), "/../../data/777/vanilla_config/registry_06.bin"))),
-    ("minecraft:pig_sound_variant", include_bytes!(concat!(env!("CARGO_MANIFEST_DIR"), "/../../data/777/vanilla_config/registry_07.bin"))),
-    ("minecraft:frog_variant", include_bytes!(concat!(env!("CARGO_MANIFEST_DIR"), "/../../data/777/vanilla_config/registry_08.bin"))),
-    ("minecraft:cat_variant", include_bytes!(concat!(env!("CARGO_MANIFEST_DIR"), "/../../data/777/vanilla_config/registry_09.bin"))),
-    ("minecraft:cat_sound_variant", include_bytes!(concat!(env!("CARGO_MANIFEST_DIR"), "/../../data/777/vanilla_config/registry_10.bin"))),
-    ("minecraft:cow_sound_variant", include_bytes!(concat!(env!("CARGO_MANIFEST_DIR"), "/../../data/777/vanilla_config/registry_11.bin"))),
-    ("minecraft:cow_variant", include_bytes!(concat!(env!("CARGO_MANIFEST_DIR"), "/../../data/777/vanilla_config/registry_12.bin"))),
-    ("minecraft:chicken_sound_variant", include_bytes!(concat!(env!("CARGO_MANIFEST_DIR"), "/../../data/777/vanilla_config/registry_13.bin"))),
-    ("minecraft:chicken_variant", include_bytes!(concat!(env!("CARGO_MANIFEST_DIR"), "/../../data/777/vanilla_config/registry_14.bin"))),
-    ("minecraft:zombie_nautilus_variant", include_bytes!(concat!(env!("CARGO_MANIFEST_DIR"), "/../../data/777/vanilla_config/registry_15.bin"))),
-    ("minecraft:painting_variant", include_bytes!(concat!(env!("CARGO_MANIFEST_DIR"), "/../../data/777/vanilla_config/registry_16.bin"))),
-    ("minecraft:sulfur_cube_archetype", include_bytes!(concat!(env!("CARGO_MANIFEST_DIR"), "/../../data/777/vanilla_config/registry_17.bin"))),
-    ("minecraft:dimension_type", include_bytes!(concat!(env!("CARGO_MANIFEST_DIR"), "/../../data/777/vanilla_config/registry_18.bin"))),
-    ("minecraft:damage_type", include_bytes!(concat!(env!("CARGO_MANIFEST_DIR"), "/../../data/777/vanilla_config/registry_19.bin"))),
-    ("minecraft:banner_pattern", include_bytes!(concat!(env!("CARGO_MANIFEST_DIR"), "/../../data/777/vanilla_config/registry_20.bin"))),
-    ("minecraft:enchantment", include_bytes!(concat!(env!("CARGO_MANIFEST_DIR"), "/../../data/777/vanilla_config/registry_21.bin"))),
-    ("minecraft:jukebox_song", include_bytes!(concat!(env!("CARGO_MANIFEST_DIR"), "/../../data/777/vanilla_config/registry_22.bin"))),
-    ("minecraft:instrument", include_bytes!(concat!(env!("CARGO_MANIFEST_DIR"), "/../../data/777/vanilla_config/registry_23.bin"))),
-    ("minecraft:test_environment", include_bytes!(concat!(env!("CARGO_MANIFEST_DIR"), "/../../data/777/vanilla_config/registry_24.bin"))),
-    ("minecraft:test_instance", include_bytes!(concat!(env!("CARGO_MANIFEST_DIR"), "/../../data/777/vanilla_config/registry_25.bin"))),
-    ("minecraft:dialog", include_bytes!(concat!(env!("CARGO_MANIFEST_DIR"), "/../../data/777/vanilla_config/registry_26.bin"))),
-    ("minecraft:world_clock", include_bytes!(concat!(env!("CARGO_MANIFEST_DIR"), "/../../data/777/vanilla_config/registry_27.bin"))),
-    ("minecraft:timeline", include_bytes!(concat!(env!("CARGO_MANIFEST_DIR"), "/../../data/777/vanilla_config/registry_28.bin"))),
-    ("minecraft:decorated_pot_pattern", include_bytes!(concat!(env!("CARGO_MANIFEST_DIR"), "/../../data/777/vanilla_config/registry_29.bin"))),
-    ("minecraft:block_transformer", include_bytes!(concat!(env!("CARGO_MANIFEST_DIR"), "/../../data/777/vanilla_config/registry_30.bin"))),
-    ("minecraft:worldgen/block_state_provider", include_bytes!(concat!(env!("CARGO_MANIFEST_DIR"), "/../../data/777/vanilla_config/registry_31.bin"))),
-];
-
-/// 同一次抓取的 Update Tags 0x0E 包体（15 个注册表）。
-pub static VANILLA_CONFIG_UPDATE_TAGS_BODY_777: &[u8] =
-    include_bytes!(concat!(env!("CARGO_MANIFEST_DIR"), "/../../data/777/vanilla_config/update_tags.bin"));
+include!(concat!(env!("OUT_DIR"), "/vanilla_config_generated.rs"));
