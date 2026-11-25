@@ -8,7 +8,7 @@
 |---|---|---|
 | 框架可扩展 | Valence | 一切皆 Bevy Plugin: ClientPlugin/MovementPlugin/ChunkViewPlugin... Client 是 Entity |
 | 高性能多线程 | FerrumC | TCP acceptor 独立线程+Tokio runtime, crossbeam-channel 进 Main World, 自研 NBT/Anvil 以后上 SIMD |
-| 原版对齐 | Pumpkin/SteelMC | registry/build.rs 从 minecraft-data 生成方块/物品表; 世界生成做 parity 测试 |
+| 原版对齐 | Pumpkin/SteelMC | registry/build.rs 从 Pumpkin Extractor JSON 生成真实方块/物品 ID 表; 世界生成做 parity 测试 |
 | 易用 | Paper | server.toml + RCON/Query + 以后 Web 后台 |
 
 ## 2. 线程模型
@@ -25,11 +25,21 @@
 - mc-world 不依赖网络，可独立做 parity 测试
 - mc-server 只做组装和调度，不写具体玩法逻辑
 
-## 4. 数据驱动
+## 4. 数据驱动（已实现，26.3 / 777）
 
-- 协议包定义 + 注册表全部走 codegen，不要手写 700+ 包
-- 数据源: PrismarineJS minecraft-data 或 Valence extractor (Fabric mod 抽 JSON)
-- 版本升级 = 换数据文件 + 重新 cargo build
+- 真实 ID **单一数据源**：`data/manifest.json` + `data/<protocol>/*.json`，来自 Pumpkin 26.3
+  Extractor 的 `assets/*.json`（来源 URL / SHA 见 `data/777/SOURCE.md`）；不再有连续占位假 ID。
+- 流水线：`crates/mc-registry/build.rs` 读精简表 → 生成 `$OUT_DIR/generated.rs`
+  （`BLOCKS` / `ITEMS` / `ENTITIES` / `PACKETS` + `by_name` / `by_id` + 29 项真机 ID 构建期断言）
+  → `crates/mc-registry/src/lib.rs` 的 `include!` → `mc-world` / `mc-protocol` 编译期查表。
+  方块/物品/实体/包 ID 均由表派生，缺失即编译期 panic，不静默回退。
+- manifest 选版本（`version` / `protocol` / `data_version` / `data_dir`），版本目录按协议隔离
+  （当前 `data/777/`）；`vanilla_config` 有序索引（32 个 registry bin + update_tags）也由
+  `mc-protocol/build.rs` 编译期生成。升级 = 换数据文件 + `cargo build` 重跑两个 build script，
+  详见 `docs/data-driven.md`。
+- **边界**：codegen 只解决 ID，**不生成包体**；字段顺序、新增字段、注册表条目结构等布局差异
+  仍需手改 `mc-protocol`。游戏逻辑（`WorldGen` / `drops` / `inventory`）继续自研，不搬 Pumpkin
+  的 Bevy 绑定代码。整体切换版本，不做多版本兼容（见 `VERSION.md`）。
 
 ## 5. 插件
 

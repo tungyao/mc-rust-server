@@ -478,6 +478,25 @@ $natives = 'C:\Users\qwe\AppData\Local\Temp\mc263natives'
     迁至 `data/777/{vanilla_config,login_play.bin,player_position_sync.bin,update_tags.bin}`，
     `include_bytes!` 改走 workspace 相对路径。抓包 fixture 逐字节测试全部通过。
     真实 ID 现在只有一份数据源（`data/777/*.json`）；新增方块/物品只需改 JSON 并重编译。
+    **P4 已完成（2026-11-25）**：升级流程已文档化到 `docs/data-driven.md`（下载+SHA 校验 →
+    精简表取 `default_state_id` → 更新 manifest → `cargo build` 重跑 codegen → 手改 `mc-protocol`
+    包体布局 → fixture 回归：LoginPlay/PositionSync 逐字节、UpdateTags 抓包解码比对），
+    版本 ↔ protocol ↔ data_version ↔ 数据目录映射见 `VERSION.md`，
+    `ARCHITECTURE.md` §4 已改为「已实现」现状。**待真机 T1–T13 仍未做**（清单索引见本文件 §5 第 13 条，
+    原始审查报告未入仓库；脚本 e2e 只验服务端状态，不能替代客户端观察）。
+15. **架构加固（真机不可测期间完成）**：
+    - `data/manifest.json` 新增 `vanilla_config` 有序索引（32 个 registry bin + update_tags），
+      `mc-protocol/build.rs` 编译期据此生成两个公开符号（`VANILLA_CONFIG_REGISTRY_BODIES_777` /
+      `VANILLA_CONFIG_UPDATE_TAGS_BODY_777`，名字/类型/顺序不变），源码不再写死文件名与数量；
+      条目数≠32 / 重名 / 路径穿越 / 文件缺失均编译期失败。`vanilla_blocks()` 的 grass_block
+      历史假值 2 修正为真实 9（无调用方）。
+    - `DropState::stop_global_tick()`：每代独立 `Arc<AtomicBool>` 停止标志（start/stop 共用锁），
+      stop 后 ticker 至多再等一个节拍即退出且不多跑一次 tick；restart 后 `tick_count` 不重置、
+      从原计数继续。生产 `serve()` 不调用停止，仅供生命周期管理/测试。单测验证 start→stop→restart。
+    - R4/R7 补服务端可验证回归护栏（**非真机验证**）：`items.rs` 单测证明水平漂移跨列后
+      `resume_fall` 的 support x/z 保持原列；`play_stream.rs` e2e 证明掉落物出视距收到 Remove、
+      回返后收到**同 entity_id 的 Spawn**（不是只发位置包）。三处均注明 T1–T13 仍需人工确认。
+    - 真机不可测期间未改发包行为；上述断言全部是服务端状态级/包流级验证。
 
 ## 6. 关键文件
 
