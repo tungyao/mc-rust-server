@@ -590,9 +590,12 @@ fn rollback(world: &MutableWorld, x: i32, y: i32, z: i32) -> BlockChange {
 }
 
 /// 挖掘权威判定（Player Action 0x29）。
-/// - status 0/2（开始/完成）：创造风格即时破坏；非法（越界/超距/空气/水）回滚。
-/// - status 1（取消）：只 ack。- status 3..=7（丢弃/吃食/换手）：无世界影响，直接忽略。
-/// - `world` 为 None（旧入口/单测无世界）：忽略不断线。
+/// - status 0（开始挖掘）：只校验并 ack，**不破坏方块**。原版生存模式下客户端会播放
+///   破坏进度动画，挖掘完成时才发 status 2；在这里即时破坏会导致“点一下就没”（与
+///   原版不一致，见用户反馈）。
+/// - status 2（完成挖掘）：校验通过后破坏方块并按掉落表带出 drops。
+/// - status 1（取消）：只 ack。status 3..=7（丢弃/吃食/换手）：无世界影响，直接忽略。
+/// - 非法（越界/超距/出视距/空气/水）：回滚重发现状；`world` 为 None 时忽略不断线。
 /// 判定内已落子（`set`），调用方负责：缓存失效 + 发 BlockUpdate/Ack + 投递事件。
 pub fn decide_dig(
     world: Option<&MutableWorld>,
@@ -624,6 +627,15 @@ pub fn decide_dig(
                     drops: Vec::new(),
                 });
             }
+            // 开始挖掘：目标合法，只 ack；让客户端自己播放破坏进度动画。
+            if act.status == packets::PLAYER_ACTION_START_DIG {
+                return Some(BlockEditOutcome {
+                    sequence: act.sequence,
+                    changes: Vec::new(),
+                    drops: Vec::new(),
+                });
+            }
+            // 完成挖掘：真正破坏并带出掉落。
             let old = world.set(x, y, z, mc_world::AIR_BLOCK_ID);
             let drops = mc_world::drops_for_block(old, x, y, z, world.seed());
             Some(BlockEditOutcome {
@@ -737,13 +749,20 @@ async fn apply_block_outcome(
 // ---------------------------------------------------------------------------
 // P18 掉落物 + 背包（服务端权威，net 线程即时同步；ECS 无写通道，见模块文档）。
 //
-// - 生成：decide_dig 的 drops → alloc id → support_top_y 落点 → ItemEntities::spawn
-//   → Spawn(0x01)+SetEntityData(0x65) 发给本连接（视距内才发）。
+// - 生成：decide_dig 的 drops → alloc id → drop_rest_y 落点 → ItemEntities::spawn
+//   → Spawn(0x01，带初速)+SetEntityData(0x65) 发给本连接；客户端自行模拟弹跳/静止。
 // - 下落：play_loop 每 50ms tick 一次（read 超时即 tick，不改变 10s 半开超时语义），
-//   移动过的实体发 Teleport(0x23)；despawn/出视距发 Remove(0x4E)。
+//   服务端只维护权威位置用于拾取；不再每 tick 发 Teleport(0x23) 与客户端物理打架。
+//   despawn/出视距发 Remove(0x4E)，进视距补发 Spawn。
 // - 拾取：delay 到期 + 与脚位置 <1.5 → TakeItem(0x7F)+Remove，入库，全量 Content 同步。
 // - 背包：Join 全量 Content；放置成功 consume_held + 单槽 Slot 同步；C2S 0x36 切手持。
 // - ClickContainer(0x12)/CreativeSlot(0x39) 只忽略（Hashed Slot 复杂，留后续）。
+//
+// TODO(真机验证，见 HANDOFF §5.11)：本轮四处改动需原版 26.3 客户端真机确认：
+//   1) Spawn 带初速 → 掉落物弹跳/落地是否与原版一致；
+//   2) 删除每 tick Teleport → 是否不再原地蹦跶、能否正常拾取；
+//   3) 删除 spawn_drops 视距门禁 → 走远挖地表方块是否稳定掉落；
+//   4) START_DIG 只 ack → 破坏进度动画是否正常完成并触发 FINISH_DIG。
 // ---------------------------------------------------------------------------
 
 /// 实体的视距判定（切比雪夫，与 ChunkView 同口径）。
@@ -764,9 +783,9 @@ async fn send_spawn(
 ) -> io::Result<()> {
     let snap = {
         let items = drops.items.lock().unwrap_or_else(|p| p.into_inner());
-        items.get(id).map(|e| (e.id, e.uuid, e.pos, e.item_id, e.count))
+        items.get(id).map(|e| (e.id, e.uuid, e.pos, e.vel, e.item_id, e.count))
     };
-    let Some((id, uuid, (x, y, z), item_id, count)) = snap else { return Ok(()) };
+    let Some((id, uuid, (x, y, z), vel, item_id, count)) = snap else { return Ok(()) };
     let mut body = Vec::new();
     packets::SpawnItemEntity {
         entity_id: id,
@@ -774,7 +793,9 @@ async fn send_spawn(
         x,
         y,
         z,
-        vel: packets::LpVec3::zero(),
+        // 把服务端初速下发，让客户端用自己的掉落物物理模拟抛物线/落地弹跳/静止。
+        // 之前固定发零速度 + 每 50ms Teleport 覆盖，会和客户端物理打架导致原地狂蹦。
+        vel: packets::LpVec3 { x: vel.0, y: vel.1, z: vel.2 },
         pitch: 0,
         yaw: 0,
         head_yaw: 0,
@@ -810,27 +831,6 @@ async fn send_data(
     }
     .encode_body(&mut body);
     write_packet_any(stream, packets::PLAY_SET_ENTITY_DATA_S2C_ID, &body, opts.threshold).await
-}
-
-async fn send_teleport(
-    stream: &mut TcpStream,
-    opts: &PlayOptions,
-    id: i32,
-    pos: (f64, f64, f64),
-    on_ground: bool,
-) -> io::Result<()> {
-    let mut body = Vec::new();
-    packets::TeleportEntitySync {
-        entity_id: id,
-        x: pos.0,
-        y: pos.1,
-        z: pos.2,
-        yaw: 0.0,
-        pitch: 0.0,
-        on_ground,
-    }
-    .encode_body(&mut body);
-    write_packet_any(stream, packets::PLAY_TELEPORT_ENTITY_S2C_ID, &body, opts.threshold).await
 }
 
 async fn send_remove(
@@ -906,7 +906,6 @@ async fn spawn_drops(
     drops: &DropState,
     world: &MutableWorld,
     outcome: &BlockEditOutcome,
-    view: &ChunkView,
 ) -> io::Result<()> {
     if outcome.drops.is_empty() || outcome.changes.is_empty() {
         return Ok(());
@@ -917,7 +916,9 @@ async fn spawn_drops(
     };
     for d in &outcome.drops {
         let id = drops.alloc_id();
-        let rest = world.support_top_y(bx, bz) as f64;
+        // 以被破坏方块为起点向下找支撑面：树冠/水面/洞穴顶不再把掉落物抬到高处，
+        // 挖掘地下方块时掉落物留在挖掘点附近（用户反馈“超出范围啥也没有”的根因）。
+        let rest = world.drop_rest_y(bx, bz, by) as f64;
         let touched = {
             let mut items = drops.items.lock().unwrap_or_else(|p| p.into_inner());
             match items.spawn(
@@ -937,14 +938,8 @@ async fn spawn_drops(
             }
         };
         for tid in touched {
-            let in_view_now = {
-                let items = drops.items.lock().unwrap_or_else(|p| p.into_inner());
-                items.get(tid).map(|e| drop_in_view(view.center(), view.radius(), e.chunk))
-            };
-            let Some(in_view_now) = in_view_now else { continue };
-            if !in_view_now {
-                continue;
-            }
+            // 被破坏方块一定在挖掘半径内、且必然处于视距内，无需额外视距门禁；
+            // 合并命中的其它实体同步当前堆叠数量即可。
             if tid == id {
                 send_spawn(stream, opts, drops, tid).await?;
             } else if drops.is_known(opts.conn_id, tid) {
@@ -970,18 +965,19 @@ async fn tick_drops(
         let mut items = drops.items.lock().unwrap_or_else(|p| p.into_inner());
         items.tick()
     };
-    // 移动同步：视距内发 Teleport（未见过则补发 Spawn）；known 但已出视距发 Remove。
+    // 视距一致性：不再每 tick 发 TeleportEntitySync。客户端按 Spawn 中的初速
+    // 自行模拟抛物线/落地弹跳/静止；服务端每 50ms 用绝对坐标覆盖客户端物理，
+    // 会与之反复打架，表现为掉落物“原地快速蹦跶几下”（用户反馈）。这里只做
+    // 进视距补 Spawn / 出视距发 Remove。
     for id in moved {
-        let snap = {
+        let chunk = {
             let items = drops.items.lock().unwrap_or_else(|p| p.into_inner());
-            items.get(id).map(|e| (e.pos, e.on_ground, e.chunk))
+            items.get(id).map(|e| e.chunk)
         };
-        let Some((pos, on_ground, chunk)) = snap else { continue };
+        let Some(chunk) = chunk else { continue };
         if drop_in_view(view.center(), view.radius(), chunk) {
             if !drops.is_known(opts.conn_id, id) {
                 send_spawn(stream, opts, drops, id).await?;
-            } else {
-                send_teleport(stream, opts, id, pos, on_ground).await?;
             }
         } else if drops.is_known(opts.conn_id, id) {
             send_remove(stream, opts, drops, &[id]).await?;
@@ -1213,8 +1209,9 @@ async fn play_loop(
                 }
             }
             Ok((id, payload)) if id == packets::PLAY_PLAYER_ACTION_C2S_ID => {
-                // P17 挖掘：服务端权威判定 + 即时落子 + BlockUpdate/Ack 回包。
-                // P18：成功掉落同步生成物品实体（视距内 Spawn+Data）。
+                // 挖掘：服务端权威判定 + BlockUpdate/Ack 回包；仅 FINISH_DIG 真落子
+                // （START_DIG 只 ack，让客户端播放原版破坏进度动画）。
+                // 成功掉落同步生成物品实体（Spawn+Data，含初速，客户端自行模拟弹跳）。
                 match packets::PlayerAction::decode_body(&payload) {
                     Ok((act, _)) => {
                         if let Some(outcome) = decide_dig(
@@ -1233,7 +1230,7 @@ async fn play_loop(
                                 }
                                 if let Some(ds) = &opts.drops {
                                     if let Err(e) =
-                                        spawn_drops(stream, opts, ds, world, &outcome, &view).await
+                                        spawn_drops(stream, opts, ds, world, &outcome).await
                                     {
                                         debug!("play uuid={} drop spawn failed ({e}), closing", profile.uuid);
                                         break;
@@ -1612,25 +1609,38 @@ mod tests {
     }
 
     #[test]
-    fn dig_start_breaks_grass_and_finish_breaks_too() {
-        for status in [packets::PLAYER_ACTION_START_DIG, packets::PLAYER_ACTION_FINISH_DIG] {
-            let (world, feet, center) = dig_fixture();
-            let (x, y, z) = grass_top();
-            let act = packets::PlayerAction { status, x, y, z, face: 1, sequence: 5 };
-            let out = decide_dig(Some(&world), eye_of(feet), center, 2, &act).unwrap();
-            assert_eq!(out.sequence, 5);
-            assert_eq!(
-                out.changes,
-                vec![BlockChange { x, y, z, old_id: mc_world::GRASS_BLOCK_ID, new_id: 0 }]
-            );
-            assert_eq!(world.get(x, y, z), 0, "decide must apply the edit");
-            assert_eq!(world.dirty_len(), 1);
-            // P18：挖草带出 dirt 掉落（item 55×1）。
-            assert_eq!(
-                out.drops,
-                vec![mc_world::Drop { item_id: mc_world::drops::ITEM_DIRT, count: 1 }]
-            );
-        }
+    fn dig_start_only_acks_and_finish_breaks_grass() {
+        let (world, feet, center) = dig_fixture();
+        let (x, y, z) = grass_top();
+        let eye = eye_of(feet);
+
+        // 开始挖掘：目标合法，只 ack，不破坏、不掉落（让客户端播放破坏进度动画）。
+        let start = packets::PlayerAction {
+            status: packets::PLAYER_ACTION_START_DIG, x, y, z, face: 1, sequence: 5,
+        };
+        let out = decide_dig(Some(&world), eye, center, 2, &start).unwrap();
+        assert_eq!(out.sequence, 5);
+        assert!(out.changes.is_empty(), "START_DIG must not break the block");
+        assert!(out.drops.is_empty(), "START_DIG must not drop items");
+        assert_eq!(world.get(x, y, z), mc_world::GRASS_BLOCK_ID);
+        assert_eq!(world.dirty_len(), 0);
+
+        // 完成挖掘：真正破坏并带出 dirt 掉落（item 55×1）。
+        let finish = packets::PlayerAction {
+            status: packets::PLAYER_ACTION_FINISH_DIG, x, y, z, face: 1, sequence: 6,
+        };
+        let out = decide_dig(Some(&world), eye, center, 2, &finish).unwrap();
+        assert_eq!(out.sequence, 6);
+        assert_eq!(
+            out.changes,
+            vec![BlockChange { x, y, z, old_id: mc_world::GRASS_BLOCK_ID, new_id: 0 }]
+        );
+        assert_eq!(world.get(x, y, z), 0, "decide must apply the edit");
+        assert_eq!(world.dirty_len(), 1);
+        assert_eq!(
+            out.drops,
+            vec![mc_world::Drop { item_id: mc_world::drops::ITEM_DIRT, count: 1 }]
+        );
     }
 
     #[test]

@@ -215,13 +215,24 @@ impl MutableWorld {
         BlockPos(base.0, y, base.2)
     }
 
-    /// 支撑面顶 y（掉落物静置高度）：该列最高非空气方块上方 1 格；全空列回落 MIN_Y。
-    /// 单次 `generate_chunk` 扫描（调用方在 spawn 时算一次，tick 内不再查世界）。
+    /// 支撑面顶 y（兼容旧调用的“整列最高非空气方块上方 1 格”）；全空列回落 MIN_Y。
+    /// 掉落物静置高度请用 [`Self::drop_rest_y`]：本函数会受柱内任意上方方块（树/水面/
+    /// 洞穴顶）影响，把它们下方的掉落物错误地抬到列顶。
     pub fn support_top_y(&self, x: i32, z: i32) -> i32 {
+        self.drop_rest_y(x, z, WORLD_TOP_Y)
+    }
+
+    /// 掉落物静置高度：从 `from_y - 1` 向下找第一个非空气方块，返回其顶部 y。
+    /// `from_y` 传**被破坏方块的 y**：这样树冠/水面/上方方块不会把掉落物“抬”上去，
+    /// 挖洞穴或地下矿物时掉落物也停在挖掘点附近（而不是瞬移到地表）。全空列回落 MIN_Y。
+    /// 单次 `generate_chunk` 扫描（调用方在 spawn 时算一次，tick 内不再查世界）。
+    /// TODO(落地高度重算)：生成后若支撑方块被挖，掉落物会悬空；下一轮按支撑坐标重算。
+    pub fn drop_rest_y(&self, x: i32, z: i32, from_y: i32) -> i32 {
         let chunk = self.generate_chunk(chunk_of_block(x, z));
         let lx = x.rem_euclid(16) as usize;
         let lz = z.rem_euclid(16) as usize;
-        for y in (MIN_Y..=WORLD_TOP_Y).rev() {
+        let start = (from_y - 1).clamp(MIN_Y, WORLD_TOP_Y);
+        for y in (MIN_Y..=start).rev() {
             let section = ((y - MIN_Y) >> 4) as usize;
             if section >= chunk.sections.len() {
                 continue;
@@ -382,7 +393,7 @@ fn column_heights(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{DEFAULT_SEED, STONE_BLOCK_ID};
+    use crate::{DEFAULT_SEED, OAK_LEAVES_BLOCK_ID, STONE_BLOCK_ID};
 
     fn spawn_top(seed: i64) -> (i32, i32, i32) {
         let s = crate::WorldGen::new(seed).spawn_pos();
@@ -560,6 +571,25 @@ mod tests {
         assert_eq!(m.support_top_y(x, z), s.1);
         m.set(x, s.1 - 1, z, AIR_BLOCK_ID);
         assert_eq!(m.support_top_y(x, z), s.1 - 1);
+    }
+
+    #[test]
+    fn drop_rest_y_uses_support_below_not_column_top() {
+        let m = MutableWorld::new(DEFAULT_SEED);
+        let (x, _, z) = spawn_top(DEFAULT_SEED);
+        let s = crate::WorldGen::new(DEFAULT_SEED).spawn_pos();
+        let ground = s.1 - 1; // 脚下方块（草）
+
+        // 在正上方放一个“树冠”方块：整列最高方块被抬高，但掉落物静置高度不受影响。
+        m.set(x, ground + 5, z, OAK_LEAVES_BLOCK_ID);
+        assert_eq!(m.support_top_y(x, z), ground + 6, "column top followed the fake leaves");
+        // 从被破坏的草方块 (y=ground) 往下找支撑：结果是草下方的泥土顶 = ground。
+        assert_eq!(m.drop_rest_y(x, z, ground), ground);
+        // 挖掉脚下方块后掉落物应停在更低一层。
+        m.set(x, ground - 1, z, AIR_BLOCK_ID);
+        assert_eq!(m.drop_rest_y(x, z, ground), ground - 1);
+        // 从高处掉落时静置高度仍是该列最高非空气方块顶（兼容旧语义的起点）。
+        assert_eq!(m.drop_rest_y(x, z, WORLD_TOP_Y), ground + 6);
     }
 
     #[test]

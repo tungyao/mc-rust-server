@@ -924,3 +924,237 @@ async fn drag_then_place_uses_held_block() {
     drop(rx);
     let _ = std::fs::remove_dir_all(&dir);
 }
+
+/// 回归：远离出生点挖方块仍必须生成掉落物。
+/// 之前 spawn_drops 用 `drop_in_view(view.center(), ...)` 做门禁；如果视距中心尚未
+/// 跟随移动更新（或半径很小），远处的掉落物会被整包丢弃，表现为“走远了打碎啥也没有”。
+#[tokio::test]
+async fn dig_far_from_spawn_still_spawns_drop() {
+    use mc_network::DropState;
+    let dir = std::env::temp_dir().join(format!("mc-far-drop-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    let (tx, rx) = crossbeam_channel::unbounded::<PlayEvent>();
+    let mutable = Arc::new(MutableWorld::new(DEFAULT_SEED));
+    let cache = Arc::new(ChunkCache::new(DEFAULT_SEED, 64).with_mutable(Arc::clone(&mutable)));
+    let drops = Arc::new(DropState::new(dir.clone(), DEFAULT_SEED));
+    let config = NetConfig::new(100, "far-drop".into(), Arc::new(AtomicUsize::new(0)))
+        .with_play_events(tx)
+        .with_view_distance(2)
+        .with_chunk_cache(cache)
+        .with_mutable_world(Arc::clone(&mutable))
+        .with_drops(Arc::clone(&drops));
+    let addr = spawn_server(config).await;
+    let mut s = login_and_join(addr, "FarDig", 2).await;
+
+    // Join  Content（背包），之后才能收到掉落相关包。
+    let (id, _) = read_frame_timeout(&mut s, Duration::from_secs(5)).await.unwrap();
+    assert_eq!(id, packets::PLAY_SET_CONTAINER_CONTENT_S2C_ID);
+
+    // 走到远离出生点的位置（x=600,z=700，距离 spawn ~370 格）。
+    let world = WorldGen::new(DEFAULT_SEED);
+    let (fx, fz): (f64, f64) = (600.5, 700.5);
+    let top = world.height_at(fx.floor() as i32, fz.floor() as i32);
+    let feet_y = (top + 1) as f64;
+    let (gx, gy, gz) = (fx.floor() as i32, top, fz.floor() as i32);
+    let block = mutable.get(gx, gy, gz);
+    assert_ne!(block, 0, "far target must be solid");
+    assert_ne!(block, 89, "far target must not be water");
+    send_pos_y(&mut s, fx, feet_y, fz).await;
+    match next_event(&rx).await {
+        PlayEvent::Movement { .. } => {}
+        other => panic!("expected movement event, got {other:?}"),
+    }
+
+    let mut body = Vec::new();
+    packets::PlayerAction { status: 2, x: gx, y: gy, z: gz, face: 1, sequence: 21 }
+        .encode_body(&mut body);
+    mc_network::framing::write_packet(&mut s, packets::PLAY_PLAYER_ACTION_C2S_ID, &body)
+        .await
+        .unwrap();
+    // 远距离移动会先触发跨视距批次（SetCenterChunk/UnloadChunk/ChunkData...），
+    // 一直读到 BlockUpdate 为止。
+    let u_payload = loop {
+        let (id, payload) = read_frame_timeout(&mut s, Duration::from_secs(5)).await.unwrap();
+        if id == packets::PLAY_BLOCK_UPDATE_S2C_ID {
+            break payload;
+        }
+    };
+    let (u, _) = packets::BlockUpdate::decode_body(&u_payload).unwrap();
+    assert_eq!((u.x, u.y, u.z, u.block_id), (gx, gy, gz, 0), "far dig must push BlockUpdate");
+    let (id, payload) = read_frame_timeout(&mut s, Duration::from_secs(5)).await.unwrap();
+    assert_eq!(id, packets::PLAY_BLOCK_CHANGED_ACK_S2C_ID);
+    assert_eq!(read_varint(&payload).unwrap().0, 21);
+    let (id, payload) = read_frame_timeout(&mut s, Duration::from_secs(5)).await.unwrap();
+    assert_eq!(id, packets::PLAY_SPAWN_ENTITY_S2C_ID, "far dig must still spawn a drop");
+    let (spawned, _) = packets::SpawnItemEntity::decode_body(&payload).unwrap();
+    assert!((spawned.y - (gy as f64 + 0.5)).abs() < 1.5,
+        "drop must appear near the broken block, got y={}", spawned.y);
+    drop(s);
+    drop(rx);
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// 回归：在远离出生点的地方挖地下方块（头顶有地表/树冠），掉落物必须停在挖掘点
+/// 附近，而不是被“整列最高方块”抬到地表（用户反馈“不同高度打碎没掉落”）。
+#[tokio::test]
+async fn dig_underground_far_from_spawn_drops_near_the_hole() {
+    use mc_network::DropState;
+    let dir = std::env::temp_dir().join(format!("mc-underground-drop-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    let (tx, rx) = crossbeam_channel::unbounded::<PlayEvent>();
+    let mutable = Arc::new(MutableWorld::new(DEFAULT_SEED));
+    let cache = Arc::new(ChunkCache::new(DEFAULT_SEED, 64).with_mutable(Arc::clone(&mutable)));
+    let drops = Arc::new(DropState::new(dir.clone(), DEFAULT_SEED));
+    let config = NetConfig::new(100, "underground-drop".into(), Arc::new(AtomicUsize::new(0)))
+        .with_play_events(tx)
+        .with_view_distance(2)
+        .with_chunk_cache(cache)
+        .with_mutable_world(Arc::clone(&mutable))
+        .with_drops(Arc::clone(&drops));
+    let addr = spawn_server(config).await;
+    let mut s = login_and_join(addr, "Miner", 2).await;
+    let (id, _) = read_frame_timeout(&mut s, Duration::from_secs(5)).await.unwrap();
+    assert_eq!(id, packets::PLAY_SET_CONTAINER_CONTENT_S2C_ID);
+
+    let world = WorldGen::new(DEFAULT_SEED);
+    let (bx, bz) = (600i32, 700i32);
+    let top = world.height_at(bx, bz);
+    let (gx, gy, gz) = (bx, top - 5, bz); // 地表下 5 格
+    let block = mutable.get(gx, gy, gz);
+    assert_ne!(block, 0, "underground target must be solid");
+    assert_ne!(block, 89, "underground target must not be water");
+
+    // 玩家“站”在基坑里（脚 y = 被挖方块 y + 1），满足 reach 判定。
+    let feet = (gx as f64 + 0.5, (gy + 1) as f64, gz as f64 + 0.5);
+    send_pos_y(&mut s, feet.0, feet.1, feet.2).await;
+    match next_event(&rx).await {
+        PlayEvent::Movement { .. } => {}
+        other => panic!("expected movement event, got {other:?}"),
+    }
+
+    let mut body = Vec::new();
+    packets::PlayerAction { status: 2, x: gx, y: gy, z: gz, face: 1, sequence: 31 }
+        .encode_body(&mut body);
+    mc_network::framing::write_packet(&mut s, packets::PLAY_PLAYER_ACTION_C2S_ID, &body)
+        .await
+        .unwrap();
+    let _ = loop {
+        let (id, payload) = read_frame_timeout(&mut s, Duration::from_secs(5)).await.unwrap();
+        if id == packets::PLAY_BLOCK_UPDATE_S2C_ID {
+            break payload;
+        }
+    };
+    let (id, _) = read_frame_timeout(&mut s, Duration::from_secs(5)).await.unwrap();
+    assert_eq!(id, packets::PLAY_BLOCK_CHANGED_ACK_S2C_ID);
+    let (id, payload) = read_frame_timeout(&mut s, Duration::from_secs(5)).await.unwrap();
+    assert_eq!(id, packets::PLAY_SPAWN_ENTITY_S2C_ID, "underground dig must spawn a drop");
+    let (spawned, _) = packets::SpawnItemEntity::decode_body(&payload).unwrap();
+    let drop_id = spawned.entity_id;
+
+    // 关键：服务端权威静息高度必须仍在挖掘点附近。
+    // 旧实现用 support_top_y 取“整列最高方块”，掉落物会被钳到地表 top+1，
+    // 地下玩家既看不见也捡不到（用户反馈“不同高度打碎没掉落”）。
+    let rest_y = drops.items.lock().unwrap().get(drop_id).map(|e| e.rest_y);
+    assert!(
+        rest_y.map(|y| (y - gy as f64).abs() < 1.5).unwrap_or(false),
+        "server drop rest_y must be near dug block y={gy}, got {rest_y:?}"
+    );
+    drop(s);
+    drop(rx);
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// 模拟原版客户端完整挖掘流程：逐步走到远处 → START_DIG → 持续移动包 → FINISH_DIG。
+/// 用于复现“原版客户端走远后地表方块不掉落”。
+#[tokio::test]
+async fn vanilla_style_walk_then_dig_far_spawns_drop() {
+    use mc_network::DropState;
+    let dir = std::env::temp_dir().join(format!("mc-vanilla-walk-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    let (tx, rx) = crossbeam_channel::unbounded::<PlayEvent>();
+    let mutable = Arc::new(MutableWorld::new(DEFAULT_SEED));
+    let cache = Arc::new(ChunkCache::new(DEFAULT_SEED, 64).with_mutable(Arc::clone(&mutable)));
+    let drops = Arc::new(DropState::new(dir.clone(), DEFAULT_SEED));
+    let config = NetConfig::new(100, "vanilla-walk".into(), Arc::new(AtomicUsize::new(0)))
+        .with_play_events(tx)
+        .with_view_distance(2)
+        .with_chunk_cache(cache)
+        .with_mutable_world(Arc::clone(&mutable))
+        .with_drops(Arc::clone(&drops));
+    let addr = spawn_server(config).await;
+    let mut s = login_and_join(addr, "Walker", 2).await;
+    let (id, _) = read_frame_timeout(&mut s, Duration::from_secs(5)).await.unwrap();
+    assert_eq!(id, packets::PLAY_SET_CONTAINER_CONTENT_S2C_ID);
+
+    let world = WorldGen::new(DEFAULT_SEED);
+    let spawn = world.spawn_pos();
+    // 模拟“走远”：小步移动多次（每步跨约半个区块），原版客户端会持续发 PosRot。
+    let (target_x, target_z) = (600.5, 700.5);
+    let steps = 24;
+    for i in 1..=steps {
+        let t = i as f64 / steps as f64;
+        let x = spawn.0 as f64 + 0.5 + (target_x - spawn.0 as f64 - 0.5) * t;
+        let z = spawn.2 as f64 + 0.5 + (target_z - spawn.2 as f64 - 0.5) * t;
+        let h = world.height_at(x.floor() as i32, z.floor() as i32);
+        send_pos_y(&mut s, x, (h + 1) as f64, z).await;
+    }
+    // 给服务端一点时间处理移动包（TCP 顺序保证 view.center() 已更新）。
+    tokio::time::sleep(Duration::from_millis(200)).await;
+
+    let (gx, gz) = (target_x.floor() as i32, target_z.floor() as i32);
+    let gy = world.height_at(gx, gz);
+    let block = mutable.get(gx, gy, gz);
+    assert_ne!(block, 0, "target must be solid");
+    let feet = (target_x, (gy + 1) as f64, target_z);
+
+    // 原版：START_DIG（进度动画）→ 若干移动包 → FINISH_DIG。
+    let mut body = Vec::new();
+    packets::PlayerAction { status: 0, x: gx, y: gy, z: gz, face: 1, sequence: 40 }
+        .encode_body(&mut body);
+    mc_network::framing::write_packet(&mut s, packets::PLAY_PLAYER_ACTION_C2S_ID, &body).await.unwrap();
+    // START_DIG 的 ack 不应破坏方块（view move 包可能仍在流里，循环找 ack）。
+    // 走远会触发大量跨区块补发（radius=2 时约 380 个包），循环找 ack。
+    let mut saw_start_ack = false;
+    for _ in 0..2000 {
+        let (id, _) = read_frame_timeout(&mut s, Duration::from_millis(100)).await.unwrap();
+        if id == packets::PLAY_BLOCK_CHANGED_ACK_S2C_ID {
+            saw_start_ack = true;
+            break;
+        }
+    }
+    assert!(saw_start_ack, "START_DIG must be acked");
+    assert_eq!(mutable.get(gx, gy, gz), block, "START_DIG must not break");
+
+    // 挖掘期间原版客户端继续发移动包。
+    body.clear();
+    packets::MovePlayerPos {
+        x: feet.0, y: feet.1, z: feet.2, on_ground: true, horizontal_collision: false,
+    }.encode_body(&mut body);
+    mc_network::framing::write_packet(&mut s, packets::PLAY_MOVE_POS_C2S_ID, &body).await.unwrap();
+
+    let mut body = Vec::new();
+    packets::PlayerAction { status: 2, x: gx, y: gy, z: gz, face: 1, sequence: 41 }
+        .encode_body(&mut body);
+    mc_network::framing::write_packet(&mut s, packets::PLAY_PLAYER_ACTION_C2S_ID, &body).await.unwrap();
+
+    let mut saw_update = false;
+    let mut saw_spawn = false;
+    for _ in 0..200 {
+        let (id, _payload) = match read_frame_timeout(&mut s, Duration::from_millis(100)).await.ok() {
+            Some(v) => v,
+            None => continue,
+        };
+        if id == packets::PLAY_BLOCK_UPDATE_S2C_ID {
+            saw_update = true;
+        }
+        if id == packets::PLAY_SPAWN_ENTITY_S2C_ID {
+            saw_spawn = true;
+            break;
+        }
+    }
+    assert!(saw_update, "vanilla-style far dig must break block (BlockUpdate)");
+    assert!(saw_spawn, "vanilla-style far dig must spawn a drop");
+    drop(s);
+    drop(rx);
+    let _ = std::fs::remove_dir_all(&dir);
+}
