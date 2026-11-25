@@ -1214,3 +1214,711 @@ async fn plant_oak_sapling_grows_into_small_oak_and_trunk_drops_log() {
     drop(rx);
     let _ = std::fs::remove_dir_all(&dir);
 }
+
+/// P27：手持锄头对草顶面右键 → 耕地（6875，不消耗）；种在耕地上的小麦生长减半。
+/// 泥土对照组同播：耕地株成熟时泥土株远未熟（28 拍 vs 56 拍，基础间隔 8 拍）。
+#[tokio::test]
+async fn p27_till_soil_to_farmland_and_wheat_grows_faster_on_it() {
+    use mc_network::{BroadcastHub, DropState};
+    let dir = std::env::temp_dir().join(format!("mc-p27-till-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    let (tx, rx) = crossbeam_channel::unbounded::<PlayEvent>();
+    let mutable = Arc::new(MutableWorld::new(DEFAULT_SEED));
+    let cache = Arc::new(ChunkCache::new(DEFAULT_SEED, 64).with_mutable(Arc::clone(&mutable)));
+    let drops = Arc::new(DropState::new(dir.clone(), DEFAULT_SEED));
+    drops.set_stage_ticks(8);
+    let hub = Arc::new(BroadcastHub::new());
+    let config = NetConfig::new(100, "p27-till".into(), Arc::new(AtomicUsize::new(0)))
+        .with_play_events(tx)
+        .with_view_distance(2)
+        .with_chunk_cache(cache)
+        .with_mutable_world(Arc::clone(&mutable))
+        .with_drops(Arc::clone(&drops))
+        .with_hub(Arc::clone(&hub));
+    let addr = spawn_server(config).await;
+    let mut s = login_and_join(addr, "TillP", 2).await;
+    let (id, _) = read_frame_timeout(&mut s, Duration::from_secs(5)).await.unwrap();
+    assert_eq!(id, packets::PLAY_SET_CONTAINER_CONTENT_S2C_ID);
+
+    let spawn = WorldGen::new(DEFAULT_SEED).spawn_pos();
+    let (fx, fy, fz) = (spawn.0 as f64 + 0.5, spawn.1 as f64, spawn.2 as f64 + 0.5);
+    let (gx, gy, gz) = (spawn.0, spawn.1 - 1, spawn.2);
+    assert_eq!(mutable.get(gx, gy, gz), 9, "spawn feet must be grass");
+    // 对照组泥土柱：测试 setup 直接放（决定种植只看服务端状态，不依赖客户端 chunk）。
+    mutable.set(gx + 1, gy, gz, mc_world::DIRT_BLOCK_ID);
+    mutable.set(gx + 1, gy + 1, gz, mc_world::AIR_BLOCK_ID);
+    send_pos_y(&mut s, fx, fy, fz).await;
+    let conn_id = match next_event(&rx).await {
+        PlayEvent::Movement { conn_id, .. } => conn_id,
+        other => panic!("expected movement event, got {other:?}"),
+    };
+
+    // 管理面板口径：直接发锄头 + 2 种子（hotbar 37/38），模拟 `/api/give` 领取。
+    let leftover =
+        drops.with_inventory(conn_id, |inv| inv.add_item(mc_world::drops::ITEM_WOODEN_HOE, 1));
+    assert_eq!(leftover, Some(0), "hoe must fit the backpack");
+    let leftover =
+        drops.with_inventory(conn_id, |inv| inv.add_item(mc_world::drops::ITEM_WHEAT_SEEDS, 2));
+    assert_eq!(leftover, Some(0), "seeds must fit the backpack");
+
+    // 选中锄头（槽 1）：对草顶面右键 → 耕地 6875 + Ack，不扣锄头、无 Slot 同步。
+    let body = [0u8, 1u8];
+    mc_network::framing::write_packet(&mut s, packets::PLAY_SET_HELD_ITEM_C2S_ID, &body)
+        .await
+        .unwrap();
+    let mut body = Vec::new();
+    packets::UseItemOn {
+        hand: 0,
+        x: gx,
+        y: gy,
+        z: gz,
+        face: 1,
+        cursor_x: 0.5,
+        cursor_y: 1.0,
+        cursor_z: 0.5,
+        inside_block: false,
+        world_border_hit: false,
+        sequence: 61,
+    }
+    .encode_body(&mut body);
+    mc_network::framing::write_packet(&mut s, packets::PLAY_USE_ITEM_ON_C2S_ID, &body)
+        .await
+        .unwrap();
+    let deadline = std::time::Instant::now() + Duration::from_secs(5);
+    let (mut saw_update, mut saw_ack) = (false, false);
+    while std::time::Instant::now() < deadline {
+        let (id, payload) = read_frame_timeout(&mut s, Duration::from_secs(5)).await.unwrap();
+        match id {
+            packets::PLAY_BLOCK_UPDATE_S2C_ID => {
+                let (bu, _) = packets::BlockUpdate::decode_body(&payload).unwrap();
+                assert_eq!((bu.x, bu.y, bu.z), (gx, gy, gz));
+                assert_eq!(bu.block_id, 6875, "tilled soil must become farmland");
+                saw_update = true;
+            }
+            packets::PLAY_BLOCK_CHANGED_ACK_S2C_ID => {
+                if read_varint(&payload).unwrap().0 == 61 {
+                    saw_ack = true;
+                }
+            }
+            packets::PLAY_ENTITY_POSITION_SYNC_S2C_ID | packets::PLAY_KEEPALIVE_S2C_ID => continue,
+            packets::PLAY_SET_CONTAINER_SLOT_S2C_ID => panic!("tilling must not consume the hoe"),
+            other => panic!("unexpected packet {other:#04x} after tilling"),
+        }
+        if saw_update && saw_ack {
+            break;
+        }
+    }
+    assert!(saw_update && saw_ack, "till must broadcast farmland and ack the sequence");
+    assert_eq!(mutable.get(gx, gy, gz), mc_world::FARMLAND_BLOCK_ID);
+    assert_eq!(
+        drops.with_inventory(conn_id, |inv| inv.held()).flatten(),
+        Some((mc_world::drops::ITEM_WOODEN_HOE, 1)),
+        "hoe is never consumed (no durability system)"
+    );
+
+    // 选中种子（槽 2）：耕地上种一株（seq 62），泥土上种一株对照（seq 63）。
+    let body = [0u8, 2u8];
+    mc_network::framing::write_packet(&mut s, packets::PLAY_SET_HELD_ITEM_C2S_ID, &body)
+        .await
+        .unwrap();
+    for (seq, (px, py, pz), left) in [(62, (gx, gy, gz), 1), (63, (gx + 1, gy, gz), 0)] {
+        let mut body = Vec::new();
+        packets::UseItemOn {
+            hand: 0,
+            x: px,
+            y: py,
+            z: pz,
+            face: 1,
+            cursor_x: 0.5,
+            cursor_y: 1.0,
+            cursor_z: 0.5,
+            inside_block: false,
+            world_border_hit: false,
+            sequence: seq,
+        }
+        .encode_body(&mut body);
+        mc_network::framing::write_packet(&mut s, packets::PLAY_USE_ITEM_ON_C2S_ID, &body)
+            .await
+            .unwrap();
+        let deadline = std::time::Instant::now() + Duration::from_secs(5);
+        let (mut saw_update, mut saw_ack, mut saw_slot) = (false, false, false);
+        while std::time::Instant::now() < deadline {
+            let (id, payload) = read_frame_timeout(&mut s, Duration::from_secs(5)).await.unwrap();
+            match id {
+                packets::PLAY_BLOCK_UPDATE_S2C_ID => {
+                    let (bu, _) = packets::BlockUpdate::decode_body(&payload).unwrap();
+                    assert_eq!((bu.x, bu.y, bu.z), (px, py + 1, pz));
+                    assert_eq!(bu.block_id, 6867, "planted wheat must be age 0");
+                    saw_update = true;
+                }
+                packets::PLAY_BLOCK_CHANGED_ACK_S2C_ID => {
+                    if read_varint(&payload).unwrap().0 == seq {
+                        saw_ack = true;
+                    }
+                }
+                packets::PLAY_SET_CONTAINER_SLOT_S2C_ID => {
+                    let (slot_pkt, _) = packets::SetContainerSlot::decode_body(&payload).unwrap();
+                    assert_eq!(slot_pkt.data.count, left, "planting must consume 1 seed");
+                    saw_slot = true;
+                }
+                packets::PLAY_ENTITY_POSITION_SYNC_S2C_ID | packets::PLAY_KEEPALIVE_S2C_ID => {
+                    continue
+                }
+                other => panic!("unexpected packet {other:#04x} while planting seq={seq}"),
+            }
+            if saw_update && saw_ack && saw_slot {
+                break;
+            }
+        }
+        assert!(saw_update && saw_ack && saw_slot, "planting seq={seq} must land, ack and sync");
+    }
+    assert_eq!(drops.crop_count(), 2);
+
+    // 生长：耕地株先成熟（~28 拍 ≈1.4s）；成熟瞬间泥土株 age≈3，远未熟。
+    let deadline = std::time::Instant::now() + Duration::from_secs(20);
+    loop {
+        assert!(std::time::Instant::now() < deadline, "farmland wheat must mature first");
+        let (id, payload) = read_frame_timeout(&mut s, Duration::from_secs(5)).await.unwrap();
+        match id {
+            packets::PLAY_BLOCK_UPDATE_S2C_ID => {
+                let (bu, _) = packets::BlockUpdate::decode_body(&payload).unwrap();
+                if (bu.x, bu.y, bu.z) == (gx, gy + 1, gz) && bu.block_id == 6874 {
+                    break;
+                }
+            }
+            packets::PLAY_ENTITY_POSITION_SYNC_S2C_ID | packets::PLAY_KEEPALIVE_S2C_ID => continue,
+            other => panic!("unexpected packet {other:#04x} while waiting for growth"),
+        }
+    }
+    assert_eq!(mutable.get(gx, gy + 1, gz), 6874, "farmland wheat must be mature");
+    let dirt_age = mc_world::wheat_age(mutable.get(gx + 1, gy + 1, gz))
+        .expect("dirt wheat must still be growing");
+    assert!(dirt_age < 7, "dirt wheat must lag far behind, got age={dirt_age}");
+    assert!(dirt_age >= 1, "dirt wheat must still advance, got age={dirt_age}");
+
+    drop(s);
+    // 生长期的 BlockEdit 事件积压在 channel 里：排空直到 Disconnect。
+    let deadline = std::time::Instant::now() + Duration::from_secs(10);
+    loop {
+        assert!(std::time::Instant::now() < deadline, "must see disconnect after close");
+        match next_event(&rx).await {
+            PlayEvent::Disconnect { .. } => break,
+            PlayEvent::BlockEdit { .. } => continue,
+            other => panic!("expected only block edits then disconnect, got {other:?}"),
+        }
+    }
+    drop(rx);
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// P27：手持骨粉右键小麦 → 推进 1~2 阶段并扣 1；成熟后再用不扣；
+/// 手持骨粉右键树苗 → 直接长成小橡树并扣 1。
+#[tokio::test]
+async fn p27_bonemeal_advances_wheat_and_grows_sapling() {
+    use mc_network::{BroadcastHub, DropState};
+    let dir = std::env::temp_dir().join(format!("mc-p27-bone-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    let (tx, rx) = crossbeam_channel::unbounded::<PlayEvent>();
+    let mutable = Arc::new(MutableWorld::new(DEFAULT_SEED));
+    let cache = Arc::new(ChunkCache::new(DEFAULT_SEED, 64).with_mutable(Arc::clone(&mutable)));
+    let drops = Arc::new(DropState::new(dir.clone(), DEFAULT_SEED));
+    let hub = Arc::new(BroadcastHub::new());
+    let config = NetConfig::new(100, "p27-bone".into(), Arc::new(AtomicUsize::new(0)))
+        .with_play_events(tx)
+        .with_view_distance(2)
+        .with_chunk_cache(cache)
+        .with_mutable_world(Arc::clone(&mutable))
+        .with_drops(Arc::clone(&drops))
+        .with_hub(Arc::clone(&hub));
+    let addr = spawn_server(config).await;
+    let mut s = login_and_join(addr, "BoneP", 2).await;
+    let (id, _) = read_frame_timeout(&mut s, Duration::from_secs(5)).await.unwrap();
+    assert_eq!(id, packets::PLAY_SET_CONTAINER_CONTENT_S2C_ID);
+
+    let spawn = WorldGen::new(DEFAULT_SEED).spawn_pos();
+    let (fx, fy, fz) = (spawn.0 as f64 + 0.5, spawn.1 as f64, spawn.2 as f64 + 0.5);
+    let (gx, gy, gz) = (spawn.0, spawn.1 - 1, spawn.2);
+    assert_eq!(mutable.get(gx, gy, gz), 9, "spawn feet must be grass");
+    // 树苗试验柱：测试 setup 直接放泥土 + 清顶（与耕地 e2e 同口径）。
+    mutable.set(gx + 2, gy, gz, mc_world::DIRT_BLOCK_ID);
+    mutable.set(gx + 2, gy + 1, gz, mc_world::AIR_BLOCK_ID);
+    send_pos_y(&mut s, fx, fy, fz).await;
+    let conn_id = match next_event(&rx).await {
+        PlayEvent::Movement { conn_id, .. } => conn_id,
+        other => panic!("expected movement event, got {other:?}"),
+    };
+
+    // 管理面板口径：种子×1、骨粉×10、树苗×1（hotbar 37/38/39）。
+    for (item, n) in [
+        (mc_world::drops::ITEM_WHEAT_SEEDS, 1),
+        (mc_world::drops::ITEM_BONE_MEAL, 10),
+        (mc_world::drops::ITEM_OAK_SAPLING, 1),
+    ] {
+        let leftover = drops.with_inventory(conn_id, |inv| inv.add_item(item, n));
+        assert_eq!(leftover, Some(0), "item {item} must fit the backpack");
+    }
+
+    // 种下小麦（槽 1，seq 71）：6867 + Ack + 扣光种子。
+    let body = [0u8, 1u8];
+    mc_network::framing::write_packet(&mut s, packets::PLAY_SET_HELD_ITEM_C2S_ID, &body)
+        .await
+        .unwrap();
+    let mut body = Vec::new();
+    packets::UseItemOn {
+        hand: 0,
+        x: gx,
+        y: gy,
+        z: gz,
+        face: 1,
+        cursor_x: 0.5,
+        cursor_y: 1.0,
+        cursor_z: 0.5,
+        inside_block: false,
+        world_border_hit: false,
+        sequence: 71,
+    }
+    .encode_body(&mut body);
+    mc_network::framing::write_packet(&mut s, packets::PLAY_USE_ITEM_ON_C2S_ID, &body)
+        .await
+        .unwrap();
+    let deadline = std::time::Instant::now() + Duration::from_secs(5);
+    let (mut saw_update, mut saw_ack, mut saw_slot) = (false, false, false);
+    while std::time::Instant::now() < deadline {
+        let (id, payload) = read_frame_timeout(&mut s, Duration::from_secs(5)).await.unwrap();
+        match id {
+            packets::PLAY_BLOCK_UPDATE_S2C_ID => {
+                assert_eq!(
+                    packets::BlockUpdate::decode_body(&payload).unwrap().0.block_id,
+                    6867
+                );
+                saw_update = true;
+            }
+            packets::PLAY_BLOCK_CHANGED_ACK_S2C_ID => {
+                if read_varint(&payload).unwrap().0 == 71 {
+                    saw_ack = true;
+                }
+            }
+            packets::PLAY_SET_CONTAINER_SLOT_S2C_ID => saw_slot = true,
+            packets::PLAY_ENTITY_POSITION_SYNC_S2C_ID | packets::PLAY_KEEPALIVE_S2C_ID => continue,
+            other => panic!("unexpected packet {other:#04x} while planting wheat"),
+        }
+        if saw_update && saw_ack && saw_slot {
+            break;
+        }
+    }
+    assert!(saw_update && saw_ack && saw_slot, "wheat must be planted");
+    assert_eq!(drops.crop_count(), 1);
+
+    // 选中骨粉（槽 2）：连续催熟到满级；每拍 +adv（同位点确定性），各扣 1。
+    let body = [0u8, 2u8];
+    mc_network::framing::write_packet(&mut s, packets::PLAY_SET_HELD_ITEM_C2S_ID, &body)
+        .await
+        .unwrap();
+    let adv = mc_world::drops::bonemeal_advance(DEFAULT_SEED, gx, gy + 1, gz);
+    let mut age = 0u8;
+    let mut bone_left = 10i32;
+    let mut seq = 72i32;
+    while age < 7 {
+        let mut body = Vec::new();
+        packets::UseItemOn {
+            hand: 0,
+            x: gx,
+            y: gy + 1,
+            z: gz,
+            face: 1,
+            cursor_x: 0.5,
+            cursor_y: 0.5,
+            cursor_z: 0.5,
+            inside_block: false,
+            world_border_hit: false,
+            sequence: seq,
+        }
+        .encode_body(&mut body);
+        mc_network::framing::write_packet(&mut s, packets::PLAY_USE_ITEM_ON_C2S_ID, &body)
+            .await
+            .unwrap();
+        age = age.saturating_add(adv).min(7);
+        bone_left -= 1;
+        let deadline = std::time::Instant::now() + Duration::from_secs(5);
+        let (mut saw_update, mut saw_ack, mut saw_slot) = (false, false, false);
+        while std::time::Instant::now() < deadline {
+            let (id, payload) = read_frame_timeout(&mut s, Duration::from_secs(5)).await.unwrap();
+            match id {
+                packets::PLAY_BLOCK_UPDATE_S2C_ID => {
+                    let (bu, _) = packets::BlockUpdate::decode_body(&payload).unwrap();
+                    assert_eq!((bu.x, bu.y, bu.z), (gx, gy + 1, gz));
+                    assert_eq!(bu.block_id, 6867 + age as i32, "bonemeal must advance to {age}");
+                    saw_update = true;
+                }
+                packets::PLAY_BLOCK_CHANGED_ACK_S2C_ID => {
+                    if read_varint(&payload).unwrap().0 == seq {
+                        saw_ack = true;
+                    }
+                }
+                packets::PLAY_SET_CONTAINER_SLOT_S2C_ID => {
+                    let (slot_pkt, _) = packets::SetContainerSlot::decode_body(&payload).unwrap();
+                    assert_eq!(slot_pkt.slot, 38);
+                    assert_eq!(slot_pkt.data.count, bone_left, "bonemeal must cost 1");
+                    saw_slot = true;
+                }
+                packets::PLAY_ENTITY_POSITION_SYNC_S2C_ID | packets::PLAY_KEEPALIVE_S2C_ID => {
+                    continue
+                }
+                other => panic!("unexpected packet {other:#04x} on bonemeal seq={seq}"),
+            }
+            if saw_update && saw_ack && saw_slot {
+                break;
+            }
+        }
+        assert!(saw_update && saw_ack && saw_slot, "bonemeal seq={seq} must land, ack and sync");
+        assert_eq!(drops.crop_stage(gx, gy + 1, gz), Some(age), "tracking must follow bonemeal");
+        seq += 1;
+    }
+    assert_eq!(mutable.get(gx, gy + 1, gz), 6874, "wheat must be mature after bonemeal");
+
+    // 成熟后再催：只重发 6874 现状 + Ack，不扣骨粉。
+    let mut body = Vec::new();
+    packets::UseItemOn {
+        hand: 0,
+        x: gx,
+        y: gy + 1,
+        z: gz,
+        face: 1,
+        cursor_x: 0.5,
+        cursor_y: 0.5,
+        cursor_z: 0.5,
+        inside_block: false,
+        world_border_hit: false,
+        sequence: seq,
+    }
+    .encode_body(&mut body);
+    mc_network::framing::write_packet(&mut s, packets::PLAY_USE_ITEM_ON_C2S_ID, &body)
+        .await
+        .unwrap();
+    let deadline = std::time::Instant::now() + Duration::from_secs(5);
+    let (mut saw_update, mut saw_ack) = (false, false);
+    while std::time::Instant::now() < deadline {
+        let (id, payload) = read_frame_timeout(&mut s, Duration::from_secs(5)).await.unwrap();
+        match id {
+            packets::PLAY_BLOCK_UPDATE_S2C_ID => {
+                assert_eq!(
+                    packets::BlockUpdate::decode_body(&payload).unwrap().0.block_id,
+                    6874
+                );
+                saw_update = true;
+            }
+            packets::PLAY_BLOCK_CHANGED_ACK_S2C_ID => {
+                if read_varint(&payload).unwrap().0 == seq {
+                    saw_ack = true;
+                }
+            }
+            packets::PLAY_ENTITY_POSITION_SYNC_S2C_ID | packets::PLAY_KEEPALIVE_S2C_ID => continue,
+            packets::PLAY_SET_CONTAINER_SLOT_S2C_ID => panic!("mature bonemeal must not consume"),
+            other => panic!("unexpected packet {other:#04x} on mature bonemeal"),
+        }
+        if saw_update && saw_ack {
+            break;
+        }
+    }
+    assert!(saw_update && saw_ack, "mature bonemeal must resend and ack");
+    assert_eq!(
+        drops.with_inventory(conn_id, |inv| inv.held()).flatten(),
+        Some((mc_world::drops::ITEM_BONE_MEAL, bone_left)),
+        "mature bonemeal must not consume"
+    );
+
+    // 种下树苗（槽 3，seq 91），再用骨粉催（seq 92）：直接长成小橡树。
+    let body = [0u8, 3u8];
+    mc_network::framing::write_packet(&mut s, packets::PLAY_SET_HELD_ITEM_C2S_ID, &body)
+        .await
+        .unwrap();
+    let mut body = Vec::new();
+    packets::UseItemOn {
+        hand: 0,
+        x: gx + 2,
+        y: gy,
+        z: gz,
+        face: 1,
+        cursor_x: 0.5,
+        cursor_y: 1.0,
+        cursor_z: 0.5,
+        inside_block: false,
+        world_border_hit: false,
+        sequence: 91,
+    }
+    .encode_body(&mut body);
+    mc_network::framing::write_packet(&mut s, packets::PLAY_USE_ITEM_ON_C2S_ID, &body)
+        .await
+        .unwrap();
+    let deadline = std::time::Instant::now() + Duration::from_secs(5);
+    let (mut saw_update, mut saw_ack, mut saw_slot) = (false, false, false);
+    while std::time::Instant::now() < deadline {
+        let (id, payload) = read_frame_timeout(&mut s, Duration::from_secs(5)).await.unwrap();
+        match id {
+            packets::PLAY_BLOCK_UPDATE_S2C_ID => saw_update = true,
+            packets::PLAY_BLOCK_CHANGED_ACK_S2C_ID => {
+                if read_varint(&payload).unwrap().0 == 91 {
+                    saw_ack = true;
+                }
+            }
+            packets::PLAY_SET_CONTAINER_SLOT_S2C_ID => saw_slot = true,
+            packets::PLAY_ENTITY_POSITION_SYNC_S2C_ID | packets::PLAY_KEEPALIVE_S2C_ID => continue,
+            other => panic!("unexpected packet {other:#04x} while planting sapling"),
+        }
+        if saw_update && saw_ack && saw_slot {
+            break;
+        }
+    }
+    assert!(saw_update && saw_ack && saw_slot, "sapling must be planted");
+    assert_eq!(mutable.get(gx + 2, gy + 1, gz), mc_world::OAK_SAPLING_BLOCK_ID);
+    assert_eq!(drops.sapling_count(), 1);
+
+    let body = [0u8, 2u8];
+    mc_network::framing::write_packet(&mut s, packets::PLAY_SET_HELD_ITEM_C2S_ID, &body)
+        .await
+        .unwrap();
+    bone_left -= 1;
+    let mut body = Vec::new();
+    packets::UseItemOn {
+        hand: 0,
+        x: gx + 2,
+        y: gy + 1,
+        z: gz,
+        face: 1,
+        cursor_x: 0.5,
+        cursor_y: 0.5,
+        cursor_z: 0.5,
+        inside_block: false,
+        world_border_hit: false,
+        sequence: 92,
+    }
+    .encode_body(&mut body);
+    mc_network::framing::write_packet(&mut s, packets::PLAY_USE_ITEM_ON_C2S_ID, &body)
+        .await
+        .unwrap();
+    let deadline = std::time::Instant::now() + Duration::from_secs(20);
+    let (mut saw_log, mut saw_leaves, mut saw_ack, mut saw_slot) = (false, false, false, false);
+    while std::time::Instant::now() < deadline {
+        let (id, payload) = read_frame_timeout(&mut s, Duration::from_secs(5)).await.unwrap();
+        match id {
+            packets::PLAY_BLOCK_UPDATE_S2C_ID => {
+                let (bu, _) = packets::BlockUpdate::decode_body(&payload).unwrap();
+                if (bu.x, bu.y, bu.z) == (gx + 2, gy + 1, gz) && bu.block_id == 140 {
+                    saw_log = true;
+                }
+                if bu.block_id == 294 {
+                    saw_leaves = true;
+                }
+            }
+            packets::PLAY_BLOCK_CHANGED_ACK_S2C_ID => {
+                if read_varint(&payload).unwrap().0 == 92 {
+                    saw_ack = true;
+                }
+            }
+            packets::PLAY_SET_CONTAINER_SLOT_S2C_ID => {
+                let (slot_pkt, _) = packets::SetContainerSlot::decode_body(&payload).unwrap();
+                assert_eq!(slot_pkt.data.count, bone_left, "tree bonemeal must cost 1");
+                saw_slot = true;
+            }
+            packets::PLAY_ENTITY_POSITION_SYNC_S2C_ID | packets::PLAY_KEEPALIVE_S2C_ID => continue,
+            other => panic!("unexpected packet {other:#04x} on sapling bonemeal"),
+        }
+        if saw_log && saw_leaves && saw_ack && saw_slot {
+            break;
+        }
+    }
+    assert!(saw_log, "bonemealed sapling cell must become oak_log");
+    assert!(saw_leaves, "bonemealed sapling must broadcast canopy leaves");
+    assert!(saw_ack && saw_slot, "sapling bonemeal must ack and consume 1");
+    assert_eq!(mutable.get(gx + 2, gy + 1, gz), mc_world::OAK_LOG_BLOCK_ID);
+    assert_eq!(drops.sapling_count(), 0, "grown tree leaves tracking");
+    assert_eq!(drops.crop_count(), 1, "wheat tracking must be intact");
+
+    drop(s);
+    let deadline = std::time::Instant::now() + Duration::from_secs(10);
+    loop {
+        assert!(std::time::Instant::now() < deadline, "must see disconnect after close");
+        match next_event(&rx).await {
+            PlayEvent::Disconnect { .. } => break,
+            PlayEvent::BlockEdit { .. } => continue,
+            other => panic!("expected only block edits then disconnect, got {other:?}"),
+        }
+    }
+    drop(rx);
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// P27：砍掉原木后，3 格内无支撑的树叶随 ticker 消失（BlockUpdate 0 + decay 掉落）。
+#[tokio::test]
+async fn p27_leaves_decay_after_trunk_removed() {
+    use mc_network::{BroadcastHub, DropState};
+    let dir = std::env::temp_dir().join(format!("mc-p27-decay-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    let (tx, rx) = crossbeam_channel::unbounded::<PlayEvent>();
+    let mutable = Arc::new(MutableWorld::new(DEFAULT_SEED));
+    let cache = Arc::new(ChunkCache::new(DEFAULT_SEED, 64).with_mutable(Arc::clone(&mutable)));
+    let drops = Arc::new(DropState::new(dir.clone(), DEFAULT_SEED));
+    drops.set_leaf_decay_ticks(5);
+    let hub = Arc::new(BroadcastHub::new());
+    let config = NetConfig::new(100, "p27-decay".into(), Arc::new(AtomicUsize::new(0)))
+        .with_play_events(tx)
+        .with_view_distance(2)
+        .with_chunk_cache(cache)
+        .with_mutable_world(Arc::clone(&mutable))
+        .with_drops(Arc::clone(&drops))
+        .with_hub(Arc::clone(&hub));
+    let addr = spawn_server(config).await;
+    let mut s = login_and_join(addr, "DecayP", 2).await;
+    let (id, _) = read_frame_timeout(&mut s, Duration::from_secs(5)).await.unwrap();
+    assert_eq!(id, packets::PLAY_SET_CONTAINER_CONTENT_S2C_ID);
+
+    let spawn = WorldGen::new(DEFAULT_SEED).spawn_pos();
+    let (fx, fy, fz) = (spawn.0 as f64 + 0.5, spawn.1 as f64, spawn.2 as f64 + 0.5);
+    let (gx, gy, gz) = (spawn.0, spawn.1 - 1, spawn.2);
+    send_pos_y(&mut s, fx, fy, fz).await;
+    let _conn_id = match next_event(&rx).await {
+        PlayEvent::Movement { conn_id, .. } => conn_id,
+        other => panic!("expected movement event, got {other:?}"),
+    };
+
+    // 试验台（测试 setup 直接落子）：原木 + 一片孤叶，要求
+    // a) 该叶 decay 必掉东西（Spawn 可断言），b) 3 格内无世界生成原木（不被支撑误取消）。
+    // c) 距原木 ≤3（decay 登记半径）。全立方扫描代替固定偏移（掉落 1/8 口径，固定点易掷空）。
+    let (lx, ly, lz) = (gx, gy + 4, gz);
+    let mut leaf = None;
+    'search: for dx in -3..=3 {
+        for dy in -3..=3 {
+            for dz in -3..=3 {
+                if dx == 0 && dy == 0 && dz == 0 {
+                    continue;
+                }
+                let (cx, cy, cz) = (lx + dx, ly + dy, lz + dz);
+                if mutable.get(cx, cy, cz) != mc_world::AIR_BLOCK_ID {
+                    continue;
+                }
+                if mc_world::drops::leaf_decay_drops(cx, cy, cz, DEFAULT_SEED).is_empty() {
+                    continue;
+                }
+                let mut supported = false;
+                for ox in -3..=3 {
+                    for oy in -3..=3 {
+                        for oz in -3..=3 {
+                            if mutable.get(cx + ox, cy + oy, cz + oz)
+                                == mc_world::OAK_LOG_BLOCK_ID
+                            {
+                                supported = true;
+                                break;
+                            }
+                        }
+                        if supported {
+                            break;
+                        }
+                    }
+                    if supported {
+                        break;
+                    }
+                }
+                if !supported {
+                    leaf = Some((cx, cy, cz));
+                    break 'search;
+                }
+            }
+        }
+    }
+    let (ex, ey, ez) = leaf.expect("must find an isolated leaf spot near spawn");
+    let want = mc_world::drops::leaf_decay_drops(ex, ey, ez, DEFAULT_SEED);
+    assert!(!want.is_empty());
+    mutable.set(lx, ly, lz, mc_world::OAK_LOG_BLOCK_ID);
+    mutable.set(ex, ey, ez, mc_world::OAK_LEAVES_BLOCK_ID);
+
+    // 砍掉原木（seq 81）：BlockUpdate(0) + Ack + 原木掉落 Spawn/Data，同时登记 decay 观察。
+    let mut body = Vec::new();
+    packets::PlayerAction { status: 3, x: lx, y: ly, z: lz, face: 1, sequence: 81 }
+        .encode_body(&mut body);
+    mc_network::framing::write_packet(&mut s, packets::PLAY_PLAYER_ACTION_C2S_ID, &body)
+        .await
+        .unwrap();
+    let deadline = std::time::Instant::now() + Duration::from_secs(5);
+    let (mut saw_update, mut saw_ack, mut saw_spawn, mut saw_data) = (false, false, false, false);
+    while std::time::Instant::now() < deadline {
+        let (id, payload) = read_frame_timeout(&mut s, Duration::from_secs(5)).await.unwrap();
+        match id {
+            packets::PLAY_BLOCK_UPDATE_S2C_ID => {
+                let (bu, _) = packets::BlockUpdate::decode_body(&payload).unwrap();
+                if (bu.x, bu.y, bu.z) == (lx, ly, lz) {
+                    assert_eq!(bu.block_id, 0);
+                    saw_update = true;
+                }
+            }
+            packets::PLAY_BLOCK_CHANGED_ACK_S2C_ID => {
+                if read_varint(&payload).unwrap().0 == 81 {
+                    saw_ack = true;
+                }
+            }
+            packets::PLAY_SPAWN_ENTITY_S2C_ID => saw_spawn = true,
+            packets::PLAY_SET_ENTITY_DATA_S2C_ID => {
+                let (data, _) = packets::ItemEntityData::decode_body(&payload).unwrap();
+                assert_eq!(
+                    data.slot,
+                    packets::Slot { count: 1, item_id: mc_world::drops::ITEM_OAK_LOG },
+                    "dug trunk must drop its log"
+                );
+                saw_data = true;
+            }
+            packets::PLAY_ENTITY_POSITION_SYNC_S2C_ID | packets::PLAY_KEEPALIVE_S2C_ID => continue,
+            other => panic!("unexpected packet {other:#04x} after digging the trunk"),
+        }
+        if saw_update && saw_ack && saw_spawn && saw_data {
+            break;
+        }
+    }
+    assert!(saw_update && saw_ack && saw_spawn && saw_data, "trunk dig must land with its drop");
+    assert!(mutable.get(ex, ey, ez) == mc_world::OAK_LEAVES_BLOCK_ID, "leaf must stand until decay");
+
+    // decay（5 拍 ≈0.25s）：该叶变空气 + BlockUpdate(0) + 掉落 Spawn/Data（视距补发）。
+    let deadline = std::time::Instant::now() + Duration::from_secs(20);
+    let (mut saw_zero, mut saw_entities) = (false, false);
+    let mut seen_drops = std::collections::HashSet::new();
+    while std::time::Instant::now() < deadline {
+        let (id, payload) = read_frame_timeout(&mut s, Duration::from_secs(5)).await.unwrap();
+        match id {
+            packets::PLAY_BLOCK_UPDATE_S2C_ID => {
+                let (bu, _) = packets::BlockUpdate::decode_body(&payload).unwrap();
+                if (bu.x, bu.y, bu.z) == (ex, ey, ez) {
+                    assert_eq!(bu.block_id, 0, "decayed leaf must broadcast air");
+                    saw_zero = true;
+                }
+            }
+            packets::PLAY_SPAWN_ENTITY_S2C_ID => {}
+            packets::PLAY_SET_ENTITY_DATA_S2C_ID => {
+                let (data, _) = packets::ItemEntityData::decode_body(&payload).unwrap();
+                seen_drops.insert((data.slot.item_id, data.slot.count));
+                if want.iter().all(|d| seen_drops.contains(&(d.item_id, d.count))) {
+                    saw_entities = true;
+                }
+            }
+            packets::PLAY_ENTITY_POSITION_SYNC_S2C_ID | packets::PLAY_KEEPALIVE_S2C_ID => continue,
+            other => panic!("unexpected packet {other:#04x} while waiting for decay"),
+        }
+        if saw_zero && saw_entities {
+            break;
+        }
+    }
+    assert!(saw_zero, "decayed leaf must broadcast air at its own cell");
+    assert!(saw_entities, "decay drops must spawn as entities, want={want:?}");
+    assert_eq!(mutable.get(ex, ey, ez), mc_world::AIR_BLOCK_ID);
+    assert_eq!(drops.leaf_pending_count(), 0, "decayed leaf leaves tracking");
+
+    drop(s);
+    let deadline = std::time::Instant::now() + Duration::from_secs(10);
+    loop {
+        assert!(std::time::Instant::now() < deadline, "must see disconnect after close");
+        match next_event(&rx).await {
+            PlayEvent::Disconnect { .. } => break,
+            PlayEvent::BlockEdit { .. } => continue,
+            other => panic!("expected only block edits then disconnect, got {other:?}"),
+        }
+    }
+    drop(rx);
+    let _ = std::fs::remove_dir_all(&dir);
+}

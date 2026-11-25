@@ -8,11 +8,17 @@ pub mod drop_sync;
 pub mod login;
 pub mod view_sync;
 
-pub use self::block_edit::{decide_dig, decide_place, decide_plant, BlockChange, BlockEditOutcome};
+pub use self::block_edit::{
+    decide_bonemeal, decide_dig, decide_place, decide_plant, decide_till, BlockChange,
+    BlockEditOutcome, BonemealAction,
+};
 pub use self::login::{config_finish, enter_play, enter_play_with_events, enter_play_with_options, handle_login, handle_login_configured, handle_login_with_options, handle_login_with_threshold, notify_login_success, PlayOptions};
 
 use self::block_edit::{apply_block_outcome, eye_of};
-use self::drop_sync::{handle_throw_action, send_full_inventory, send_held_slot, spawn_drops, spawn_thrown_items, tick_drops};
+use self::drop_sync::{
+    handle_throw_action, send_ack_only, send_full_inventory, send_held_slot, spawn_drops,
+    spawn_thrown_items, tick_drops,
+};
 use self::login::{emit_play_event, read_packet_any, user_tag, write_packet_any};
 use self::view_sync::{maybe_flush_view, queue_view_move, PendingViewMove};
 use crate::broadcast::{QueuedPacket, ADMIN_KICK_PACKET_ID};
@@ -202,7 +208,7 @@ async fn play_loop(
                                 debug!("play uuid={} throw failed ({e}), closing", profile.uuid);
                                 break;
                             }
-                        } else if let Some(outcome) = decide_dig(
+                        } else if let Some(mut outcome) = decide_dig(
                             mutable,
                             eye_of(last_pos),
                             view.center(),
@@ -210,6 +216,76 @@ async fn play_loop(
                             &act,
                         ) {
                             if let Some(world) = mutable {
+                                // P27：土壤被挖连带拔掉上方作物（原版 pop 口径：上方小麦/树苗
+                                // 一起掉并摘除跟踪，避免作物悬空）；原木被挖登记周围
+                                // 树叶 decay 观察。必须在 apply/spawn 之前改 outcome，
+                                // 广播与掉落才能一次下发。
+                                if let Some(ds) = &opts.drops {
+                                    let snapshot = outcome.changes.clone();
+                                    for c in snapshot {
+                                        if c.new_id == mc_world::AIR_BLOCK_ID
+                                            && mc_world::is_crop_soil(c.old_id)
+                                        {
+                                            let above = world.get(c.x, c.y + 1, c.z);
+                                            if mc_world::wheat_age(above).is_some() {
+                                                let old = world.set(
+                                                    c.x,
+                                                    c.y + 1,
+                                                    c.z,
+                                                    mc_world::AIR_BLOCK_ID,
+                                                );
+                                                outcome.changes.push(BlockChange {
+                                                    x: c.x,
+                                                    y: c.y + 1,
+                                                    z: c.z,
+                                                    old_id: old,
+                                                    new_id: mc_world::AIR_BLOCK_ID,
+                                                });
+                                                outcome.drops.extend(
+                                                    mc_world::drops_for_block(
+                                                        old,
+                                                        c.x,
+                                                        c.y + 1,
+                                                        c.z,
+                                                        world.seed(),
+                                                    ),
+                                                );
+                                                ds.uproot_crop(c.x, c.y + 1, c.z);
+                                            } else if above
+                                                == mc_world::OAK_SAPLING_BLOCK_ID
+                                            {
+                                                let old = world.set(
+                                                    c.x,
+                                                    c.y + 1,
+                                                    c.z,
+                                                    mc_world::AIR_BLOCK_ID,
+                                                );
+                                                outcome.changes.push(BlockChange {
+                                                    x: c.x,
+                                                    y: c.y + 1,
+                                                    z: c.z,
+                                                    old_id: old,
+                                                    new_id: mc_world::AIR_BLOCK_ID,
+                                                });
+                                                outcome.drops.extend(
+                                                    mc_world::drops_for_block(
+                                                        old,
+                                                        c.x,
+                                                        c.y + 1,
+                                                        c.z,
+                                                        world.seed(),
+                                                    ),
+                                                );
+                                                ds.uproot_sapling(c.x, c.y + 1, c.z);
+                                            }
+                                        }
+                                        if c.new_id == mc_world::AIR_BLOCK_ID
+                                            && c.old_id == mc_world::OAK_LOG_BLOCK_ID
+                                        {
+                                            ds.schedule_leaf_decay_around(world, c.x, c.y, c.z);
+                                        }
+                                    }
+                                }
                                 if let Err(e) =
                                     apply_block_outcome(stream, addr, profile, opts, cache, &outcome).await
                                 {
@@ -236,9 +312,9 @@ async fn play_loop(
                                         {
                                             ds.uproot_sapling(c.x, c.y, c.z);
                                         }
+                                        // P27：土壤含耕地（`is_crop_soil`；P26 只查草/泥土）。
                                         if c.new_id == mc_world::AIR_BLOCK_ID
-                                            && (c.old_id == mc_world::GRASS_BLOCK_ID
-                                                || c.old_id == mc_world::DIRT_BLOCK_ID)
+                                            && mc_world::is_crop_soil(c.old_id)
                                             && world.get(c.x, c.y + 1, c.z)
                                                 == mc_world::OAK_SAPLING_BLOCK_ID
                                         {
@@ -267,6 +343,156 @@ async fn play_loop(
                 }
                 match packets::UseItemOn::decode_body(&payload) {
                     Ok((act, _)) => {
+                        // P27：手持骨粉右键小麦/树苗本身 → 催熟（专属路径，不走种植/放置）。
+                        // 小麦推进 1~2 阶段扣 1；树苗直接长成扣 1；成熟/非作物不扣。
+                        let held_bonemeal: bool = opts
+                            .drops
+                            .as_ref()
+                            .and_then(|ds| {
+                                ds.with_inventory(opts.conn_id, |inv| inv.held()).flatten()
+                            })
+                            .map(|(item_id, _)| item_id == mc_world::drops::ITEM_BONE_MEAL)
+                            .unwrap_or(false);
+                        if held_bonemeal {
+                            if let Some(action) = decide_bonemeal(
+                                mutable,
+                                eye_of(last_pos),
+                                view.center(),
+                                view.radius(),
+                                &act,
+                            ) {
+                                if mutable.is_some() {
+                                    match action {
+                                        BonemealAction::Wheat(outcome) => {
+                                            let advanced = outcome.changes.iter().any(|c| {
+                                                c.new_id != c.old_id
+                                                    && mc_world::wheat_age(c.new_id).is_some()
+                                            });
+                                            if let Err(e) = apply_block_outcome(
+                                                stream, addr, profile, opts, cache, &outcome,
+                                            )
+                                            .await
+                                            {
+                                                debug!("play uuid={} bonemeal outcome failed ({e}), closing", profile.uuid);
+                                                break;
+                                            }
+                                            if advanced {
+                                                if let Some(ds) = &opts.drops {
+                                                    if let Some(c) = outcome.changes.first() {
+                                                        if let Some(age) =
+                                                            mc_world::wheat_age(c.new_id)
+                                                        {
+                                                            ds.apply_bonemeal_crop(
+                                                                c.x, c.y, c.z, age,
+                                                            );
+                                                        }
+                                                    }
+                                                    let consumed =
+                                                        ds.with_inventory(opts.conn_id, |inv| {
+                                                            inv.consume_held()
+                                                        });
+                                                    if consumed.flatten().is_some() {
+                                                        if let Err(e) =
+                                                            send_held_slot(stream, opts, ds).await
+                                                        {
+                                                            debug!("play uuid={} bonemeal held sync failed ({e}), closing", profile.uuid);
+                                                            break;
+                                                        }
+                                                        ds.save_inventory(opts.conn_id, &conn_user);
+                                                    }
+                                                }
+                                            }
+                                        }
+                                        BonemealAction::GrowTree { x, y, z, sequence } => {
+                                            // 落多格 + 广播走 `grow_sapling_now`（与 ticker 同函数）；
+                                            // hub 已广播全体（含本人 outbox），这里只回 Ack/重发。
+                                            let grew = opts
+                                                .drops
+                                                .as_ref()
+                                                .map(|ds| {
+                                                    ds.grow_sapling_now(
+                                                        mutable.unwrap(),
+                                                        x,
+                                                        y,
+                                                        z,
+                                                    )
+                                                })
+                                                .unwrap_or(false);
+                                            if grew {
+                                                if let Some(ds) = &opts.drops {
+                                                    let consumed =
+                                                        ds.with_inventory(opts.conn_id, |inv| {
+                                                            inv.consume_held()
+                                                        });
+                                                    if consumed.flatten().is_some() {
+                                                        if let Err(e) =
+                                                            send_held_slot(stream, opts, ds).await
+                                                        {
+                                                            debug!("play uuid={} bonemeal held sync failed ({e}), closing", profile.uuid);
+                                                            break;
+                                                        }
+                                                        ds.save_inventory(opts.conn_id, &conn_user);
+                                                    }
+                                                }
+                                                if let Err(e) =
+                                                    send_ack_only(stream, threshold, sequence).await
+                                                {
+                                                    debug!("play uuid={} bonemeal ack failed ({e}), closing", profile.uuid);
+                                                    break;
+                                                }
+                                            } else if let Err(e) = apply_block_outcome(
+                                                stream,
+                                                addr,
+                                                profile,
+                                                opts,
+                                                cache,
+                                                &BlockEditOutcome {
+                                                    sequence,
+                                                    changes: vec![{
+                                                        let cur = mutable
+                                                            .unwrap()
+                                                            .get(x, y, z);
+                                                        BlockChange {
+                                                            x,
+                                                            y,
+                                                            z,
+                                                            old_id: cur,
+                                                            new_id: cur,
+                                                        }
+                                                    }],
+                                                    drops: Vec::new(),
+                                                },
+                                            )
+                                            .await
+                                            {
+                                                debug!("play uuid={} bonemeal noop failed ({e}), closing", profile.uuid);
+                                                break;
+                                            }
+                                        }
+                                        BonemealAction::Noop { sequence, resend } => {
+                                            if let Err(e) = apply_block_outcome(
+                                                stream,
+                                                addr,
+                                                profile,
+                                                opts,
+                                                cache,
+                                                &BlockEditOutcome {
+                                                    sequence,
+                                                    changes: vec![resend],
+                                                    drops: Vec::new(),
+                                                },
+                                            )
+                                            .await
+                                            {
+                                                debug!("play uuid={} bonemeal noop failed ({e}), closing", profile.uuid);
+                                                break;
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                            continue;
+                        }
                         // P22/P23：手持小麦种子或树苗对土壤顶面右键 → 种下（专属路径，不走方块映射）。
                         // 树苗复用小麦的种植判定（仅 plant_id 不同），但不登记生长。
                         let held_plant: Option<u16> = opts
@@ -327,6 +553,36 @@ async fn play_loop(
                                                 ds.save_inventory(opts.conn_id, &conn_user);
                                             }
                                         }
+                                    }
+                                }
+                            }
+                            continue;
+                        }
+                        // P27：手持锄头对土壤顶面右键 → 耕地（专属路径，不消耗，不扣耐久）。
+                        let held_hoe: bool = opts
+                            .drops
+                            .as_ref()
+                            .and_then(|ds| {
+                                ds.with_inventory(opts.conn_id, |inv| inv.held()).flatten()
+                            })
+                            .map(|(item_id, _)| mc_world::drops::is_hoe_item(item_id))
+                            .unwrap_or(false);
+                        if held_hoe {
+                            if let Some(outcome) = decide_till(
+                                mutable,
+                                eye_of(last_pos),
+                                view.center(),
+                                view.radius(),
+                                &act,
+                            ) {
+                                if mutable.is_some() {
+                                    if let Err(e) = apply_block_outcome(
+                                        stream, addr, profile, opts, cache, &outcome,
+                                    )
+                                    .await
+                                    {
+                                        debug!("play uuid={} till outcome failed ({e}), closing", profile.uuid);
+                                        break;
                                     }
                                 }
                             }

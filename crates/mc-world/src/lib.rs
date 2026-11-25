@@ -102,10 +102,19 @@ pub const OAK_LEAVES_BLOCK_ID: u16 = registry_id(mc_registry::BLOCKS, "minecraft
 pub const OAK_SAPLING_BLOCK_ID: u16 = registry_id(mc_registry::BLOCKS, "minecraft:oak_sapling") as u16;
 pub const COAL_ORE_BLOCK_ID: u16 = registry_id(mc_registry::BLOCKS, "minecraft:coal_ore") as u16;
 pub const IRON_ORE_BLOCK_ID: u16 = registry_id(mc_registry::BLOCKS, "minecraft:iron_ore") as u16;
+/// `Blocks.FARMLAND.defaultBlockState()`（干燥 moisture=0）：`data/777/blocks.json` 的
+/// `farmland.default_state_id=6875`；P27 只用这一个默认态（无水分/踩回退化，见 HANDOFF §5）。
+pub const FARMLAND_BLOCK_ID: u16 = registry_id(mc_registry::BLOCKS, "minecraft:farmland") as u16;
+/// P27 树叶 decay 判定半径（Chebyshev）：3 格内无橡木原木即失支撑。
+/// 原版是树叶 distance 属性逐格传播（7 格），这里简化为到原木的直接距离（见 HANDOFF §5）。
+pub const LEAF_DECAY_RADIUS: i32 = 3;
+/// P27 树叶 decay 延迟的全局 tick 数（50ms/拍 → 100 拍 = 5s；测试经
+/// `set_leaf_decay_ticks` 调小，仿 P22/P26）。
+pub const LEAF_DECAY_TICKS: u64 = 100;
 /// `Blocks.WHEAT.defaultBlockState()`（age=0）：`data/777/blocks.json` 的
 /// `wheat.default_state_id=6867`；`data/777/full/blocks.json` 的 wheat `states`
 /// 数组按 age 升序排列 `id: 6867..=6874`，故 age N 的 blockstate = base + N。
-/// 耕地/锄头/水源加速一律不做（P22 MVP 范围，见 HANDOFF §5）。
+/// P27 起可在耕地（`FARMLAND_BLOCK_ID`）上种植并加速生长（`is_crop_soil`）。
 pub const WHEAT_CROP_BASE_ID: u16 = registry_id(mc_registry::BLOCKS, "minecraft:wheat") as u16;
 /// 小麦最大 age（7 阶段成熟；states 数组共 8 项）。
 pub const WHEAT_MAX_AGE: u8 = 7;
@@ -126,6 +135,12 @@ pub fn wheat_stage_id(age: u8) -> u16 {
 pub fn wheat_age(id: u16) -> Option<u8> {
     let age = id.wrapping_sub(WHEAT_CROP_BASE_ID);
     if age <= WHEAT_MAX_AGE as u16 { Some(age as u8) } else { None }
+}
+
+/// 可种土壤：草方块/泥土（P22）+ 耕地（P27，`decide_plant` 与树苗生长的土壤检查共用；
+/// 树苗种在耕地上是 P27 简化（原版树苗不吃耕地），见 HANDOFF §5）。
+pub fn is_crop_soil(id: u16) -> bool {
+    id == GRASS_BLOCK_ID || id == DIRT_BLOCK_ID || id == FARMLAND_BLOCK_ID
 }
 
 /// P26 运行时小橡树形状：复刻 `worldgen::WorldGen::write_tree` 的冠形逻辑，
@@ -309,7 +324,7 @@ mod tests {
 
     #[test]
     fn wheat_stages_are_base_plus_age() {
-        // `data/777/full/blocks.json` wheat states 按 age 升序 id 6867..=6874；
+        // `data/777/full/blocks.json` wheat states 按 age 升序 id 6867..=6874;
         // default_state_id=6867 即 age=0。实现只从 JSON 取 base，偏移是数据顺序本身。
         assert_eq!(WHEAT_CROP_BASE_ID, 6867);
         for age in 0..=WHEAT_MAX_AGE {
@@ -320,6 +335,24 @@ mod tests {
         assert_eq!(wheat_age(6875), None);
         assert_eq!(wheat_age(STONE_BLOCK_ID), None);
         assert_eq!(wheat_stage_id(99), wheat_stage_id(WHEAT_MAX_AGE), "over-age clamps");
+    }
+
+    #[test]
+    fn p27_farmland_and_decay_consts_come_from_registry() {
+        // P27 新增 ID 必须来自 codegen 查表（`data/777/*.json`），不许手写数字。
+        assert_eq!(FARMLAND_BLOCK_ID, 6875, "farmland default_state_id (dry)");
+        assert_eq!(Some(FARMLAND_BLOCK_ID as u32), mc_registry::block_id("minecraft:farmland"));
+        assert_eq!(Some(FARMLAND_BLOCK_ID as u32), mc_registry::block_id("farmland"));
+        // 土壤集合：草/泥土（P22）+ 耕地（P27）。
+        assert!(is_crop_soil(GRASS_BLOCK_ID));
+        assert!(is_crop_soil(DIRT_BLOCK_ID));
+        assert!(is_crop_soil(FARMLAND_BLOCK_ID));
+        assert!(!is_crop_soil(STONE_BLOCK_ID));
+        assert!(!is_crop_soil(AIR_BLOCK_ID));
+        assert!(!is_crop_soil(WHEAT_CROP_BASE_ID));
+        // decay 参数 sanity：半径取小（3 格，原版 distance 传播 7 格的简化，见 HANDOFF）。
+        assert_eq!(LEAF_DECAY_RADIUS, 3);
+        assert!(LEAF_DECAY_TICKS >= 1, "decay delay must be a positive tick count");
     }
 
     #[test]

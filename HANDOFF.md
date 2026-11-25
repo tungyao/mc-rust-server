@@ -602,6 +602,55 @@ $natives = 'C:\Users\qwe\AppData\Local\Temp\mc263natives'
       旧 25 项（play_stream 17 + play_actions 8）一个字未动，全绿。
       遗留 TODO：原版真机复验（种植手感/生长可见/砍树拾取）；骨粉；光照/净空校验；
       大树/多变种；树叶 decay/苹果；生长跨重启精确计时。
+20. **P27 种田闭环（本轮，已实现，未真机）**：锄头耕地 + 耕地加速 + 骨粉催熟 + 树叶 decay。
+    - **获得途径（无合成系统，缺货源先行；全部零侵入，均走管理面板 `/api/give` 领取，
+      `resolve_item` 本就接受短名/全名，无需改 admin 代码；
+      e2e `admin_give_farming_kit_hoe_bonemeal_apple` 覆盖）**：
+      锄头（7 系任一：wooden/stone/copper/golden/iron/diamond/netherite_hoe，
+      `is_hoe_item`）→ 耕地；骨粉（bone_meal 1215）→ 催熟；
+      苹果（apple 1007）→ 仅 decay 掉落，不可领取种植。种子仍是草方块 1/8 掉落。
+    - **耕地**：手持任意锄头对草/泥土顶面右键 → 被点格变耕地（`FARMLAND_BLOCK_ID=6875`，
+      `data/777/blocks.json` 的 `farmland.default_state_id`，只用干燥默认态），
+      `decide_till`（face=1/土壤/y/视距/距离与种植同口径，上方有作物也不拦）；
+      不扣锄头（无耐久系统）。种/挖走 P21 广播三步（`set` + 缓存失效 + hub）。
+      耕地挖掉落泥土×1（`drops_for_block` 新增臂，旧表不动）；耕地计入地形高度
+      （`is_terrain` += farmland，耕后高度图/天空光不变）。
+    - **耕地加速**：`decide_plant` 土壤检查改为 `is_crop_soil`（草/泥土/耕地）；
+      `tick_crops` 每拍现查脚下土壤——仍是耕地 interval 减半（`stage_ticks/2`），
+      否则普通速度（只前进不回退；耕地被挖/被换后自动回落）。树苗土壤检查同步放宽。
+    - **骨粉**：手持骨粉右键小麦本身（任意 face）→ `decide_bonemeal` 按
+      `bonemeal_advance`（确定性 1~2，同位点恒定）推进并钳制到成熟，扣 1，
+      `apply_bonemeal_crop` 同步跟踪（ticker 从此继续，不跳变）；
+      已熟 → Noop 重发 + Ack（不扣）；右键树苗 → `grow_sapling_now` 立即长成
+      （与 ticker 到期同函数：土壤须草/泥土/耕地，P26 形状复用，扣 1；
+      土壤不行则重发 + Ack、不扣）；点其它方块 → Noop。
+    - **树叶 decay**：原木被挖时 `schedule_leaf_decay_around` 登记周围 3³ 格内树叶
+      （`or_insert` 不续命）；`tick_leaves` 随全局 ticker 推进（连接侧绝不碰）：
+      已非树叶/3 格内有原木 → 取消观察；登记满 `LEAF_DECAY_TICKS=100`（约 5s）
+      → 设空气 + `leaf_decay_drops`（徒手表 + 独立 hash 1/200 苹果）生成实体
+      + 缓存失效 + hub 广播（掉落靠各连接 `tick_drops` 视距补发自动同步，
+      ticker 内无 socket）。自然树天然有支撑，无需全世界扫描（与 Anvil 的差距外，
+      这是本轮最大简化，见下）。
+    - **挖掘连带（P27 顺手补的 P22/P26 悬空洞）**：土壤（草/泥土/耕地）被挖，
+      其上方小麦/树苗一起 pop（BlockChange 追加 + 掉落 + 摘除跟踪，广播一次下发）；
+      原木被挖登记 decay 观察。之前版本挖土只摘跟踪、作物块悬空。
+    - **与原版差异（有意 MVP，均记 TODO）**：固定时长生长（原版随机 tick）；
+      无水源/光照/水分加速（耕地只有干燥一态，无踩回、无水合）；
+      锄头/骨粉无合成、无掉落来源（管理面板发）；骨粉对草地无长草/长花效果；
+      decay 是到原木直接距离 ≤3（原版树叶 distance 属性逐格传播 7 格）且延迟固定 5s；
+      decay 苹果率 1/200（原版橡树叶一致量级）但徒手挖树叶不掉苹果（旧单测锁定）；
+      无饥饿/进食（苹果只能看/囤）；生长 planted 与 decay scheduled 均不持久化
+      （重启重计时/清空观察；存量认领仍走 P22/P26 路径，decay 观察重启后清空，
+      砍树重新触发）；树苗可种在耕地上（原版不行，P27 简化）。
+    - 测试：`drops` 单测（ID/hoe 表/耕地掉泥/骨粉 1~2 双分支/decay 苹果臂存在且前缀=徒手表）+
+      `lib` 单测（farmland=6875/土壤集合/半径 3）+ `mutable` 单测（耕后高度图不动）+
+      `block_edit` 单测（耕地/骨粉小麦推进钳制/成熟 noop/树苗路由/拒绝臂）+
+      `drop_state` 单测（耕地双倍速+换土回落不回退/骨粉同步/decay 孤叶消失+有支撑保留+
+      掉落成实体）+ `play_actions.rs` 追加 3 个 e2e（耕种加速对照/骨粉催熟+催树/
+      砍树干后孤叶 decay 广播+掉落）+ `admin_e2e.rs` 追加 1 个（give 三件套）。
+      旧 25 项（play_stream 17 + play_actions 8）与旧 admin e2e 一字未动，全绿。
+      遗留 TODO：原版真机复验（耕地手感/催熟手感/decay 可见性/苹果拾取）；
+      踩耕地还原、水合加速、骨粉长草、decay 跨重启持久化。
 
 ## 6. 关键文件
 

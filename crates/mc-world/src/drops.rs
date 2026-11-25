@@ -17,11 +17,14 @@
 //! | iron_ore(134) | raw_iron(1017)×1 |
 //! | wheat age<7 | wheat_seeds(1065)×1 |
 //! | wheat age=7 | wheat(1066)×1 + wheat_seeds(1065)×1~2 |
+//! | farmland(6875, P27) | dirt(55)×1 |
+//! | oak_leaves decay(P27, 非挖掘) | 同上 + 1/200 apple(1007)×1 |
 //!
 //! 限制（TODO）：无工具等级/精准采集检查（都按徒手掉落），无经验球。
 
 use crate::{
-    COAL_ORE_BLOCK_ID, COBBLESTONE_BLOCK_ID, DIRT_BLOCK_ID, GRASS_BLOCK_ID, IRON_ORE_BLOCK_ID,
+    COAL_ORE_BLOCK_ID, COBBLESTONE_BLOCK_ID, DIRT_BLOCK_ID, FARMLAND_BLOCK_ID, GRASS_BLOCK_ID,
+    IRON_ORE_BLOCK_ID,
     OAK_LEAVES_BLOCK_ID, OAK_LOG_BLOCK_ID, OAK_SAPLING_BLOCK_ID, SAND_BLOCK_ID, STONE_BLOCK_ID,
     WHEAT_MAX_AGE,
 };
@@ -41,6 +44,52 @@ pub const ITEM_RAW_IRON: i32 = crate::registry_id(mc_registry::ITEMS, "minecraft
 pub const ITEM_WHEAT_SEEDS: i32 = crate::registry_id(mc_registry::ITEMS, "minecraft:wheat_seeds") as i32;
 /// `data/777/items.json` 的 `wheat.id=1066`（成熟小麦掉落）。
 pub const ITEM_WHEAT: i32 = crate::registry_id(mc_registry::ITEMS, "minecraft:wheat") as i32;
+/// P27 骨粉：`data/777/items.json` 的 `bone_meal.id=1215`（手持对小麦/树苗右键催熟，
+/// 获得途径见 HANDOFF §5：无合成，靠管理面板 `/api/give` 领取）。
+pub const ITEM_BONE_MEAL: i32 = crate::registry_id(mc_registry::ITEMS, "minecraft:bone_meal") as i32;
+/// P27 苹果：`data/777/items.json` 的 `apple.id=1007`（仅树叶 decay 小概率掉落；
+/// 无饥饿/进食系统，吃苹果不做，见 HANDOFF §5）。
+pub const ITEM_APPLE: i32 = crate::registry_id(mc_registry::ITEMS, "minecraft:apple") as i32;
+/// P27 锄头全系（`data/777/items.json`，获得途径同骨粉：管理面板领取，无合成/掉落；
+/// 手持任意一种对草/泥土右键均可耕地，无耐久消耗，见 HANDOFF §5）。
+pub const ITEM_WOODEN_HOE: i32 = crate::registry_id(mc_registry::ITEMS, "minecraft:wooden_hoe") as i32;
+pub const ITEM_STONE_HOE: i32 = crate::registry_id(mc_registry::ITEMS, "minecraft:stone_hoe") as i32;
+pub const ITEM_COPPER_HOE: i32 = crate::registry_id(mc_registry::ITEMS, "minecraft:copper_hoe") as i32;
+pub const ITEM_GOLDEN_HOE: i32 = crate::registry_id(mc_registry::ITEMS, "minecraft:golden_hoe") as i32;
+pub const ITEM_IRON_HOE: i32 = crate::registry_id(mc_registry::ITEMS, "minecraft:iron_hoe") as i32;
+pub const ITEM_DIAMOND_HOE: i32 = crate::registry_id(mc_registry::ITEMS, "minecraft:diamond_hoe") as i32;
+pub const ITEM_NETHERITE_HOE: i32 =
+    crate::registry_id(mc_registry::ITEMS, "minecraft:netherite_hoe") as i32;
+
+/// 是否锄头（7 种材质任一；耕地判定用，不消耗）。
+pub fn is_hoe_item(item_id: i32) -> bool {
+    matches!(
+        item_id,
+        ITEM_WOODEN_HOE
+            | ITEM_STONE_HOE
+            | ITEM_COPPER_HOE
+            | ITEM_GOLDEN_HOE
+            | ITEM_IRON_HOE
+            | ITEM_DIAMOND_HOE
+            | ITEM_NETHERITE_HOE
+    )
+}
+
+/// P27 骨粉一次推进的阶段数：1~2（确定性 hash，无随机状态；调用方负责钳制到成熟）。
+pub fn bonemeal_advance(seed: i64, x: i32, y: i32, z: i32) -> u8 {
+    (hash_pos(seed, x, y, z) % 2) as u8 + 1
+}
+
+/// P27 树叶 decay 掉落：复用徒手挖掘口径（树苗/木棍）+ 小概率苹果。
+/// 苹果概率 1/200（与原版橡树树叶一致量级；独立 hash，不扰动原有 sapling/stick 分支）。
+/// 挖掘掉落（`drops_for_block`）不受影响：徒手挖树叶不掉苹果（旧单测锁定）。
+pub fn leaf_decay_drops(x: i32, y: i32, z: i32, seed: i64) -> Vec<Drop> {
+    let mut out = drops_for_block(OAK_LEAVES_BLOCK_ID, x, y, z, seed);
+    if hash_pos(seed ^ 0x6c656166, x, y, z) % 200 == 0 {
+        out.push(Drop { item_id: ITEM_APPLE, count: 1 });
+    }
+    out
+}
 
 /// 单种掉落：物品 + 数量。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -93,6 +142,9 @@ pub fn drops_for_block(block_id: u16, x: i32, y: i32, z: i32, seed: i64) -> Vec<
         }
         COAL_ORE_BLOCK_ID => vec![Drop { item_id: ITEM_COAL, count: 1 }],
         IRON_ORE_BLOCK_ID => vec![Drop { item_id: ITEM_RAW_IRON, count: 1 }],
+        // P27 耕地：挖掉落泥土×1（与原版一致；耕地本身不可由管理面板直接放置获得，
+        // 靠锄头耕出，见 HANDOFF §5）。
+        FARMLAND_BLOCK_ID => vec![Drop { item_id: ITEM_DIRT, count: 1 }],
         // P23 树苗：挖掉种下的树苗原样返还（与小麦未熟口径一致；长成树/树叶 decay 留后续）。
         OAK_SAPLING_BLOCK_ID => vec![Drop { item_id: ITEM_OAK_SAPLING, count: 1 }],
         // P22 小麦：成熟（age=7）掉小麦×1 + 种子 1~2（hash 最低位决定，无随机状态）；
@@ -278,5 +330,95 @@ mod tests {
         assert_eq!(block_for_item(ITEM_OAK_LOG), Some(OAK_LOG_BLOCK_ID));
         assert_eq!(block_for_item(ITEM_COBBLESTONE), Some(COBBLESTONE_BLOCK_ID));
         assert_eq!(block_for_item(ITEM_STICK), None);
+    }
+
+    #[test]
+    fn p27_tool_and_food_ids_come_from_registry() {
+        // P27 新增物品 ID 必须仍等于 26.3 实测值且与 codegen 查询一致。
+        for (name, expected, id) in [
+            ("minecraft:bone_meal", 1215, ITEM_BONE_MEAL),
+            ("minecraft:apple", 1007, ITEM_APPLE),
+            ("minecraft:wooden_hoe", 1029, ITEM_WOODEN_HOE),
+            ("minecraft:stone_hoe", 1039, ITEM_STONE_HOE),
+            ("minecraft:copper_hoe", 1034, ITEM_COPPER_HOE),
+            ("minecraft:golden_hoe", 1044, ITEM_GOLDEN_HOE),
+            ("minecraft:iron_hoe", 1049, ITEM_IRON_HOE),
+            ("minecraft:diamond_hoe", 1054, ITEM_DIAMOND_HOE),
+            ("minecraft:netherite_hoe", 1059, ITEM_NETHERITE_HOE),
+        ] {
+            assert_eq!(id as u32, expected, "wrong item ID for {name}");
+            assert_eq!(Some(id as u32), mc_registry::item_id(name));
+        }
+        // 7 种锄头全认；骨粉/苹果/种子不是锄头。
+        for hoe in [
+            ITEM_WOODEN_HOE,
+            ITEM_STONE_HOE,
+            ITEM_COPPER_HOE,
+            ITEM_GOLDEN_HOE,
+            ITEM_IRON_HOE,
+            ITEM_DIAMOND_HOE,
+            ITEM_NETHERITE_HOE,
+        ] {
+            assert!(is_hoe_item(hoe), "hoe {hoe} must be recognised");
+            assert_eq!(block_for_item(hoe), None, "hoe is not placeable");
+        }
+        assert!(!is_hoe_item(ITEM_BONE_MEAL));
+        assert!(!is_hoe_item(ITEM_APPLE));
+        assert!(!is_hoe_item(ITEM_WHEAT_SEEDS));
+        assert!(!is_hoe_item(ITEM_STICK));
+        assert_eq!(block_for_item(ITEM_BONE_MEAL), None);
+        assert_eq!(block_for_item(ITEM_APPLE), None);
+    }
+
+    #[test]
+    fn p27_farmland_digs_to_dirt() {
+        assert_eq!(
+            drops_for_block(crate::FARMLAND_BLOCK_ID, 0, 70, 0, 7),
+            vec![Drop { item_id: ITEM_DIRT, count: 1 }]
+        );
+    }
+
+    #[test]
+    fn p27_bonemeal_advance_is_one_or_two() {
+        // 确定性：同位点同结果；两个分支都存在。
+        let mut seen = std::collections::HashSet::new();
+        for x in 0..64 {
+            let n = bonemeal_advance(123456789, x, 70, 381);
+            assert!((1..=2).contains(&n), "bonemeal must advance 1~2 stages, got {n}");
+            seen.insert(n);
+            assert_eq!(bonemeal_advance(123456789, x, 70, 381), n, "must be deterministic");
+        }
+        assert!(seen.contains(&1) && seen.contains(&2), "both branches must exist: {seen:?}");
+    }
+
+    #[test]
+    fn p27_leaf_decay_drops_are_leaves_table_plus_rare_apple() {
+        // decay 基础口径 = 徒手挖掘口径（树苗/木棍/空），苹果是额外小概率。
+        let seed = 123456789i64;
+        let mut saw_apple = false;
+        let mut saw_plain = false;
+        for x in 0..4000 {
+            let base = drops_for_block(crate::OAK_LEAVES_BLOCK_ID, x, 70, 0, seed);
+            let decay = leaf_decay_drops(x, 70, 0, seed);
+            assert!(decay.len() >= base.len(), "decay must not lose the base drops");
+            assert_eq!(&decay[..base.len()], &base[..], "decay prefix must equal the dig table");
+            for d in &decay[base.len()..] {
+                assert_eq!(*d, Drop { item_id: ITEM_APPLE, count: 1 });
+            }
+            assert!(decay.len() - base.len() <= 1, "at most one apple");
+            if decay.len() > base.len() {
+                saw_apple = true;
+            } else {
+                saw_plain = true;
+            }
+        }
+        assert!(saw_apple, "apple arm must trigger somewhere in 4000 tries at 1/200");
+        assert!(saw_plain, "most decays drop no apple");
+        // 徒手挖掘不受影响：同一批位点里挖树叶永不掉苹果（旧行为锁定）。
+        for x in 0..64 {
+            for d in drops_for_block(crate::OAK_LEAVES_BLOCK_ID, x, 70, 0, seed) {
+                assert_ne!(d.item_id, ITEM_APPLE, "hand dig must never drop apples");
+            }
+        }
     }
 }

@@ -14,7 +14,8 @@
 //! 被触碰列（自顶向下扫描），`heights` 取“地形集合”（石头/土/草/沙/矿），
 //! `motion` 取最高非空气（含水/树叶/原木），与 P16 基底规则对齐。
 use crate::{
-    AIR_BLOCK_ID, COAL_ORE_BLOCK_ID, COBBLESTONE_BLOCK_ID, DIRT_BLOCK_ID, GRASS_BLOCK_ID,
+    AIR_BLOCK_ID, COAL_ORE_BLOCK_ID, COBBLESTONE_BLOCK_ID, DIRT_BLOCK_ID, FARMLAND_BLOCK_ID,
+    GRASS_BLOCK_ID,
     IRON_ORE_BLOCK_ID, MIN_Y, OAK_LOG_BLOCK_ID, SAND_BLOCK_ID, SECTION_COUNT, STONE_BLOCK_ID,
     WATER_BLOCK_ID,
 };
@@ -54,7 +55,8 @@ pub fn is_replaceable(id: u16) -> bool {
     id == AIR_BLOCK_ID || id == WATER_BLOCK_ID
 }
 
-/// `heights` 地形集合：石头/泥土/草/沙/煤/铁（树叶/原木/水不算地形顶）。
+/// `heights` 地形集合：石头/泥土/草/沙/煤/铁/耕地（树叶/原木/水不算地形顶）。
+/// P27 耕地计入地形：耕后地表高度不变（与草/泥土同口径），天空光起点也不动。
 fn is_terrain(id: u16) -> bool {
     matches!(
         id,
@@ -64,6 +66,7 @@ fn is_terrain(id: u16) -> bool {
             | SAND_BLOCK_ID
             | COAL_ORE_BLOCK_ID
             | IRON_ORE_BLOCK_ID
+            | FARMLAND_BLOCK_ID
     )
 }
 
@@ -670,6 +673,28 @@ mod tests {
         assert!(is_replaceable(AIR_BLOCK_ID));
         assert!(is_replaceable(WATER_BLOCK_ID));
         assert!(!is_replaceable(STONE_BLOCK_ID));
+    }
+
+    #[test]
+    fn p27_farmland_keeps_terrain_height_and_motion() {
+        // 耕地替换草方块：地形高度/天空光起点都不动（耕地是地形块，与草同口径）。
+        let m = MutableWorld::new(DEFAULT_SEED);
+        let (x, y, z) = spawn_top(DEFAULT_SEED);
+        assert_eq!(m.get(x, y, z), crate::GRASS_BLOCK_ID);
+        let pos = chunk_of_block(x, z);
+        let col = (z.rem_euclid(16) * 16 + x.rem_euclid(16)) as usize;
+        let before = m.generate_chunk(pos);
+        m.set(x, y, z, FARMLAND_BLOCK_ID);
+        let after = m.generate_chunk(pos);
+        assert_eq!(after.get_column_top(x, y, z), FARMLAND_BLOCK_ID);
+        assert_eq!(after.heights[col], before.heights[col], "till must not move terrain top");
+        assert_eq!(
+            after.motion_heights[col], before.motion_heights[col],
+            "till must not move the motion top"
+        );
+        // 耕地仍可挖：挖后该格变空气（掉泥土由掉落表口径保证，`drops.rs` 覆盖）。
+        m.set(x, y, z, AIR_BLOCK_ID);
+        assert_eq!(m.generate_chunk(pos).get_column_top(x, y, z), crate::AIR_BLOCK_ID);
     }
 
     /// 测试辅助：读某列在某 y 的方块（仅断言生成结果用）。

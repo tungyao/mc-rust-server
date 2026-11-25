@@ -191,9 +191,10 @@ pub fn decide_place(
     })
 }
 
-/// P22 种植判定（手持 `wheat_seeds` 对草方块/泥土**顶面**右键）；
-/// P23 起树苗（`oak_sapling`）复用同一路径（`plant_id` 区分）：
-/// 要求：face=顶面(+Y)，被点是草/泥土，目标（被点上方 1 格）是空气、
+/// P22 种植判定（手持 `wheat_seeds` 对土壤**顶面**右键）；
+/// P23 起树苗（`oak_sapling`）复用同一路径（`plant_id` 区分）；
+/// P27 起土壤含耕地（种在耕地上加速生长，见 `DropState::tick_crops`）：
+/// 要求：face=顶面(+Y)，被点是土壤（草/泥土/耕地），目标（被点上方 1 格）是空气、
 /// y/视距/距离合法；否则回滚重发目标现状（非法 face 只 ack）。
 /// 成功时目标落 `plant_id`（小麦传 `WHEAT_CROP_BASE_ID`，树苗传 `OAK_SAPLING_BLOCK_ID`）。
 /// 判定内已落子，调用方负责：缓存失效 + 发 BlockUpdate/Ack + 生长登记（仅小麦）+
@@ -223,9 +224,9 @@ pub fn decide_plant(
             drops: Vec::new(),
         });
     }
-    // 被点必须是土壤（草方块/泥土；耕地/锄头不在 P22 范围，见 HANDOFF §5）。
+    // 被点必须是土壤：草方块/泥土（P22）+ 耕地（P27，种在耕地上加速生长）。
     let clicked = world.get(act.x, act.y, act.z);
-    if clicked != mc_world::GRASS_BLOCK_ID && clicked != mc_world::DIRT_BLOCK_ID {
+    if !mc_world::is_crop_soil(clicked) {
         return Some(BlockEditOutcome {
             sequence: act.sequence,
             changes: vec![rollback(world, tx, ty, tz)],
@@ -246,6 +247,110 @@ pub fn decide_plant(
         sequence: act.sequence,
         changes: vec![BlockChange { x: tx, y: ty, z: tz, old_id: old, new_id: plant_id }],
         drops: Vec::new(),
+    })
+}
+
+/// P27 耕地判定（手持任意锄头对草方块/泥土**顶面**右键）：
+/// 要求与 `decide_plant` 同口径（face=顶面，被点是草/泥土，y/视距/距离合法）；
+/// 成功时**被点格本身**变耕地（`FARMLAND_BLOCK_ID`，原版同：hoe 把土变成 farmland，
+/// 不是在上方放新方块）。上方有作物也不拦（耕后作物自动加速，见 `tick_crops`）。
+/// 已耕/石头等非土壤 → 回滚重发被点现状（无变化）；非法 face 只 ack。
+/// 不扣锄头（无耐久系统，见 HANDOFF §5）；调用方只做三步（缓存失效 + 发包 + 广播）。
+pub fn decide_till(
+    world: Option<&MutableWorld>,
+    eye: (f64, f64, f64),
+    center: mc_core::ChunkPos,
+    radius: i32,
+    act: &packets::UseItemOn,
+) -> Option<BlockEditOutcome> {
+    let world = world?;
+    if act.face != 1 {
+        return Some(BlockEditOutcome { sequence: act.sequence, changes: Vec::new(), drops: Vec::new() });
+    }
+    let (x, y, z) = (act.x, act.y, act.z);
+    if !(mc_world::MIN_Y..=mc_world::WORLD_TOP_Y).contains(&y)
+        || !in_view(center, radius, x, z)
+        || eye_block_dist(eye, x, y, z) > mc_world::MAX_REACH
+    {
+        return Some(BlockEditOutcome {
+            sequence: act.sequence,
+            changes: vec![rollback(world, x, y, z)],
+            drops: Vec::new(),
+        });
+    }
+    let clicked = world.get(x, y, z);
+    if clicked != mc_world::GRASS_BLOCK_ID && clicked != mc_world::DIRT_BLOCK_ID {
+        return Some(BlockEditOutcome {
+            sequence: act.sequence,
+            changes: vec![rollback(world, x, y, z)],
+            drops: Vec::new(),
+        });
+    }
+    let old = world.set(x, y, z, mc_world::FARMLAND_BLOCK_ID);
+    Some(BlockEditOutcome {
+        sequence: act.sequence,
+        changes: vec![BlockChange { x, y, z, old_id: old, new_id: mc_world::FARMLAND_BLOCK_ID }],
+        drops: Vec::new(),
+    })
+}
+
+/// P27 骨粉作用目标（`decide_bonemeal` 的判定结果）：
+/// - `Wheat`：小麦已推进 1~2 阶段（世界内已落子，调用方同步生长跟踪 + 扣 1 骨粉）；
+/// - `GrowTree`：树苗立即长成小橡树（调用方走 `DropState::grow_sapling_now` 落多格 +
+///   扣 1 骨粉；土壤不行则该函数返回 false，调用方按 `Noop` 处理）；
+/// - `Noop`：成熟小麦/非作物（resend 供回滚重发，不扣骨粉）。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum BonemealAction {
+    Wheat(BlockEditOutcome),
+    GrowTree { x: i32, y: i32, z: i32, sequence: i32 },
+    Noop { sequence: i32, resend: BlockChange },
+}
+
+/// P27 骨粉判定（手持骨粉右键**小麦/树苗本身**，任意 face）：
+/// 小麦未熟 → 按 `bonemeal_advance`（确定性 1~2）推进并钳制到成熟，世界内落子；
+/// 小麦已熟 → `Noop`（原版不消耗）；树苗 → `GrowTree`（土壤检查在生长函数里做）；
+/// 点其它方块 → `Noop`；y/视距/距离非法 → `None`（调用方只 ack，不断线）。
+pub fn decide_bonemeal(
+    world: Option<&MutableWorld>,
+    eye: (f64, f64, f64),
+    center: mc_core::ChunkPos,
+    radius: i32,
+    act: &packets::UseItemOn,
+) -> Option<BonemealAction> {
+    let world = world?;
+    let (x, y, z) = (act.x, act.y, act.z);
+    if !(mc_world::MIN_Y..=mc_world::WORLD_TOP_Y).contains(&y)
+        || !in_view(center, radius, x, z)
+        || eye_block_dist(eye, x, y, z) > mc_world::MAX_REACH
+    {
+        return None;
+    }
+    let clicked = world.get(x, y, z);
+    if clicked == mc_world::OAK_SAPLING_BLOCK_ID {
+        return Some(BonemealAction::GrowTree { x, y, z, sequence: act.sequence });
+    }
+    if let Some(age) = mc_world::wheat_age(clicked) {
+        if age >= mc_world::WHEAT_MAX_AGE {
+            let cur = world.get(x, y, z);
+            return Some(BonemealAction::Noop {
+                sequence: act.sequence,
+                resend: BlockChange { x, y, z, old_id: cur, new_id: cur },
+            });
+        }
+        let adv = mc_world::drops::bonemeal_advance(world.seed(), x, y, z);
+        let new_age = age.saturating_add(adv).min(mc_world::WHEAT_MAX_AGE);
+        let new_id = mc_world::wheat_stage_id(new_age);
+        let old = world.set(x, y, z, new_id);
+        return Some(BonemealAction::Wheat(BlockEditOutcome {
+            sequence: act.sequence,
+            changes: vec![BlockChange { x, y, z, old_id: old, new_id }],
+            drops: Vec::new(),
+        }));
+    }
+    let cur = world.get(x, y, z);
+    Some(BonemealAction::Noop {
+        sequence: act.sequence,
+        resend: BlockChange { x, y, z, old_id: cur, new_id: cur },
     })
 }
 
@@ -743,5 +848,183 @@ mod tests {
             decide_plant(None, eye, center, 2, &base(1), mc_world::WHEAT_CROP_BASE_ID).is_none(),
             "missing world must be ignored"
         );
+    }
+
+    #[test]
+    fn p27_till_grass_and_dirt_become_farmland() {
+        let (world, feet, center) = dig_fixture();
+        let (x, y, z) = grass_top();
+        let eye = eye_of(feet);
+        let act = packets::UseItemOn {
+            hand: 0,
+            x,
+            y,
+            z,
+            face: 1,
+            cursor_x: 0.5,
+            cursor_y: 1.0,
+            cursor_z: 0.5,
+            inside_block: false,
+            world_border_hit: false,
+            sequence: 51,
+        };
+        // 草方块顶面耕一下：被点格本身变耕地（6875），上方不落子。
+        let out = decide_till(Some(&world), eye, center, 2, &act).unwrap();
+        assert_eq!(out.sequence, 51);
+        assert_eq!(
+            out.changes,
+            vec![BlockChange { x, y, z, old_id: mc_world::GRASS_BLOCK_ID, new_id: 6875 }]
+        );
+        assert_eq!(world.get(x, y, z), mc_world::FARMLAND_BLOCK_ID);
+        assert_eq!(world.get(x, y + 1, z), mc_world::AIR_BLOCK_ID, "till plants nothing above");
+        // 泥土同样可耕。
+        world.set(x, y, z, mc_world::DIRT_BLOCK_ID);
+        let out = decide_till(Some(&world), eye, center, 2, &act).unwrap();
+        assert_eq!(out.changes[0].new_id, mc_world::FARMLAND_BLOCK_ID);
+        // 已耕再耕：回滚重发（old==new），不新增条目。
+        let before = world.override_count();
+        let out = decide_till(Some(&world), eye, center, 2, &act).unwrap();
+        assert_eq!(out.changes[0].old_id, out.changes[0].new_id);
+        assert_eq!(out.changes[0].new_id, mc_world::FARMLAND_BLOCK_ID);
+        assert_eq!(world.override_count(), before);
+        // 耕地上方有小麦也不拦（耕后自动加速）。
+        world.set(x, y + 1, z, mc_world::WHEAT_CROP_BASE_ID);
+        world.set(x, y, z, mc_world::GRASS_BLOCK_ID);
+        let out = decide_till(Some(&world), eye, center, 2, &act).unwrap();
+        assert_eq!(out.changes[0].new_id, mc_world::FARMLAND_BLOCK_ID);
+        assert_eq!(world.get(x, y + 1, z), mc_world::WHEAT_CROP_BASE_ID, "crop above survives");
+    }
+
+    #[test]
+    fn p27_till_rejects_non_soil_bad_face_and_bad_range() {
+        let (world, feet, center) = dig_fixture();
+        let (x, y, z) = grass_top();
+        let eye = eye_of(feet);
+        let base = |face| packets::UseItemOn {
+            hand: 0,
+            x,
+            y,
+            z,
+            face,
+            cursor_x: 0.5,
+            cursor_y: 0.5,
+            cursor_z: 0.5,
+            inside_block: false,
+            world_border_hit: false,
+            sequence: 52,
+        };
+        // 侧面/底面：只 ack，不耕。
+        for face in [0, 2, 3, 4, 5, 9] {
+            let out = decide_till(Some(&world), eye, center, 2, &base(face)).unwrap();
+            assert!(out.changes.is_empty(), "face={face} must only ack");
+            assert_eq!(world.get(x, y, z), mc_world::GRASS_BLOCK_ID);
+        }
+        // 石头：回滚重发被点现状。
+        world.set(x, y, z, mc_world::STONE_BLOCK_ID);
+        let out = decide_till(Some(&world), eye, center, 2, &base(1)).unwrap();
+        assert_eq!(out.changes[0].old_id, out.changes[0].new_id);
+        assert_eq!(out.changes[0].new_id, mc_world::STONE_BLOCK_ID);
+        world.set(x, y, z, mc_world::GRASS_BLOCK_ID);
+        // 超距/出视距/无世界。
+        let far_eye = (eye.0 + 100.0, eye.1, eye.2);
+        let out = decide_till(Some(&world), far_eye, center, 2, &base(1)).unwrap();
+        assert_eq!(out.changes[0].old_id, out.changes[0].new_id);
+        assert_eq!(world.get(x, y, z), mc_world::GRASS_BLOCK_ID);
+        assert!(decide_till(None, eye, center, 2, &base(1)).is_none());
+    }
+
+    #[test]
+    fn p27_bonemeal_wheat_advances_one_or_two_and_mature_noops() {
+        let (world, feet, center) = dig_fixture();
+        let (x, y, z) = grass_top();
+        let eye = eye_of(feet);
+        let act = packets::UseItemOn {
+            hand: 0,
+            x,
+            y: y + 1,
+            z,
+            face: 1,
+            cursor_x: 0.5,
+            cursor_y: 0.5,
+            cursor_z: 0.5,
+            inside_block: false,
+            world_border_hit: false,
+            sequence: 53,
+        };
+        // 未熟小麦：推进 bonemeal_advance（1~2），世界内落子。
+        world.set(x, y + 1, z, mc_world::wheat_stage_id(3));
+        let want = 3 + mc_world::drops::bonemeal_advance(world.seed(), x, y + 1, z);
+        let want = want.min(mc_world::WHEAT_MAX_AGE);
+        match decide_bonemeal(Some(&world), eye, center, 2, &act).unwrap() {
+            BonemealAction::Wheat(out) => {
+                assert_eq!(out.sequence, 53);
+                assert_eq!(out.changes.len(), 1);
+                assert_eq!(out.changes[0].old_id, mc_world::wheat_stage_id(3));
+                assert_eq!(out.changes[0].new_id, mc_world::wheat_stage_id(want));
+            }
+            other => panic!("unripe wheat must advance, got {other:?}"),
+        }
+        assert_eq!(world.get(x, y + 1, z), mc_world::wheat_stage_id(want));
+        // 近成熟钳制到 7，不溢出。
+        world.set(x, y + 1, z, mc_world::wheat_stage_id(6));
+        match decide_bonemeal(Some(&world), eye, center, 2, &act).unwrap() {
+            BonemealAction::Wheat(out) => {
+                assert_eq!(out.changes[0].new_id, mc_world::wheat_stage_id(7));
+            }
+            _ => panic!("age 6 must still advance (clamped to 7)"),
+        }
+        // 已熟：Noop（调用方不扣骨粉）。
+        world.set(x, y + 1, z, mc_world::wheat_stage_id(7));
+        match decide_bonemeal(Some(&world), eye, center, 2, &act).unwrap() {
+            BonemealAction::Noop { sequence, resend } => {
+                assert_eq!(sequence, 53);
+                assert_eq!(resend.old_id, resend.new_id);
+                assert_eq!(resend.new_id, mc_world::wheat_stage_id(7));
+            }
+            _ => panic!("mature wheat must noop"),
+        }
+        // 点泥土：Noop。
+        let soil = packets::UseItemOn { y, ..act };
+        match decide_bonemeal(Some(&world), eye, center, 2, &soil).unwrap() {
+            BonemealAction::Noop { resend, .. } => {
+                assert_eq!(resend.new_id, mc_world::GRASS_BLOCK_ID);
+            }
+            _ => panic!("soil must noop"),
+        }
+        // 超距 → None（调用方只 ack）。
+        let far_eye = (eye.0 + 100.0, eye.1, eye.2);
+        assert!(decide_bonemeal(Some(&world), far_eye, center, 2, &act).is_none());
+        assert!(decide_bonemeal(None, eye, center, 2, &act).is_none());
+    }
+
+    #[test]
+    fn p27_bonemeal_sapling_requests_tree_growth() {
+        let (world, feet, center) = dig_fixture();
+        let (x, y, z) = grass_top();
+        let eye = eye_of(feet);
+        world.set(x, y + 1, z, mc_world::OAK_SAPLING_BLOCK_ID);
+        let act = packets::UseItemOn {
+            hand: 0,
+            x,
+            y: y + 1,
+            z,
+            face: 0,
+            cursor_x: 0.5,
+            cursor_y: 0.0,
+            cursor_z: 0.5,
+            inside_block: false,
+            world_border_hit: false,
+            sequence: 54,
+        };
+        // 任意 face 点树苗都请求长树（土壤检查在生长函数里做）。
+        match decide_bonemeal(Some(&world), eye, center, 2, &act).unwrap() {
+            BonemealAction::GrowTree { x: gx, y: gy, z: gz, sequence } => {
+                assert_eq!((gx, gy, gz), (x, y + 1, z));
+                assert_eq!(sequence, 54);
+            }
+            _ => panic!("sapling must request tree growth"),
+        }
+        // 树苗格本身不动（生长函数落多格，判定只做路由）。
+        assert_eq!(world.get(x, y + 1, z), mc_world::OAK_SAPLING_BLOCK_ID);
     }
 }
