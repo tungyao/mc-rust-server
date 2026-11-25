@@ -443,10 +443,25 @@ $natives = 'C:\Users\qwe\AppData\Local\Temp\mc263natives'
     脚本端到端已全部通过（含模拟原版逐步走远→START→FINISH 全流程）；**原版 26.3 真机复验待做**。
     另：走远会瞬时补发大量区块（radius=10 跨 23 区块约 1035 包/~20MB），掉落 Spawn 排在
     后面，若真机感觉“走远后没掉落”需先确认是延迟还是丢失；必要时给跨区块批次加节流。
+    **已实现跨区块批次节流（`login_route.rs`）**：移动包只把目标中心记进
+    `PendingViewMove`（走回原中心直接作废），80ms 窗口到期或累计 6 次跨越才一次性发
+    SetCenterChunk + UnloadChunk + ChunkBatch；`ChunkView::plan` 只在 flush 时调用，
+    add/remove 是「旧完整视距 → 新完整视距」的净差，`sent` 与实际发包严格一致，
+    客户端始终持有完整 `(2r+1)²` 视距（满足 3×3 邻居要求）。挖掘/放置前强制 flush，
+    避免旧中心误判并保证 Spawn/BlockUpdate 排在区块包之后；50ms 读超时兜底保证玩家
+    停住后仍会 flush。新增单测 + e2e（连续跨 3 区块合并为一批），`cargo test --workspace`
+    与 `cargo check --workspace --tests` 全绿；真机感知延迟仍待复验。
 12. **P18.3 落地高度重算**：`ItemEntity` 新增 `support: Option<(x,y,z)>`（支撑方块坐标），
     `ItemEntities::find_unsupported` / `resume_fall` 纯逻辑 + `tick_drops` 接入世界查询；
     支撑被挖空则重算 `rest_y` 并恢复下落。单测 + e2e 覆盖（挖掉掉落物脚下泥土验证重算）。
     TODO(真机)：挖掉掉落物下方方块时观察是否平滑落到新支撑面。
+13. **高危（只读审查发现，待修）**：多连接共享 `Arc<DropState>`，每个连接的 `play_loop` 都调
+    `items.tick()`（`login_route.rs:1021`），N 个在线连接 → 物理 tick 每秒 20×N 次：掉落物
+    落地/可捡/despawn 全部加速 N 倍。双开即可复现。修复方向：把 `ItemEntities::tick()` 移到
+    单一全局调度点（独立 tokio 任务按 50ms 统一跑），各连接只做同步/拾取；顺带处理
+    `decide_dig` 的 `get`+`set` 非原子（两连接同挖一格产生重复掉落）。
+    另附待真机测试清单（T1–T13，含初速/弹跳/拾取/START-FINISH/走远/树下/换列/合并/双开/视距回返）
+    见本轮审查报告；脚本 e2e 只验服务端状态，不能替代真机观察。
 
 ## 6. 关键文件
 

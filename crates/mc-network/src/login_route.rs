@@ -21,6 +21,47 @@ use super::NewConnection;
 
 use std::time::{Duration, Instant};
 
+/// 跨区块视距更新的节流窗口：连续跨区块时只记录最新目标中心，窗口到期（或跨越次数
+/// 达到上限）才一次性发 SetCenterChunk + UnloadChunk + ChunkBatch。避免走远时每个边界
+/// 都立刻吐出一批区块包，把后面的掉落 Spawn 挤在长队列尾部。
+const VIEW_MOVE_WINDOW: Duration = Duration::from_millis(80);
+/// 窗口内累计中心变化次数上限：脚本/传送等极快移动提前 flush，防止地形长时间滞后。
+const VIEW_MOVE_MAX_CROSSINGS: usize = 6;
+
+/// 待发送的视距更新：只记最新目标中心，**不提前改 `ChunkView`**——`sent` 集合必须
+/// 始终等于客户端实际已收到的区块，flush 时一次 `plan(final_center)` 得到净增量。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct PendingViewMove {
+    center: mc_core::ChunkPos,
+    first_at: Instant,
+    crossings: usize,
+}
+
+impl PendingViewMove {
+    fn should_flush(&self) -> bool {
+        self.first_at.elapsed() >= VIEW_MOVE_WINDOW || self.crossings >= VIEW_MOVE_MAX_CROSSINGS
+    }
+}
+
+/// 记录一次位置更新对应的目标区块中心；走回原中心直接丢弃待发送更新（客户端视距未变）。
+fn queue_view_move(pending: &mut Option<PendingViewMove>, current: mc_core::ChunkPos, x: f64, z: f64) {
+    let Some(center) = ChunkView::chunk_of_block(x, z) else { return };
+    if center == current {
+        pending.take();
+        return;
+    }
+    match pending.as_mut() {
+        Some(p) if p.center == center => {}
+        Some(p) => {
+            p.center = center;
+            p.crossings += 1;
+        }
+        None => {
+            *pending = Some(PendingViewMove { center, first_at: Instant::now(), crossings: 1 });
+        }
+    }
+}
+
 /// Play 期一次性参数：压缩阈值、seed、有效视距、连接身份、事件通道、区块缓存。
 /// 旧入口（`handle_login` / `handle_login_configured` / `enter_play`）保留并默认
 /// radius=[`PLAY_VIEW_RADIUS`]、无缓存，委托到带 options 的新实现。
@@ -1062,21 +1103,19 @@ async fn sync_view_entities(
 }
 
 /// 玩家跨区块：SetCenterChunk → 卸载越界区块 → 一批补发缺失区块（batch_size = add.len）。
-/// 单轴跨区块 add/remove = 2r+1（r=10 → 21），斜跨最多 4r+1（41）；不引入额外阻塞限流。
+/// 由节流窗口在 flush 时调用，传入的是最后一次移动的目标中心；`view.plan` 只在此时执行，
+/// 因此 add/remove 是「旧完整视距 → 新完整视距」的净差，客户端不会缺邻居 section，
+/// `ChunkView.sent` 也与真正发出的包严格一致。
 async fn maybe_move_view(
     stream: &mut TcpStream,
     profile: &mc_core::PlayerProfile,
     opts: &PlayOptions,
     view: &mut ChunkView,
     world: &WorldGen,
-    x: f64,
-    z: f64,
+    center: mc_core::ChunkPos,
     cache: Option<&ChunkCache>,
     mutable: Option<&MutableWorld>,
 ) -> io::Result<()> {
-    let Some(center) = ChunkView::chunk_of_block(x, z) else {
-        return Ok(());
-    };
     if center == view.center() {
         return Ok(());
     }
@@ -1100,6 +1139,46 @@ async fn maybe_move_view(
         view.sent_count()
     );
     Ok(())
+}
+
+/// 把待发送视距更新一次性发出，并把掉落物实体同步到新中心（实体包必须排在区块包之后，
+/// 否则客户端还没加载对应区块就收到 Spawn）。
+async fn flush_view_move(
+    stream: &mut TcpStream,
+    profile: &mc_core::PlayerProfile,
+    opts: &PlayOptions,
+    view: &mut ChunkView,
+    world: &WorldGen,
+    cache: Option<&ChunkCache>,
+    mutable: Option<&MutableWorld>,
+    center: mc_core::ChunkPos,
+) -> io::Result<()> {
+    maybe_move_view(stream, profile, opts, view, world, center, cache, mutable).await?;
+    if let Some(ds) = &opts.drops {
+        sync_view_entities(stream, opts, ds, view).await?;
+    }
+    Ok(())
+}
+
+/// 视距节流入口：窗口到期/跨越次数到上限才真正发包；`force=true` 用于挖掘/放置前
+/// 强制刷新，保证权威判定的中心与客户端已加载区块一致，且 Spawn 排在区块包之后。
+async fn maybe_flush_view(
+    stream: &mut TcpStream,
+    profile: &mc_core::PlayerProfile,
+    opts: &PlayOptions,
+    view: &mut ChunkView,
+    world: &WorldGen,
+    cache: Option<&ChunkCache>,
+    mutable: Option<&MutableWorld>,
+    pending_view: &mut Option<PendingViewMove>,
+    force: bool,
+) -> io::Result<()> {
+    let Some(pending) = *pending_view else { return Ok(()) };
+    if !force && !pending.should_flush() {
+        return Ok(());
+    }
+    *pending_view = None;
+    flush_view_move(stream, profile, opts, view, world, cache, mutable, pending.center).await
 }
 
 async fn play_loop(
@@ -1130,6 +1209,8 @@ async fn play_loop(
     // 包流不断时 50ms 超时永不触发，tick 会被饿死：pickup_delay 减不下去，
     // 掉落物看得见但永远捡不起来（P18 回归：busy 连接拾取测试）。
     let mut last_drop_tick = Instant::now();
+    // 跨区块节流：移动包只更新目标中心，窗口到期/次数上限再合并发包（见 PendingViewMove）。
+    let mut pending_view: Option<PendingViewMove> = None;
     loop {
         // P18 掉落 tick：50ms 读超时即跑一次物理/拾取（不改变 10s 半开超时语义）。
         let next = match tokio::time::timeout(
@@ -1139,6 +1220,15 @@ async fn play_loop(
         .await
         {
             Err(_) => {
+                // 读超时也是节流窗口的节拍：玩家停止移动后仍要 flush 最后一次跨区块更新。
+                if let Err(e) = maybe_flush_view(
+                    stream, profile, opts, &mut view, world, cache, mutable, &mut pending_view, false,
+                )
+                .await
+                {
+                    debug!("play uuid={} view flush failed ({e}), closing", profile.uuid);
+                    break;
+                }
                 if let (Some(ds), Some(world)) = (&opts.drops, mutable) {
                     if let Err(e) =
                         tick_drops(stream, opts, ds, &conn_user, last_pos, &view, world).await
@@ -1187,32 +1277,17 @@ async fn play_loop(
                             "play move uuid={} name={} id={:#04x} m={:?} forwarded_to_ecs={}",
                             profile.uuid, profile.username, id, m, opts.events.is_some()
                         );
+                        // 跨区块只记目标中心，真正发包交给节流窗口（窗口到期或次数上限）。
+                        // 这样连续跨区块会合并成一次 SetCenterChunk/Unload/ChunkBatch，
+                        // 掉落 Spawn 不再排在几十个边界批次后面。
                         match m {
                             packets::C2SMovement::Pos(p) => {
                                 last_pos = (p.x, p.y, p.z);
-                                if let Err(e) = maybe_move_view(stream, profile, opts, &mut view, world, p.x, p.z, cache, mutable).await {
-                                    debug!("play uuid={} view move failed ({e}), closing", profile.uuid);
-                                    break;
-                                }
-                                if let Some(ds) = &opts.drops {
-                                    if let Err(e) = sync_view_entities(stream, opts, ds, &view).await {
-                                        debug!("play uuid={} view entity sync failed ({e}), closing", profile.uuid);
-                                        break;
-                                    }
-                                }
+                                queue_view_move(&mut pending_view, view.center(), p.x, p.z);
                             }
                             packets::C2SMovement::PosRot(p) => {
                                 last_pos = (p.x, p.y, p.z);
-                                if let Err(e) = maybe_move_view(stream, profile, opts, &mut view, world, p.x, p.z, cache, mutable).await {
-                                    debug!("play uuid={} view move failed ({e}), closing", profile.uuid);
-                                    break;
-                                }
-                                if let Some(ds) = &opts.drops {
-                                    if let Err(e) = sync_view_entities(stream, opts, ds, &view).await {
-                                        debug!("play uuid={} view entity sync failed ({e}), closing", profile.uuid);
-                                        break;
-                                    }
-                                }
+                                queue_view_move(&mut pending_view, view.center(), p.x, p.z);
                             }
                             _ => {}
                         }
@@ -1228,6 +1303,16 @@ async fn play_loop(
                 // 挖掘：服务端权威判定 + BlockUpdate/Ack 回包；仅 FINISH_DIG 真落子
                 // （START_DIG 只 ack，让客户端播放原版破坏进度动画）。
                 // 成功掉落同步生成物品实体（Spawn+Data，含初速，客户端自行模拟弹跳）。
+                // 判定前强制 flush：保证 view.center() 已跟上玩家（出视距误回滚），
+                // 也保证区块包先于 BlockUpdate/Spawn 到达客户端。
+                if let Err(e) = maybe_flush_view(
+                    stream, profile, opts, &mut view, world, cache, mutable, &mut pending_view, true,
+                )
+                .await
+                {
+                    debug!("play uuid={} view flush before dig failed ({e}), closing", profile.uuid);
+                    break;
+                }
                 match packets::PlayerAction::decode_body(&payload) {
                     Ok((act, _)) => {
                         if let Some(outcome) = decide_dig(
@@ -1261,6 +1346,15 @@ async fn play_loop(
             Ok((id, payload)) if id == packets::PLAY_USE_ITEM_ON_C2S_ID => {
                 // P17 放置：目标 = 被点方块 + face 偏移；非法回滚重发。
                 // P18：手持映射决定材料（未知/空手回退石头），成功后扣 1 + 单槽同步。
+                // 与挖掘同理：判定前强制 flush，避免节流中的旧中心导致合法放置被回滚。
+                if let Err(e) = maybe_flush_view(
+                    stream, profile, opts, &mut view, world, cache, mutable, &mut pending_view, true,
+                )
+                .await
+                {
+                    debug!("play uuid={} view flush before place failed ({e}), closing", profile.uuid);
+                    break;
+                }
                 match packets::UseItemOn::decode_body(&payload) {
                     Ok((act, _)) => {
                         let place_id = opts
@@ -1392,6 +1486,16 @@ async fn play_loop(
                 debug!("play uuid={} closed ({e})", profile.uuid);
                 break;
             }
+        }
+        // 节流窗口由每个收到的包也检查一次（读超时分支是玩家停住不动时的兜底节拍）。
+        // 放在掉落 tick 之前，保证区块包先于同 tick 的实体包到达。
+        if let Err(e) = maybe_flush_view(
+            stream, profile, opts, &mut view, world, cache, mutable, &mut pending_view, false,
+        )
+        .await
+        {
+            debug!("play uuid={} view flush failed ({e}), closing", profile.uuid);
+            break;
         }
         // 包流不断时也按 50ms 节拍跑掉落 tick，防止读超时分支饿死。
         if last_drop_tick.elapsed() >= Duration::from_millis(50) {
@@ -1624,6 +1728,41 @@ mod tests {
     fn grass_top() -> (i32, i32, i32) {
         let s = WorldGen::new(DEFAULT_SEED).spawn_pos();
         (s.0, s.1 - 1, s.2)
+    }
+
+    #[test]
+    fn pending_view_move_coalesces_crossings_and_clears_on_return() {
+        let current = mc_core::ChunkPos(0, 0);
+        let mut pending = None;
+        // 同中心不入队；连续跨 3 格只保留最终中心并累计次数。
+        queue_view_move(&mut pending, current, 8.0, 8.0);
+        assert!(pending.is_none());
+        for cx in [1, 2, 3] {
+            queue_view_move(&mut pending, current, (cx * 16 + 1) as f64, 8.0);
+        }
+        let p = pending.unwrap();
+        assert_eq!(p.center, mc_core::ChunkPos(3, 0));
+        assert_eq!(p.crossings, 3);
+        assert!(!p.should_flush(), "fresh window below cap must wait");
+        // 走回原中心 → 待发送更新作废（客户端视距没变，无需任何包）。
+        queue_view_move(&mut pending, current, 8.0, 8.0);
+        assert!(pending.is_none());
+    }
+
+    #[test]
+    fn pending_view_move_flushes_on_window_expiry_or_crossing_cap() {
+        let cap = PendingViewMove {
+            center: mc_core::ChunkPos(1, 0),
+            first_at: Instant::now(),
+            crossings: VIEW_MOVE_MAX_CROSSINGS,
+        };
+        assert!(cap.should_flush(), "crossing cap must force a flush");
+        let expired = PendingViewMove {
+            center: mc_core::ChunkPos(1, 0),
+            first_at: Instant::now() - VIEW_MOVE_WINDOW - Duration::from_millis(1),
+            crossings: 1,
+        };
+        assert!(expired.should_flush(), "elapsed window must flush");
     }
 
     #[test]

@@ -426,6 +426,75 @@ async fn crossing_chunk_streams_exact_add_unload_batch_without_duplicates() {
     assert_eq!(read_varint(&payload).unwrap().0, 9);
 }
 
+/// 节流回归：一口气跨多个区块时合并成一次视距更新（中心/卸载/补发都是净差），
+/// 不再每个边界都发一批，也不漏发或重复。
+#[tokio::test]
+async fn consecutive_chunk_crossings_are_coalesced_into_one_batch() {
+    let config = NetConfig::new(100, "throttle".into(), Arc::new(AtomicUsize::new(0)))
+        .with_view_distance(2);
+    let addr = spawn_server(config).await;
+    let mut s = login_and_join(addr, "Throttle", 2).await;
+
+    // x 23 → 24 → 25 → 26，三条移动包放进同一个 TCP 写，服务端在同一节流窗口内处理。
+    let mut wire = Vec::new();
+    for cx in [24i32, 25, 26] {
+        let mut body = Vec::new();
+        packets::MovePlayerPos {
+            x: (cx * 16 + 1) as f64,
+            y: 65.0,
+            z: 381.5,
+            on_ground: true,
+            horizontal_collision: false,
+        }
+        .encode_body(&mut body);
+        packets::encode_packet(packets::PLAY_MOVE_POS_C2S_ID, &body, &mut wire);
+    }
+    s.write_all(&wire).await.unwrap();
+
+    // 只有一个 SetCenterChunk，且是最终中心（不是中间中心）。
+    let (id, payload) = read_frame_timeout(&mut s, Duration::from_secs(2)).await.unwrap();
+    assert_eq!(id, packets::PLAY_SET_CENTER_CHUNK_ID);
+    let (center, _) = packets::SetCenterChunk::decode_body(&payload).unwrap();
+    assert_eq!(center, packets::SetCenterChunk { chunk_x: 26, chunk_z: 23 });
+
+    // 净差：旧视距 x=21..25 → 新视距 x=24..28；卸 x=21..23，补 x=26..28（各 15 块）。
+    let mut unloaded = Vec::new();
+    for _ in 0..15 {
+        let (id, payload) = read_frame_timeout(&mut s, Duration::from_secs(2)).await.unwrap();
+        assert_eq!(id, packets::PLAY_UNLOAD_CHUNK_ID);
+        let (u, _) = packets::UnloadChunk::decode_body(&payload).unwrap();
+        unloaded.push((u.chunk_x, u.chunk_z));
+    }
+    unloaded.sort();
+    let expected_unload: Vec<(i32, i32)> =
+        (21..=23).flat_map(|x| (21..=25).map(move |z| (x, z))).collect();
+    assert_eq!(unloaded, expected_unload);
+
+    let (id, _) = read_frame_timeout(&mut s, Duration::from_secs(2)).await.unwrap();
+    assert_eq!(id, packets::PLAY_CHUNK_BATCH_START_ID);
+    let mut loaded = Vec::new();
+    for _ in 0..15 {
+        let (id, payload) = read_frame_timeout(&mut s, Duration::from_secs(2)).await.unwrap();
+        assert_eq!(id, packets::PLAY_CHUNK_DATA_ID);
+        let (chunk, used) = packets::PlayChunkData::decode_body(&payload).unwrap();
+        assert_eq!(used, payload.len());
+        loaded.push((chunk.chunk_x, chunk.chunk_z));
+    }
+    loaded.sort();
+    let expected_load: Vec<(i32, i32)> =
+        (26..=28).flat_map(|x| (21..=25).map(move |z| (x, z))).collect();
+    assert_eq!(loaded, expected_load);
+
+    let (id, payload) = read_frame_timeout(&mut s, Duration::from_secs(2)).await.unwrap();
+    assert_eq!(id, packets::PLAY_CHUNK_BATCH_FINISHED_ID);
+    assert_eq!(read_varint(&payload).unwrap().0, 15);
+
+    assert!(
+        read_frame_timeout(&mut s, Duration::from_millis(300)).await.is_err(),
+        "coalesced update must not emit extra intermediate batches"
+    );
+}
+
 async fn send_pos_y(stream: &mut TcpStream, x: f64, y: f64, z: f64) {
     let mut body = Vec::new();
     packets::MovePlayerPos { x, y, z, on_ground: true, horizontal_collision: false }
