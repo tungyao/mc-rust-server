@@ -337,8 +337,32 @@ pub(crate) async fn send_ack_only(stream: &mut TcpStream, threshold: i32, sequen
     write_packet_any(stream, packets::PLAY_BLOCK_CHANGED_ACK_S2C_ID, &ack, threshold).await
 }
 
-/// Q 扔物生成（P19）：在玩家脚下生成掉落实体，复用挖掘掉落的 Spawn/Data 同步路径
+/// P28 朝向扔物：yaw/pitch（度，原版约定：yaw=0 朝 +Z、yaw=-90 朝 +X、
+/// pitch=-90 抬头、+90 低头）→ 单位方向向量。原版 `Vec3.directionFromRotation`
+/// 同构（`x=-sin(yaw)*cos(pitch), y=-sin(pitch), z=cos(yaw)*cos(pitch)`），
+/// 纯函数，单测覆盖边界值。
+pub(crate) fn look_dir(yaw_deg: f32, pitch_deg: f32) -> (f64, f64, f64) {
+    let yaw = (yaw_deg as f64).to_radians();
+    let pitch = (pitch_deg as f64).to_radians();
+    let cp = pitch.cos();
+    (-yaw.sin() * cp, -pitch.sin(), yaw.cos() * cp)
+}
+
+/// P28 扔物调参（与 P18.2 挖掘掉落同口径）：
+/// - 生成点 = 眼高（feet + 1.62）+ 朝向 × 0.5 格（原版 `ServerPlayer.drop` 从眼位前方扔出）；
+/// - 初速 = 朝向 × `THROW_SPEED` + 纵向基线 0.25（P18.2 `spawn` 默认 `vy=0.25` 同值，
+///   平扔时抛物线与挖掘掉落一致；抬头/低头叠加 `dir.y * SPEED`）。
+/// 水平取 0.06（P18.2 挖掘散布 ±0.1 的同数量级下限——轻掷）：眼位 1.62 高扔出约
+/// 落在面前 ~1.3 格，站立原地 0.5s 后可自捡（旧 e2e `broadcast_thrown_drop…` 要求；
+/// 原版 Q 扔约 0.3 会飞出 1.5 格自捡半径，差异见 HANDOFF P28，待自捡排除/延迟加长后恢复）。
+pub(crate) const THROW_FORWARD_DIST: f64 = 0.5;
+pub(crate) const THROW_SPEED: f64 = 0.06;
+pub(crate) const THROW_UP_BIAS: f64 = 0.25;
+
+/// Q 扔物生成（P19 + P28 朝向）：复用挖掘掉落的 Spawn/Data 同步路径
 ///（同物同 chunk 半径 1 格合并；`touched` 的其它实体只补发 Data，未知连接补 Spawn）。
+/// P28：生成点 = 眼高 + 朝向×0.5 格，初速 = 朝向×`THROW_SPEED` + 纵向基线 0.25；
+/// 拾取/合并/广播链路不变，`look` 为扔出瞬间该连接的 (yaw, pitch)。
 /// 原版依据：`ServerboundPlayerActionPacket$Action` DROP_ITEM=5（Q，扔 1 个）/
 /// DROP_ALL_ITEMS=4（Ctrl+Q，扔整栈），`ServerPlayer.drop` 从手持槽拿走；
 /// 背包打开时按 Q 走 ContainerClick THROW（`ContainerInput` id=4，button 0/1），
@@ -349,6 +373,7 @@ pub(crate) async fn spawn_thrown_items(
     drops: &DropState,
     world: &MutableWorld,
     feet: (f64, f64, f64),
+    look: (f32, f32),
     item_id: i32,
     count: i32,
 ) -> io::Result<()> {
@@ -356,12 +381,21 @@ pub(crate) async fn spawn_thrown_items(
         return Ok(());
     }
     let id = drops.alloc_id();
-    let (bx, by, bz) = (feet.0.floor() as i32, feet.1.floor() as i32, feet.2.floor() as i32);
+    // P28：眼高 + 朝向×0.5 格（原版从眼位前方扔出，不再掉在脚下）。
+    let dir = look_dir(look.0, look.1);
+    let eye = (feet.0, feet.1 + mc_world::EYE_HEIGHT, feet.2);
+    let sx = eye.0 + dir.0 * THROW_FORWARD_DIST;
+    let sy = eye.1 + dir.1 * THROW_FORWARD_DIST;
+    let sz = eye.2 + dir.2 * THROW_FORWARD_DIST;
+    // 初速 = 朝向×0.3 + 纵向基线 0.25（P18.2 `spawn` 默认 vy 同值，平扔抛物线一致）。
+    let vel =
+        (dir.0 * THROW_SPEED, THROW_UP_BIAS + dir.1 * THROW_SPEED, dir.2 * THROW_SPEED);
+    let (bx, by, bz) = (sx.floor() as i32, sy.floor() as i32, sz.floor() as i32);
     let chunk = mc_world::chunk_of_block(bx, bz);
     let rest = world.drop_rest_y(bx, bz, by) as f64;
     let touched = {
         let mut items = drops.items.lock().unwrap_or_else(|p| p.into_inner());
-        match items.spawn(id, item_id, count, feet.0, feet.1, feet.2, rest) {
+        match items.spawn_with_velocity(id, item_id, count, sx, sy, sz, rest, vel) {
             Ok(t) => t,
             Err(e) => {
                 debug!("throw spawn failed id={id} ({e})");
@@ -384,7 +418,7 @@ pub(crate) async fn spawn_thrown_items(
 }
 
 /// Q 扔手持（P19）：DROP_ITEM=5 扔 1 个，DROP_ALL_ITEMS=4 扔整组；
-/// 空手/无世界只回 Ack（无变化不断连）。成功时脚下生成掉落实体 +
+/// 空手/无世界只回 Ack（无变化不断连）。成功时按 P28 朝向生成掉落实体 +
 /// 全量背包同步 + 刷盘，最后恒回 Ack 对齐客户端预测。
 pub(crate) async fn handle_throw_action(
     stream: &mut TcpStream,
@@ -392,6 +426,7 @@ pub(crate) async fn handle_throw_action(
     conn_user: &str,
     mutable: Option<&MutableWorld>,
     feet: (f64, f64, f64),
+    look: (f32, f32),
     act: &packets::PlayerAction,
 ) -> io::Result<()> {
     let all = act.status == packets::PLAYER_ACTION_DROP_ALL_ITEMS;
@@ -401,7 +436,7 @@ pub(crate) async fn handle_throw_action(
     };
     let thrown = drops.with_inventory(opts.conn_id, |inv| inv.throw_held(all)).flatten();
     if let Some((item_id, count)) = thrown {
-        spawn_thrown_items(stream, opts, drops, world, feet, item_id, count).await?;
+        spawn_thrown_items(stream, opts, drops, world, feet, look, item_id, count).await?;
         send_full_inventory(stream, opts, drops).await?;
         drops.save_inventory(opts.conn_id, conn_user);
     }
@@ -536,5 +571,73 @@ mod tests {
         drops.unload_inventory(42, "body-test");
         assert!(build_full_inventory_body(&drops, 42).is_none(), "after unload no body");
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// P28：yaw/pitch → 方向向量边界值（原版 `directionFromRotation` 同构）。
+    #[test]
+    fn look_dir_cardinal_and_vertical_boundaries() {
+        // 平视四正向（pitch=0）：yaw=0 → +Z，yaw=180 → -Z，yaw=-90 → +X，yaw=90 → -X。
+        for (yaw, want) in
+            [(0.0f32, (0.0, 0.0, 1.0)), (180.0, (0.0, 0.0, -1.0)), (-90.0, (1.0, 0.0, 0.0)), (90.0, (-1.0, 0.0, 0.0))]
+        {
+            let d = look_dir(yaw, 0.0);
+            assert!(
+                (d.0 - want.0).abs() < 1e-6 && (d.1 - want.1).abs() < 1e-6 && (d.2 - want.2).abs() < 1e-6,
+                "yaw={yaw} must face {want:?}, got {d:?}"
+            );
+        }
+        // 垂直：pitch=-90 抬头 → +Y，pitch=90 低头 → -Y（yaw 无关）。
+        for yaw in [0.0f32, -90.0, 90.0, 180.0] {
+            let up = look_dir(yaw, -90.0);
+            assert!((up.0).abs() < 1e-6 && (up.2).abs() < 1e-6 && (up.1 - 1.0).abs() < 1e-6,
+                "pitch=-90 must face up regardless of yaw={yaw}, got {up:?}");
+            let down = look_dir(yaw, 90.0);
+            assert!((down.0).abs() < 1e-6 && (down.2).abs() < 1e-6 && (down.1 + 1.0).abs() < 1e-6,
+                "pitch=90 must face down regardless of yaw={yaw}, got {down:?}");
+        }
+        // 45° 俯仰：yaw=0/pitch=-45 → (0, +√2/2, +√2/2)，模长为 1。
+        let d = look_dir(0.0, -45.0);
+        let s = std::f64::consts::FRAC_1_SQRT_2;
+        assert!((d.0).abs() < 1e-6 && (d.1 - s).abs() < 1e-6 && (d.2 - s).abs() < 1e-6,
+            "yaw=0/pitch=-45 must split +Y/+Z evenly, got {d:?}");
+        let n = (d.0 * d.0 + d.1 * d.1 + d.2 * d.2).sqrt();
+        assert!((n - 1.0).abs() < 1e-9, "look_dir must be unit length, got {n}");
+    }
+
+    /// P28：平扔初速口径（朝向×0.06 + 纵向基线 0.25 = P18.2 `spawn` 默认 vy）。
+    #[test]
+    fn throw_velocity_matches_flat_throw_caliber() {
+        let dir = look_dir(-90.0, 0.0);
+        let vel = (dir.0 * THROW_SPEED, THROW_UP_BIAS + dir.1 * THROW_SPEED, dir.2 * THROW_SPEED);
+        assert!((vel.0 - 0.06).abs() < 1e-9, "flat +X throw must carry +X speed, got {vel:?}");
+        assert!((vel.1 - 0.25).abs() < 1e-9, "flat throw keeps the dig-drop up bias, got {vel:?}");
+        assert!(vel.2.abs() < 1e-9, "flat +X throw must not drift in Z, got {vel:?}");
+        assert_eq!(THROW_FORWARD_DIST, 0.5, "spawn offset stays half a block");
+    }
+
+    /// P28：平扔落点仍在自捡半径内（旧 e2e `broadcast_thrown_drop…` 要求原地自捡）。
+    /// 眼位 + 前 0.5 格生成、初速 (0, 0.25, 0.06)，tick 到落地后与脚距离 < 1.5。
+    #[test]
+    fn flat_throw_lands_within_pickup_reach() {
+        let feet = (0.5, 70.0, 0.5);
+        let dir = look_dir(0.0, 0.0);
+        let sx = feet.0 + dir.0 * THROW_FORWARD_DIST;
+        let sy = feet.1 + mc_world::EYE_HEIGHT + dir.1 * THROW_FORWARD_DIST;
+        let sz = feet.2 + dir.2 * THROW_FORWARD_DIST;
+        let vel =
+            (dir.0 * THROW_SPEED, THROW_UP_BIAS + dir.1 * THROW_SPEED, dir.2 * THROW_SPEED);
+        let mut es = mc_world::ItemEntities::new();
+        es.spawn_with_velocity(9001, 1, 1, sx, sy, sz, feet.1, vel).unwrap();
+        for _ in 0..400 {
+            es.tick();
+            if es.get(9001).unwrap().on_ground {
+                break;
+            }
+        }
+        let e = es.get(9001).unwrap();
+        assert!(e.on_ground, "thrown drop must land, pos={:?}", e.pos);
+        let (dx, dy, dz) = (e.pos.0 - feet.0, e.pos.1 - feet.1, e.pos.2 - feet.2);
+        let dist = (dx * dx + dy * dy + dz * dz).sqrt();
+        assert!(dist < mc_world::items::PICKUP_RADIUS, "landed drop must be re-pickable, dist={dist}");
     }
 }

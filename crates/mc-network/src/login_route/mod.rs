@@ -68,6 +68,11 @@ async fn play_loop(
     // 与 ECS Position 同源（同一批移动包），net 线程先看到，判定距离用它足够。
     let spawn = world.spawn_pos();
     let mut last_pos = (spawn.0 as f64 + 0.5, spawn.1 as f64, spawn.2 as f64 + 0.5);
+    // P28 朝向跟踪：C2S 旋转包（0x1F PosRot / 0x20 Rot）的 yaw/pitch。
+    // Pos（0x1E）/ Flags（0x21）不带旋转，保持上次朝向；初始 (0, 0) = 平视 +Z。
+    // 只服务本连接自己的 Q 扔（`spawn_thrown_items` 生成点/初速），多人广播不需要
+    // 对端朝向，故 `BroadcastHub` 不加字段（LK/快照语义只覆盖 pos/radius）。
+    let mut last_look: (f32, f32) = (0.0, 0.0);
     // 客户端在 Play 里每 tick 都发 0x0D，read_packet 不会超时；必须按时间主动发 KeepAlive，
     // 否则客户端 30s 收不到 0x2D 会 “连接超时” 断开（2026-11-23 真机实测）。
     let mut last_keepalive = Instant::now();
@@ -157,7 +162,12 @@ async fn play_loop(
                             }
                             packets::C2SMovement::PosRot(p) => {
                                 last_pos = (p.x, p.y, p.z);
+                                last_look = (p.yaw, p.pitch);
                                 queue_view_move(&mut pending_view, view.center(), p.x, p.z);
+                            }
+                            packets::C2SMovement::Rot(p) => {
+                                // 纯旋转：位置不动，只刷新朝向（P28 前这里被 `_` 吞掉）。
+                                last_look = (p.yaw, p.pitch);
                             }
                             _ => {}
                         }
@@ -196,7 +206,7 @@ async fn play_loop(
                             || act.status == packets::PLAYER_ACTION_DROP_ALL_ITEMS
                         {
                             if let Err(e) =
-                                handle_throw_action(stream, opts, &conn_user, mutable, last_pos, &act)
+                                handle_throw_action(stream, opts, &conn_user, mutable, last_pos, last_look, &act)
                                     .await
                             {
                                 debug!("play uuid={} throw failed ({e}), closing", profile.uuid);
@@ -458,7 +468,7 @@ async fn play_loop(
                         if let Some((item_id, count)) = thrown {
                             if let (Some(ds), Some(world)) = (opts.drops.as_ref(), mutable) {
                                 if let Err(e) = spawn_thrown_items(
-                                    stream, opts, ds, world, last_pos, item_id, count,
+                                    stream, opts, ds, world, last_pos, last_look, item_id, count,
                                 )
                                 .await
                                 {
