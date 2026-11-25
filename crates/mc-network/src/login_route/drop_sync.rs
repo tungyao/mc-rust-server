@@ -348,20 +348,21 @@ pub(crate) fn look_dir(yaw_deg: f32, pitch_deg: f32) -> (f64, f64, f64) {
     (-yaw.sin() * cp, -pitch.sin(), yaw.cos() * cp)
 }
 
-/// P28 扔物调参（与 P18.2 挖掘掉落同口径）：
-/// - 生成点 = 眼高（feet + 1.62）+ 朝向 × 0.5 格（原版 `ServerPlayer.drop` 从眼位前方扔出）；
-/// - 初速 = 朝向 × `THROW_SPEED` + 纵向基线 0.25（P18.2 `spawn` 默认 `vy=0.25` 同值，
-///   平扔时抛物线与挖掘掉落一致；抬头/低头叠加 `dir.y * SPEED`）。
-/// 水平取 0.06（P18.2 挖掘散布 ±0.1 的同数量级下限——轻掷）：眼位 1.62 高扔出约
-/// 落在面前 ~1.3 格，站立原地 0.5s 后可自捡（旧 e2e `broadcast_thrown_drop…` 要求；
-/// 原版 Q 扔约 0.3 会飞出 1.5 格自捡半径，差异见 HANDOFF P28，待自捡排除/延迟加长后恢复）。
-pub(crate) const THROW_FORWARD_DIST: f64 = 0.5;
+/// P28 扔物调参（P28.2 修过弹道：生成点收回头上、前置只剩 0.15 格，
+/// 上扬基线降到 0.1——之前 0.5+0.25 是从脸前半空"弹"出来再落下，手感不对；
+/// 原版 `ServerPlayer.drop` 就是从眼位（eye-0.3，XZ 不前置）扔出）：
+/// - 生成点 = 眼高（feet + 1.62）+ 朝向 × 0.15 格；
+/// - 初速 = 朝向 × `THROW_SPEED` + 纵向基线 0.1（抬头/低头叠加 `dir.y * SPEED`）。
+/// 水平取 0.06（P18.2 挖掘散布 ±0.1 的同数量级下限——轻掷）：约落在面前 1 格，
+/// 站立原地 2s（手扔延迟，P28.1）后可自捡（旧 e2e `broadcast_thrown_drop…` 要求；
+/// 原版 Q 扔约 0.3 会飞出 1.5 格自捡半径，差异见 HANDOFF P28，待自捡排除后恢复）。
+pub(crate) const THROW_FORWARD_DIST: f64 = 0.15;
 pub(crate) const THROW_SPEED: f64 = 0.06;
-pub(crate) const THROW_UP_BIAS: f64 = 0.25;
+pub(crate) const THROW_UP_BIAS: f64 = 0.1;
 
-/// Q 扔物生成（P19 + P28 朝向）：复用挖掘掉落的 Spawn/Data 同步路径
+/// Q 扔物生成（P19 + P28 朝向 + P28.2 弹道）：复用挖掘掉落的 Spawn/Data 同步路径
 ///（同物同 chunk 半径 1 格合并；`touched` 的其它实体只补发 Data，未知连接补 Spawn）。
-/// P28：生成点 = 眼高 + 朝向×0.5 格，初速 = 朝向×`THROW_SPEED` + 纵向基线 0.25；
+/// P28.2：生成点 = 眼高 + 朝向×0.15 格（基本在头上），初速 = 朝向×`THROW_SPEED` + 纵向基线 0.1；
 /// 拾取/合并/广播链路不变，`look` 为扔出瞬间该连接的 (yaw, pitch)。
 /// 原版依据：`ServerboundPlayerActionPacket$Action` DROP_ITEM=5（Q，扔 1 个）/
 /// DROP_ALL_ITEMS=4（Ctrl+Q，扔整栈），`ServerPlayer.drop` 从手持槽拿走；
@@ -614,19 +615,19 @@ mod tests {
         assert!((n - 1.0).abs() < 1e-9, "look_dir must be unit length, got {n}");
     }
 
-    /// P28：平扔初速口径（朝向×0.06 + 纵向基线 0.25 = P18.2 `spawn` 默认 vy）。
+    /// P28.2：平扔初速口径（朝向×0.06 + 纵向基线 0.1；0.25 会从脸前弹起，手感不对）。
     #[test]
     fn throw_velocity_matches_flat_throw_caliber() {
         let dir = look_dir(-90.0, 0.0);
         let vel = (dir.0 * THROW_SPEED, THROW_UP_BIAS + dir.1 * THROW_SPEED, dir.2 * THROW_SPEED);
         assert!((vel.0 - 0.06).abs() < 1e-9, "flat +X throw must carry +X speed, got {vel:?}");
-        assert!((vel.1 - 0.25).abs() < 1e-9, "flat throw keeps the dig-drop up bias, got {vel:?}");
+        assert!((vel.1 - 0.1).abs() < 1e-9, "flat throw uses the gentle 0.1 up bias, got {vel:?}");
         assert!(vel.2.abs() < 1e-9, "flat +X throw must not drift in Z, got {vel:?}");
-        assert_eq!(THROW_FORWARD_DIST, 0.5, "spawn offset stays half a block");
+        assert_eq!(THROW_FORWARD_DIST, 0.15, "spawn offset stays near the head");
     }
 
-    /// P28：平扔落点仍在自捡半径内（旧 e2e `broadcast_thrown_drop…` 要求原地自捡）。
-    /// 眼位 + 前 0.5 格生成、初速 (0, 0.25, 0.06)，tick 到落地后与脚距离 < 1.5。
+    /// P28.2：平扔落点仍在自捡半径内（旧 e2e `broadcast_thrown_drop…` 要求原地自捡）。
+    /// 眼位 + 前 0.15 格生成、初速 (0.06, 0.1, 0)，tick 到落地后与脚距离 < 1.5。
     #[test]
     fn flat_throw_lands_within_pickup_reach() {
         let feet = (0.5, 70.0, 0.5);

@@ -1969,7 +1969,7 @@ async fn throw_with_look_flies_forward_with_velocity() {
     mc_network::framing::write_packet(&mut s, packets::PLAY_PLAYER_ACTION_C2S_ID, &body)
         .await
         .unwrap();
-    // 扔完立刻走开 4 格（同 chunk），避免 10 ticks 后被自捡。
+    // 扔完立刻走开 4 格（同 chunk），避免 40 ticks 后被自捡。
     send_pos_y(&mut s, fx + 4.0, fy, fz).await;
 
     let (mut saw_spawn, mut saw_data, mut saw_content, mut saw_ack) = (false, false, false, false);
@@ -1978,7 +1978,7 @@ async fn throw_with_look_flies_forward_with_velocity() {
         match id {
             packets::PLAY_SPAWN_ENTITY_S2C_ID => {
                 let sp = packets::SpawnItemEntity::decode_body(&payload).unwrap().0;
-                assert!((sp.x - fx - 0.5).abs() < 0.01, "spawn must lead +X by 0.5, got x={}", sp.x);
+                assert!((sp.x - fx - 0.15).abs() < 0.02, "spawn must lead +X by 0.15, got x={}", sp.x);
                 assert!((sp.z - fz).abs() < 0.01, "flat +X throw must not drift in Z, got z={}", sp.z);
                 assert!(
                     (sp.y - fy - mc_world::EYE_HEIGHT).abs() < 0.01,
@@ -1991,8 +1991,8 @@ async fn throw_with_look_flies_forward_with_velocity() {
                     sp.vel.x
                 );
                 assert!(
-                    (sp.vel.y - 0.25).abs() < 0.01,
-                    "flat throw keeps the dig-drop up bias, got {}",
+                    (sp.vel.y - 0.1).abs() < 0.01,
+                    "flat throw uses the gentle 0.1 up bias, got {}",
                     sp.vel.y
                 );
                 assert!(sp.vel.z.abs() < 0.01, "flat +X throw must not drift in Z, got {}", sp.vel.z);

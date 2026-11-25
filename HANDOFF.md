@@ -664,19 +664,22 @@ $natives = 'C:\Users\qwe\AppData\Local\Temp\mc263natives'
     - **改动**：`play_loop` 新增 `last_look: (f32, f32)`（PosRot/Rot 更新，Pos/Flags 保持，
       初始 `(0,0)` 平视 +Z；断线即丢，随连接生命期，无需清理）；`spawn_thrown_items`/
       `handle_throw_action` 加 `look` 参（两处接线：PlayerAction Q 与 ContainerClick THROW）。
-      生成点 = 眼高（feet + `EYE_HEIGHT` 1.62）+ 朝向×0.5 格；初速 = 朝向×0.06 +
-      纵向基线 0.25（P18.2 `spawn` 默认 `vy=0.25`/水平 hash ±0.1 的同数量级下限——轻掷）。
+      生成点 = 眼高（feet + `EYE_HEIGHT` 1.62）+ 朝向×0.15 格（P28 初版 0.5 格是从脸前
+      半空"弹"出来，真机反馈手感不对；原版就是从眼位扔出，P28.2 收回头上）；
+      初速 = 朝向×0.06 + 纵向基线 0.1（初版 0.25 上扬太陡，同原因降到 0.1）。
       拾取/合并/广播/数量语义全不动（`spawn_with_velocity` 新实体才带定向初速，
       被合并吸收的不改既有速度；空手 Q/光标非空 THROW 仍只回包不落子）。
+      手扔拾取延迟 40 ticks（P28.1，原版 q-drop 口径；挖掘掉落仍 10）。
     - **与原版差异（有意）**：原版 Q 扔初速约 0.3（眼位前方、飞数格），本服取 0.06 是因为
-      拾取延迟仅 10 ticks（0.5s）且半径 1.5——0.3 会飞出自捡半径，导致旧 e2e
+      半径 1.5——0.3 会飞出自捡半径，导致旧 e2e
       `broadcast_thrown_drop_spawns_for_viewer_and_pickup_removes`（A 原地不动等拾取）
-      失败。轻掷落点在面前 ~1.3 格，站立 0.5s 可自捡；方向性由 0.5 格前置 + 非零初速体现。
-      TODO：加长自捡延迟/自扔暂不可捡（对齐原版手感）后，可把 `THROW_SPEED` 恢复到 0.3 量级；
+      失败。轻掷落点在面前 ~1 格，站立 2s（手扔延迟）后可自捡；方向性由 0.15 格前置 + 非零初速体现。
+      TODO：自扔暂不可捡（对齐原版手感）后，可把 `THROW_SPEED` 恢复到 0.3 量级；
       空手 Q、背包开屏 Q（button 0/1、光标非空无操作）数量语义未动；真机复验扔手感/抛物线/落点。
     - 测试：`drop_sync` 单测（四正向 + 垂直 + 45° 边界、`look_dir` 单位长；平扔初速口径；
-      400 ticks 物理仿真落点仍在自捡半径内）+ `items` 单测（显式初速保留/合并语义）+
-      `play_actions.rs` 只追加 1 个 e2e（PosRot yaw=-90 → Spawn x+0.5/眼高、vel≈(0.06,0.25,0)）。
+      400 ticks 物理仿真落点仍在自捡半径内）+ `items` 单测（显式初速保留/合并语义；
+      手扔 40 拍延迟回归）+
+      `play_actions.rs` 只追加 1 个 e2e（PosRot yaw=-90 → Spawn x+0.15/眼高、vel≈(0.06,0.1,0)）。
       旧 26 项（play_stream 17 + play_actions 9）一个字未动，全绿。
 
 ## 6. 关键文件
