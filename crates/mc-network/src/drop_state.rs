@@ -60,6 +60,13 @@ pub struct DropState {
     crops: Mutex<HashMap<(i32, i32, i32), CropEntry>>,
     /// P22 每阶段 tick 数（生产 1200；测试可经 `set_stage_ticks` 调小）。
     stage_ticks: AtomicU64,
+    /// P26 树苗：(x,y,z) → 种下 tick；到期长成小橡树，挖苗/挖土取消（仿 `uproot_crop`）。
+    /// 另起同构结构而不复用 `crops`（理由见 `tick_saplings`）：作物是多阶段 age 推进，
+    /// 树苗是单次到期替换为多格树，计时（固定 7200）与落子（57 格广播）语义完全不同，
+    /// 共用一个 map 会把阶段/间隔耦合在一起，重启认领与摘除条件也不同（树苗多查土壤）。
+    saplings: Mutex<HashMap<(i32, i32, i32), u64>>,
+    /// P26 树苗生长 tick 数（生产 `SAPLING_GROW_TICKS` = 7200 ≈ 6min；测试调小）。
+    sapling_ticks: AtomicU64,
     /// P22 生长广播用 hub（`serve` 在 world+drops+hub 齐备时注入；None 则生长只落子不广播）。
     hub: Mutex<Option<Arc<BroadcastHub>>>,
     /// P22 生长缓存失效用（同上；None 则跳过失效，下次编辑时自然重编）。
@@ -83,6 +90,8 @@ impl DropState {
             tick_count: AtomicU64::new(0),
             crops: Mutex::new(HashMap::new()),
             stage_ticks: AtomicU64::new(mc_world::WHEAT_TICKS_PER_STAGE),
+            saplings: Mutex::new(HashMap::new()),
+            sapling_ticks: AtomicU64::new(mc_world::SAPLING_GROW_TICKS),
             hub: Mutex::new(None),
             cache: Mutex::new(None),
             tick_started: AtomicBool::new(false),
@@ -197,6 +206,8 @@ impl DropState {
         drop(items);
         // P22 作物生长：同一 ticker 内推进，与掉落物理同节拍（50ms），连接侧不参与。
         self.tick_crops(world);
+        // P26 树苗生长：同一 ticker 内推进，连接侧绝不碰（P18.1 R1 不重犯）。
+        self.tick_saplings(world);
     }
 
     /// P22：按 `(now - planted) / WHEAT_TICKS_PER_STAGE` 算应处 age，到阶段即
@@ -315,6 +326,107 @@ impl DropState {
                 true
             }
             None => false,
+        }
+    }
+
+    /// P26：种下树苗登记（UseItemOn 种植路径调用，落子成功后）。
+    pub fn plant_sapling(&self, x: i32, y: i32, z: i32) {
+        self.saplings
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
+            .insert((x, y, z), self.tick_count.load(Ordering::Relaxed));
+    }
+
+    /// P26：树苗被挖/所在土被挖时摘除跟踪（挖掘路径调用；ticker 懒摘除是兜底）。
+    pub fn uproot_sapling(&self, x: i32, y: i32, z: i32) {
+        self.saplings.lock().unwrap_or_else(|p| p.into_inner()).remove(&(x, y, z));
+    }
+
+    /// P26：跟踪中的树苗数（e2e/诊断用）。
+    pub fn sapling_count(&self) -> usize {
+        self.saplings.lock().unwrap_or_else(|p| p.into_inner()).len()
+    }
+
+    /// P26 测试钩子：覆盖树苗生长 tick 数（生产 `SAPLING_GROW_TICKS` = 7200 ≈ 6min）。
+    pub fn set_sapling_ticks(&self, n: u64) {
+        self.sapling_ticks.store(n.max(1), Ordering::Relaxed);
+    }
+
+    /// P26：重启后把存量树苗重新纳入生长（从重启时刻重计时；与小麦同口径）。
+    pub fn adopt_existing_saplings(&self, world: &MutableWorld) {
+        let now = self.tick_count.load(Ordering::Relaxed);
+        let mut saplings = self.saplings.lock().unwrap_or_else(|p| p.into_inner());
+        for pos in world.sapling_blocks() {
+            saplings.entry(pos).or_insert(now);
+        }
+    }
+
+    /// P26：树苗到期长成小橡树（全服唯一 ticker 内，连接侧绝不调用）。
+    /// - 到期条件：`now - planted >= sapling_ticks`；
+    /// - 树苗格已不是树苗（被挖/被改）→ 静默摘除；土壤（y-1）不是草/泥土 → 取消生长摘除；
+    /// - 树形经 `mc_world::sapling_oak_blocks` 计算（trunk 在前、leaves 在后）：
+    ///   树苗格本身恒替换为原木，其余格只在空气时放（被占跳过，不覆盖玩家建筑）；
+    /// - 每格经 `MutableWorld::set` 落子，受影响 chunk 失效，多格变更逐格 hub 广播。
+    fn tick_saplings(&self, world: &MutableWorld) {
+        let now = self.tick_count.load(Ordering::Relaxed);
+        let interval = self.sapling_ticks.load(Ordering::Relaxed).max(1);
+        let due: Vec<(i32, i32, i32)> = {
+            let saplings = self.saplings.lock().unwrap_or_else(|p| p.into_inner());
+            saplings
+                .iter()
+                .filter(|(_, planted)| now.saturating_sub(**planted) >= interval)
+                .map(|(pos, _)| *pos)
+                .collect()
+        };
+        if due.is_empty() {
+            return;
+        }
+        let hub = self.hub.lock().unwrap_or_else(|p| p.into_inner()).clone();
+        let cache = self.cache.lock().unwrap_or_else(|p| p.into_inner()).clone();
+        for (x, y, z) in due {
+            if world.get(x, y, z) != mc_world::OAK_SAPLING_BLOCK_ID {
+                self.saplings.lock().unwrap_or_else(|p| p.into_inner()).remove(&(x, y, z));
+                continue;
+            }
+            let soil = world.get(x, y - 1, z);
+            if soil != mc_world::GRASS_BLOCK_ID && soil != mc_world::DIRT_BLOCK_ID {
+                self.saplings.lock().unwrap_or_else(|p| p.into_inner()).remove(&(x, y, z));
+                continue;
+            }
+            let mut placed: Vec<((i32, i32, i32), u16)> = Vec::new();
+            for (pos, id) in mc_world::sapling_oak_blocks(x, y, z) {
+                if pos == (x, y, z) {
+                    world.set(pos.0, pos.1, pos.2, id);
+                    placed.push((pos, id));
+                } else if world.get(pos.0, pos.1, pos.2) == mc_world::AIR_BLOCK_ID {
+                    world.set(pos.0, pos.1, pos.2, id);
+                    placed.push((pos, id));
+                }
+            }
+            if let Some(cache) = &cache {
+                use std::collections::HashSet;
+                let mut chunks: HashSet<mc_core::ChunkPos> = HashSet::new();
+                for ((bx, _, bz), _) in &placed {
+                    chunks.insert(mc_world::chunk_of_block(*bx, *bz));
+                }
+                for c in chunks {
+                    cache.invalidate(c);
+                }
+            }
+            if let Some(hub) = &hub {
+                for ((bx, by, bz), id) in &placed {
+                    let mut body = Vec::new();
+                    mc_protocol::packets::BlockUpdate { x: *bx, y: *by, z: *bz, block_id: *id as i32 }
+                        .encode_body(&mut body);
+                    hub.broadcast(
+                        u64::MAX,
+                        mc_world::chunk_of_block(*bx, *bz),
+                        mc_protocol::packets::PLAY_BLOCK_UPDATE_S2C_ID,
+                        &body,
+                    );
+                }
+            }
+            self.saplings.lock().unwrap_or_else(|p| p.into_inner()).remove(&(x, y, z));
         }
     }
 
@@ -550,5 +662,103 @@ mod tests {
         let after_restart = st.tick_count();
         assert!(after_restart >= stopped_at + 2, "restarted ticker must keep ticking");
         assert!(st.stop_global_tick(), "clean up the restarted ticker");
+    }
+
+    #[test]
+    fn saplings_grow_into_small_oak_on_global_tick() {
+        use mc_world::{MutableWorld, WorldGen};
+        let world = MutableWorld::new(11);
+        let st = DropState::new(std::env::temp_dir(), 11);
+        st.set_sapling_ticks(3);
+        // 出生平台上种（平坦 + 上方空气，冠层 ±2 不撞地形）。
+        let s = WorldGen::new(11).spawn_pos();
+        let (x, y, z) = (s.0, s.1, s.2);
+        world.set(x, y - 1, z, mc_world::DIRT_BLOCK_ID);
+        world.set(x, y, z, mc_world::OAK_SAPLING_BLOCK_ID);
+        st.plant_sapling(x, y, z);
+        assert_eq!(st.sapling_count(), 1);
+        // 未到期：还是树苗。
+        st.physics_tick(&world);
+        st.physics_tick(&world);
+        assert_eq!(world.get(x, y, z), mc_world::OAK_SAPLING_BLOCK_ID);
+        // 第 3 拍到期：树苗格变原木，冠层出现树叶。
+        st.physics_tick(&world);
+        assert_eq!(world.get(x, y, z), mc_world::OAK_LOG_BLOCK_ID);
+        assert_eq!(world.get(x, y + 3, z), mc_world::OAK_LOG_BLOCK_ID, "trunk top");
+        assert_eq!(world.get(x + 1, y + 1, z), mc_world::OAK_LEAVES_BLOCK_ID);
+        assert_eq!(st.sapling_count(), 0, "grown sapling leaves tracking");
+    }
+
+    #[test]
+    fn saplings_skip_occupied_cells_and_never_overwrite() {
+        use mc_world::{MutableWorld, WorldGen};
+        let world = MutableWorld::new(12);
+        let st = DropState::new(std::env::temp_dir(), 12);
+        st.set_sapling_ticks(2);
+        let s = WorldGen::new(12).spawn_pos();
+        let (x, y, z) = (s.0, s.1, s.2);
+        world.set(x, y - 1, z, mc_world::DIRT_BLOCK_ID);
+        world.set(x, y, z, mc_world::OAK_SAPLING_BLOCK_ID);
+        // 在冠层预埋石头：生长必须跳过该格。
+        world.set(x + 1, y + 1, z, mc_world::STONE_BLOCK_ID);
+        st.plant_sapling(x, y, z);
+        st.physics_tick(&world);
+        st.physics_tick(&world);
+        assert_eq!(world.get(x, y, z), mc_world::OAK_LOG_BLOCK_ID);
+        assert_eq!(
+            world.get(x + 1, y + 1, z),
+            mc_world::STONE_BLOCK_ID,
+            "occupied canopy cell must not be overwritten"
+        );
+        assert_eq!(st.sapling_count(), 0);
+    }
+
+    #[test]
+    fn saplings_cancel_when_dug_or_soil_gone() {
+        use mc_world::{MutableWorld, WorldGen};
+        let world = MutableWorld::new(13);
+        let st = DropState::new(std::env::temp_dir(), 13);
+        st.set_sapling_ticks(2);
+        let s = WorldGen::new(13).spawn_pos();
+        let (x, y, z) = (s.0, s.1, s.2);
+        // 挖苗取消。
+        world.set(x, y - 1, z, mc_world::DIRT_BLOCK_ID);
+        world.set(x, y, z, mc_world::OAK_SAPLING_BLOCK_ID);
+        st.plant_sapling(x, y, z);
+        world.set(x, y, z, mc_world::AIR_BLOCK_ID);
+        st.uproot_sapling(x, y, z);
+        for _ in 0..4 {
+            st.physics_tick(&world);
+        }
+        assert_eq!(world.get(x, y, z), mc_world::AIR_BLOCK_ID);
+        assert_eq!(st.sapling_count(), 0);
+        // 挖土取消（ticker 兜底：土壤没了就不长）。
+        world.set(x + 3, y - 1, z, mc_world::DIRT_BLOCK_ID);
+        world.set(x + 3, y, z, mc_world::OAK_SAPLING_BLOCK_ID);
+        st.plant_sapling(x + 3, y, z);
+        world.set(x + 3, y - 1, z, mc_world::AIR_BLOCK_ID);
+        for _ in 0..4 {
+            st.physics_tick(&world);
+        }
+        assert_eq!(world.get(x + 3, y, z), mc_world::OAK_SAPLING_BLOCK_ID, "soil gone must not grow");
+        assert_eq!(st.sapling_count(), 0, "soil gone must leave tracking");
+    }
+
+    #[test]
+    fn adopt_existing_saplings_recovers_after_restart() {
+        use mc_world::{MutableWorld, WorldGen};
+        let world = MutableWorld::new(14);
+        let s = WorldGen::new(14).spawn_pos();
+        world.set(s.0, s.1 - 1, s.2, mc_world::DIRT_BLOCK_ID);
+        world.set(s.0, s.1, s.2, mc_world::OAK_SAPLING_BLOCK_ID);
+        let st = DropState::new(std::env::temp_dir(), 14);
+        st.set_sapling_ticks(3);
+        assert_eq!(st.sapling_count(), 0);
+        st.adopt_existing_saplings(&world);
+        assert_eq!(st.sapling_count(), 1);
+        for _ in 0..3 {
+            st.physics_tick(&world);
+        }
+        assert_eq!(world.get(s.0, s.1, s.2), mc_world::OAK_LOG_BLOCK_ID);
     }
 }

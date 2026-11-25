@@ -74,6 +74,8 @@ pub async fn serve(listener: TcpListener, tx: Sender<NewConnection>, config: Net
         }
         // P22：重启后把存量小麦重新纳入生长（内存跟踪丢失，override 还在）。
         drops.adopt_existing_crops(world);
+        // P26：存量树苗同口径重计时认领。
+        drops.adopt_existing_saplings(world);
         if drops.start_global_tick(Arc::clone(world)) {
             info!("global drop physics ticker started ({}ms)", drop_state::DROP_TICK_MS);
         } else {

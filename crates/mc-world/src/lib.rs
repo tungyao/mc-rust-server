@@ -108,6 +108,11 @@ pub const WHEAT_CROP_BASE_ID: u16 = registry_id(mc_registry::BLOCKS, "minecraft:
 pub const WHEAT_MAX_AGE: u8 = 7;
 /// 小麦每生长一阶段的全局 tick 数（50ms/拍 → 1200 拍 = 60s；固定时长，原版随机 tick 差异见 HANDOFF）。
 pub const WHEAT_TICKS_PER_STAGE: u64 = 1200;
+/// P26 树苗长成小橡树的全局 tick 数（50ms/拍 → 7200 拍 = 360s = 6min；
+/// 生产值 5~10min 区间内；测试经 `set_sapling_ticks` 调小，仿 P22）。
+pub const SAPLING_GROW_TICKS: u64 = 7200;
+/// P26 运行时小橡树干高度（固定 4；世界生成树 4~6，这里取下限做缩小版）。
+pub const SAPLING_TRUNK_H: i32 = 4;
 
 /// 小麦 age → blockstate ID（age > 7 按 7 钳制）。
 pub fn wheat_stage_id(age: u8) -> u16 {
@@ -118,6 +123,40 @@ pub fn wheat_stage_id(age: u8) -> u16 {
 pub fn wheat_age(id: u16) -> Option<u8> {
     let age = id.wrapping_sub(WHEAT_CROP_BASE_ID);
     if age <= WHEAT_MAX_AGE as u16 { Some(age as u8) } else { None }
+}
+
+/// P26 运行时小橡树形状：复刻 `worldgen::WorldGen::write_tree` 的冠形逻辑，
+/// 干高固定为 [`SAPLING_TRUNK_H`]（世界生成树 4~6 的缩小版，偏差见 HANDOFF）。
+/// 输入树苗格 `(sx,sy,sz)`（树干基座 = 树苗本身所在格）；
+/// 返回 trunk 在前、leaves 在后的有序列表（调用方先放 trunk 再放 leaves，
+/// leaves 被 trunk 占位时跳过，与世界生成“trunk 可覆盖 leaves、leaves 只盖 air”同口径；
+/// 运行时在此基础上要求目标为空气才放，见 `DropState::tick_saplings`）。
+pub fn sapling_oak_blocks(sx: i32, sy: i32, sz: i32) -> Vec<((i32, i32, i32), u16)> {
+    let top = sy + SAPLING_TRUNK_H as i32 - 1;
+    let mut out = Vec::with_capacity(57);
+    for y in sy..=top {
+        out.push(((sx, y, sz), OAK_LOG_BLOCK_ID));
+    }
+    for dy in -2i32..=1 {
+        let y = top + dy;
+        for dx in -2i32..=2 {
+            for dz in -2i32..=2 {
+                let shape = match dy {
+                    -2 | -1 => !(dx.abs() == 2 && dz.abs() == 2),
+                    0 => dx.abs() <= 1 && dz.abs() <= 1,
+                    _ => dx.abs() + dz.abs() <= 1,
+                };
+                if !shape {
+                    continue;
+                }
+                if dx == 0 && y >= sy && y <= top && dz == 0 {
+                    continue; // 树干柱：trunk 已占，leaves 不重复
+                }
+                out.push(((sx + dx, y, sz + dz), OAK_LEAVES_BLOCK_ID));
+            }
+        }
+    }
+    out
 }
 
 /// 按 y 分层的地形带：y <= GROUND_LEVEL 石头，61..=63 泥土，64 草方块，其余空气。
@@ -419,5 +458,47 @@ mod tests {
         assert_eq!(view_chunks(mc_core::ChunkPos(1, 2), 0), vec![mc_core::ChunkPos(1, 2)]);
         assert!(view_chunks(mc_core::ChunkPos(0, 0), -1).is_empty());
         assert_eq!(view_chunks(mc_core::ChunkPos(0, 0), 1).len(), 9);
+    }
+
+    #[test]
+    fn sapling_oak_shape_is_deterministic_worldgen_subset() {
+        // 确定性：同位点两次形状逐项一致；不同位点只是平移。
+        let a = sapling_oak_blocks(0, 70, 0);
+        let b = sapling_oak_blocks(0, 70, 0);
+        assert_eq!(a, b);
+        let c = sapling_oak_blocks(10, 70, -5);
+        assert_eq!(a.len(), c.len());
+        for (i, (((x, y, z), _), ((cx, cy, cz), _))) in a.iter().zip(c.iter()).enumerate() {
+            assert_eq!((cx - x, cy - y, cz - z), (10, 0, -5), "shape must translate rigidly {i}");
+        }
+        // trunk 4（sy..sy+3）+ leaves 53 = 57 格；trunk 在前。
+        assert_eq!(a.len(), 57, "4 trunk + 53 leaves, see HANDOFF P26");
+        let trunks: Vec<_> = a.iter().filter(|(_, id)| *id == OAK_LOG_BLOCK_ID).collect();
+        assert_eq!(trunks.len(), SAPLING_TRUNK_H as usize);
+        for (i, ((x, y, z), _)) in trunks.iter().enumerate() {
+            assert_eq!((*x, *z), (0, 0));
+            assert_eq!(*y, 70 + i as i32);
+        }
+        // 冠形贴 worldgen：top-2/top-1 去角 5x5（各 21），top 3x3（9），top+1 十字（5），
+        // 减去与树干柱重叠的 3 格 = 53。
+        let leaves: Vec<_> = a.iter().filter(|(_, id)| *id == OAK_LEAVES_BLOCK_ID).collect();
+        assert_eq!(leaves.len(), 53);
+        // 去角层不含四角。
+        for (dx, dz) in [(2, 2), (2, -2), (-2, 2), (-2, -2)] {
+            assert!(
+                !leaves.iter().any(|((x, y, z), _)| (*x, *y, *z) == (dx, 71, dz)),
+                "top-2 must drop corners"
+            );
+            assert!(
+                !leaves.iter().any(|((x, y, z), _)| (*x, *y, *z) == (dx, 72, dz)),
+                "top-1 must drop corners"
+            );
+        }
+        // 顶十字层只含 |dx|+|dz|<=1。
+        for ((x, y, z), _) in leaves {
+            if *y == 74 {
+                assert!(x.abs() + z.abs() <= 1, "top+1 must be a cross");
+            }
+        }
     }
 }

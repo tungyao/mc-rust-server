@@ -218,11 +218,25 @@ async fn play_loop(
                                         break;
                                     }
                                     // P22：挖掉小麦即摘除生长跟踪（ticker 懒摘除是兜底）。
+                                    // P26：挖苗/挖土同理（所在土被挖则其上方树苗取消生长）。
                                     for c in &outcome.changes {
                                         if c.new_id == mc_world::AIR_BLOCK_ID
                                             && mc_world::wheat_age(c.old_id).is_some()
                                         {
                                             ds.uproot_crop(c.x, c.y, c.z);
+                                        }
+                                        if c.new_id == mc_world::AIR_BLOCK_ID
+                                            && c.old_id == mc_world::OAK_SAPLING_BLOCK_ID
+                                        {
+                                            ds.uproot_sapling(c.x, c.y, c.z);
+                                        }
+                                        if c.new_id == mc_world::AIR_BLOCK_ID
+                                            && (c.old_id == mc_world::GRASS_BLOCK_ID
+                                                || c.old_id == mc_world::DIRT_BLOCK_ID)
+                                            && world.get(c.x, c.y + 1, c.z)
+                                                == mc_world::OAK_SAPLING_BLOCK_ID
+                                        {
+                                            ds.uproot_sapling(c.x, c.y + 1, c.z);
                                         }
                                     }
                                 }
@@ -285,10 +299,14 @@ async fn play_loop(
                                     }
                                     if planted {
                                         if let Some(ds) = &opts.drops {
-                                            // 仅小麦登记生长；树苗长成树留后续。
+                                            // 小麦登记多阶段生长；树苗登记单次长树（P26）。
                                             if plant_id == mc_world::WHEAT_CROP_BASE_ID {
                                                 if let Some(c) = outcome.changes.first() {
                                                     ds.plant_crop(c.x, c.y, c.z);
+                                                }
+                                            } else if plant_id == mc_world::OAK_SAPLING_BLOCK_ID {
+                                                if let Some(c) = outcome.changes.first() {
+                                                    ds.plant_sapling(c.x, c.y, c.z);
                                                 }
                                             }
                                             let consumed = ds.with_inventory(opts.conn_id, |inv| {

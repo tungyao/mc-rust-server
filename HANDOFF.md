@@ -573,6 +573,35 @@ $natives = 'C:\Users\qwe\AppData\Local\Temp\mc263natives'
       拾取入库；阶段间隔经 `set_stage_ticks(10)` 调小，生产 1200 不变）。
       旧 23 项一个字未动，全绿。遗留 TODO：原版真机复验（种植手感/生长可见/收割拾取）；
       耕地+锄头+水源加速；骨粉；作物被水/挖掘连带破坏；生长跨重启精确计时（持久化 planted）。
+19. **P26 树苗长成橡树（本轮，已实现，未真机）**：`mc-world::sapling_oak_blocks`
+    （trunk 在前、leaves 在后，复刻 `worldgen::write_tree` 冠形：top-2/top-1 去角 5×5、
+    top 3×3、top+1 十字；干高固定 4 = 世界生成 4~6 的缩小版下限，57 格）+
+    `DropState::tick_saplings`（全服唯一 50ms ticker 内，连接侧绝不推进）+
+    `plant_sapling`/`uproot_sapling`/`sapling_count`/`set_sapling_ticks`/
+    `adopt_existing_saplings`（`serve` 在 `adopt_existing_crops` 后调用）。
+    种下经 `decide_plant` 同路径（P23 已有），落子成功即 `plant_sapling` 登记；
+    到期（生产 `SAPLING_GROW_TICKS=7200` ≈ 6min，5~10min 区间内）树苗格恒变原木、
+    其余 56 格只在空气时放（被占跳过，不覆盖玩家建筑），多格变更逐格
+    `MutableWorld::set` + 受影响 chunk 失效 + hub 广播（`except=u64::MAX`，全体视距内都收）。
+    树苗被挖/所在土被挖即 `uproot_sapling`（挖掘路径显式摘除 + ticker 懒摘除兜底，
+    土壤检查是与小麦不同的新增条件）；生长跨重启与小麦同口径（`adopt_existing_saplings`
+    从重启动时刻重计时，不持久化 planted）。
+    - **跟踪结构二选一**：另起 `saplings: (x,y,z)→planted_tick` 同构 map，不复用 `crops`。
+      作物是多阶段 age 推进（`planted/stage` + `stage_ticks`），树苗是单次到期替换为多格树
+      （`planted` + `sapling_ticks`）；计时、落子（单格 vs 57 格广播）、摘除条件
+      （树苗多查土壤）语义完全不同，共用一表只会把两种间隔/阶段耦合在一起。
+    - **与原版差异（有意 MVP）**：固定时长生长（原版随机 tick + 生长阶段）；
+      无光照/空间校验（原版要亮度≥9 + 上方净空/横向空间，夜间不长、遮挡不长，
+      本轮只要土壤是草/泥土、目标格空气就放，被占只跳过该格）；
+      无树叶 decay/苹果掉落（树叶只走通用挖掘掉落表）；无骨粉催熟；
+      生长不持久化 planted（重启重计时）；大树/白桦/变种一律不做，只有固定 4 高小橡树。
+    - 测试：`lib` 单测（形状确定性/57 格/去角/十字/平移）+ `drop_state` 单测
+      （到期长树/被占跳过/挖苗取消/挖土取消/重启认领）+ `play_actions.rs` 新增 1 个 e2e
+      （种树苗→BlockUpdate 30→扣苗；调小 `set_sapling_ticks(10)` 后出现 log 140 +
+      leaves 294；挖树干→BlockUpdate 0 + Ack + Spawn/Data 掉 log 163）。
+      旧 25 项（play_stream 17 + play_actions 8）一个字未动，全绿。
+      遗留 TODO：原版真机复验（种植手感/生长可见/砍树拾取）；骨粉；光照/净空校验；
+      大树/多变种；树叶 decay/苹果；生长跨重启精确计时。
 
 ## 6. 关键文件
 
