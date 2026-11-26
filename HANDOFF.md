@@ -7,8 +7,8 @@
 > 但除 P18 早期真机外，上述新增功能均**未做原版客户端真机复验**（见 §5 各条 TODO）。
 > `p31-xp-orbs` 经验球已合入（`2563ebe`，见 §5.26）；当前待办：`p33-multi-crop-planting`
 > （多作物种植，很多作物目前种不了）；`p32-broadcast-chat` 暂缓；
-> 后台管理面板已用 Vue 3 + Naive UI 重写并合入（`p34-admin-vue` / `53f1016`），
-> 正在改为完全离线本地打包（`p35-admin-offline`）。
+> 后台管理面板已用 Vue 3 + Naive UI 重写并**完全离线化**合入（`p34-admin-vue` / `53f1016`、
+> `p35-admin-offline` / `48e14bd`，见 §5.25）；当前无进行中的派发任务。
 
 ## 1. 一句话现状
 
@@ -716,15 +716,22 @@ $natives = 'C:\Users\qwe\AppData\Local\Temp\mc263natives'
     种子 → blockstate 映射（各自生长阶段与成熟掉落），保留现有小麦/树苗/骨粉/树叶 decay
     行为（用户确认这些均正常），不改扔东西与后台 API 语义。任务见
     `tasks/p33-multi-crop-planting.json`。
-25. **后台管理面板 Vue + Naive UI 重写（已完成并合入，`p34-admin-vue` / `53f1016`）**：
-    `crates/mc-server/src/admin_page.html` 由 208 行原生 JS 单文件改为 370 行 Vue 3.5.13 +
-    Naive UI 2.41.0 单文件（ESM CDN + importmap，零构建、零 Rust 依赖，仍 `include_str!` 走 `GET /`）。
-    **权衡**：浏览器需联网从 esm.sh 加载前端资源；加载失败有可见降级提示，非白屏；
-    如需完全离线可后续改本地打包 dist。后端 `admin.rs` 800 行 / `admin_items.rs` 215 行零改动，
-    API（`/api/online`/`world`/`items`/`inventory`/`give`/`kick`/`save`）与 3 个 admin_e2e 一字未动，
-    336 passed / 0 failed；broadcast 仍 501 stub，页面只显示说明不发包。
-    验证仅到 HTTP 层 + Vue 模板编译检查（环境无浏览器，未做真实渲染）。
-    **后续 `p35-admin-offline` 改为完全离线本地打包（Vite 单文件内联），见进度更新。**
+25. **后台管理面板 Vue + Naive UI 重写 + 完全离线化（已完成并合入：`p34-admin-vue` / `53f1016`，
+    `p35-admin-offline` / `48e14bd`）**：`crates/mc-server/src/admin_page.html` 从 208 行原生 JS
+    改为 1901 行**单文件自包含** Vue 3.5.13 + Naive UI 2.41.0 构建产物（JS/CSS 全内联，
+    559,059 B，sha256 `b2047a5b…b552`），仍 `include_str!` + `GET /`，**运行时零外网请求**。
+    - 源码在 `admin-ui/`（Vite 5.4.21 + vite-plugin-singlefile 2.3.4；
+      `vue` 别名指向 `vue.esm-bundler.js` 以编译字符串模板并与 Naive UI 共用实例）；
+      `package-lock.json` 已提交，`npm ci && npm run build` 可复现同一产物；
+      `node_modules/`、`dist/` 已忽略。构建脚本 `postbuild.mjs` 做离线断言并复制产物。
+      注：产物中 Vue/Naive UI 的 XML 命名空间等纯字符串 URL 被转义为 `\/`，运行时取值不变，
+      因此文件里没有任何 `http(s)://` 字面量。
+    - 后端 `admin.rs` 800 行 / `admin_items.rs` 215 行零改动，7 个 API 与 3 个 admin_e2e
+      一字未动；broadcast 仍 501 stub，页面只显示说明不发包。世界状态/存档、在线表/踢人、
+      1658 物品筛选发放、46 槽背包、5s/2s 轮询全部保留。
+    - 验证：`node admin-ui/scripts/check-offline.mjs` 通过（无外链/importmap/动态 import），
+      Playwright 无头 Chromium 实测外部请求 0、控制台错误 0、7 个 API 均被调用；
+      合并后 `cargo test --workspace` **347 passed / 0 failed**，`check_budget.sh` 绿。
 
 26. **P31 经验球（已合入 main，`2563ebe`）**：`mc-world/src/xp.rs` 新增独立 `XpOrbEntities`
     池（与物品池分离、共用全局 entity_id；物理口径沿用 P18：10 tick 延迟、1.5 格拾取、
@@ -787,6 +794,7 @@ crates/mc-server/src/
   movement.rs                PlayEvent 排空 + MovementQueue/Position/KeepAlive + PendingPlayerRemoval 唯一删除点（+BlockEdit 日志臂）
   play.rs                    ECS PlayScaffold：登录队列 + `last_view_radius/chunks` 诊断 + KeepAlive 计数（P16.1 无区块生成/编码；socket 未接入）
   persist.rs                 autosave_system（60s 周期/断线即刷；必须排在 player_removal 之前）+ SharedWorld/WorldSaveDir
+  admin.rs / admin_items.rs / admin_page.html   管理面板后端 + 离线 Vue/Naive UI 单文件产物（源码在 admin-ui/）
 docs/packet-map-777.md                 777 包 ID 对照表（权威；§6 挖掘/放置 9 个 ID；§7 P18 掉落/背包 10 个 ID + 物品/实体 ID 表）
 docs/registries-777.md                 注册表清单
 ```

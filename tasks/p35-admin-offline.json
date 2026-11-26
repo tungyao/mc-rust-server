@@ -1,13 +1,17 @@
 {
   "id": "p35-admin-offline",
   "title": "后台面板完全离线：Vite 本地打包 Vue3+NaiveUI 单文件",
-  "status": "doing",
+  "status": "done",
   "owner": "subagent-admin-offline",
   "priority": "p1",
   "deps": [],
   "branch": "",
   "created": "2026-11-26T01:50:43+00:00",
-  "updated": "2026-11-26T01:50:43+00:00",
-  "detail": "",
-  "files": []
+  "updated": "2026-11-26T02:06:30+00:00",
+  "detail": "Vite+vite-plugin-singlefile 本地打包 Vue3/NaiveUI 单文件(559KB)，零外网；npm ci复现逐字节一致；Playwright外部请求0；347 passed；merge 48e14bd",
+  "files": [
+    ".gitignore",
+    "admin-ui/",
+    "crates/mc-server/src/admin_page.html"
+  ]
 }
