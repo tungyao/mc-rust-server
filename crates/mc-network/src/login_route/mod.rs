@@ -7,6 +7,7 @@ pub mod block_edit;
 pub mod crops;
 pub mod drop_sync;
 pub mod login;
+pub mod survival_sync;
 pub mod view_sync;
 
 pub use self::block_edit::{
@@ -20,6 +21,7 @@ use self::drop_sync::{
     handle_throw_action, send_ack_only, send_full_inventory, send_held_slot, spawn_drops,
     spawn_thrown_items, tick_drops,
 };
+use self::survival_sync::apply_fall_and_sync;
 use self::login::{emit_play_event, read_packet_any, user_tag, write_packet_any};
 use self::view_sync::{maybe_flush_view, queue_view_move, PendingViewMove};
 use crate::broadcast::{QueuedPacket, ADMIN_KICK_PACKET_ID};
@@ -80,6 +82,10 @@ async fn play_loop(
     // 只服务本连接自己的 Q 扔（`spawn_thrown_items` 生成点/初速），多人广播不需要
     // 对端朝向，故 `BroadcastHub` 不加字段（LK/快照语义只覆盖 pos/radius）。
     let mut last_look: (f32, f32) = (0.0, 0.0);
+    // P40 坠落判定：记录离地后的最高 y，落地 on_ground 时按 (peak - y - 3) 扣血。
+    // 只用移动包自带的 flags，不新增协议包、不在连接侧推进任何 tick。
+    let mut fall_peak_y: f64 = last_pos.1;
+    let mut was_on_ground: bool = true;
     // 客户端在 Play 里每 tick 都发 0x0D，read_packet 不会超时；必须按时间主动发 KeepAlive，
     // 否则客户端 30s 收不到 0x2D 会 “连接超时” 断开（2026-11-23 真机实测）。
     let mut last_keepalive = Instant::now();
@@ -162,21 +168,64 @@ async fn play_loop(
                         // 跨区块只记目标中心，真正发包交给节流窗口（窗口到期或次数上限）。
                         // 这样连续跨区块会合并成一次 SetCenterChunk/Unload/ChunkBatch，
                         // 掉落 Spawn 不再排在几十个边界批次后面。
+                        let mut fall_blocks: Option<f64> = None;
+                        let on_ground;
                         match m {
                             packets::C2SMovement::Pos(p) => {
                                 last_pos = (p.x, p.y, p.z);
+                                on_ground = p.on_ground;
+                                if p.on_ground {
+                                    // 只有先离地、再落地才结算（避免脚本/传送把 y 直接改小误伤）。
+                                    if !was_on_ground {
+                                        fall_blocks = Some(fall_peak_y - p.y);
+                                    }
+                                    fall_peak_y = p.y;
+                                } else if p.y > fall_peak_y {
+                                    fall_peak_y = p.y;
+                                }
                                 queue_view_move(&mut pending_view, view.center(), p.x, p.z);
                             }
                             packets::C2SMovement::PosRot(p) => {
                                 last_pos = (p.x, p.y, p.z);
                                 last_look = (p.yaw, p.pitch);
+                                on_ground = p.on_ground;
+                                if p.on_ground {
+                                    if !was_on_ground {
+                                        fall_blocks = Some(fall_peak_y - p.y);
+                                    }
+                                    fall_peak_y = p.y;
+                                } else if p.y > fall_peak_y {
+                                    fall_peak_y = p.y;
+                                }
                                 queue_view_move(&mut pending_view, view.center(), p.x, p.z);
                             }
                             packets::C2SMovement::Rot(p) => {
                                 // 纯旋转：位置不动，只刷新朝向（P28 前这里被 `_` 吞掉）。
                                 last_look = (p.yaw, p.pitch);
+                                on_ground = p.on_ground;
                             }
-                            _ => {}
+                            packets::C2SMovement::Flags(f) => {
+                                on_ground = f.on_ground;
+                            }
+                        }
+                        // Status-only 落地包：位置不变，同样按峰值差结算坠落伤害。
+                        if on_ground && !was_on_ground && fall_blocks.is_none() {
+                            fall_blocks = Some(fall_peak_y - last_pos.1);
+                            fall_peak_y = last_pos.1;
+                        }
+                        was_on_ground = on_ground;
+                        // P40：只在连接侧判定并同步，真正伤害按全局 ticker/权威状态推进。
+                        if let Some(blocks) = fall_blocks {
+                            if blocks > mc_world::survival::FALL_SAFE_BLOCKS {
+                                if let Some(ds) = &opts.drops {
+                                    if let Err(e) =
+                                        apply_fall_and_sync(stream, opts, ds, blocks).await
+                                    {
+                                        debug!("play uuid={} fall sync failed ({e}), closing", profile.uuid);
+                                        break;
+                                    }
+                                }
+                            }
                         }
                         // P21：广播集用接收方 last_pos，跨区块后自然跟随。
                         if let Some(hub) = &opts.hub {
@@ -734,6 +783,13 @@ async fn play_loop(
                             .and_then(|ds| ds.with_inventory(opts.conn_id, |inv| inv.held()).flatten())
                             .and_then(|(item_id, _)| mc_world::block_for_item(item_id));
                         let Some(place_id) = place_id else {
+                            // P40：手持食物对方块右键也按进食处理（原版右键食物会吃）。
+                            if let Some(ds) = &opts.drops {
+                                if let Err(e) = survival_sync::eat_held(stream, opts, ds).await {
+                                    debug!("play uuid={} eat-on-block failed ({e}), closing", profile.uuid);
+                                    break;
+                                }
+                            }
                             let mut ack = Vec::new();
                             mc_protocol::write_varint(act.sequence, &mut ack);
                             if let Err(e) = write_packet_any(
@@ -790,8 +846,15 @@ async fn play_loop(
             }
             Ok((id, payload)) if id == packets::PLAY_USE_ITEM_C2S_ID => {
                 // 空手使用：无世界影响，只 ack 序列号让客户端预测对齐。
+                // P40：手持食物右键（对空使用）→ 权威扣 1 个 + 恢复饥饿/饱和 + SetHealth。
                 match packets::UseItem::decode_body(&payload) {
                     Ok((act, _)) => {
+                        if let Some(ds) = &opts.drops {
+                            if let Err(e) = survival_sync::eat_held(stream, opts, ds).await {
+                                debug!("play uuid={} eat sync failed ({e}), closing", profile.uuid);
+                                break;
+                            }
+                        }
                         let mut ack = Vec::new();
                         mc_protocol::write_varint(act.sequence, &mut ack);
                         if let Err(e) =
@@ -836,6 +899,13 @@ async fn play_loop(
                                 "play uuid={} click non-player window {} ignored",
                                 profile.uuid, click.container_id
                             );
+                        } else if click.slot == mc_world::crafting::RESULT_SLOT as i16 {
+                            // P40：结果槽由服务端权威判定配方；槽 0 永远不能手动放东西。
+                            if let Some(ds) = &opts.drops {
+                                ds.with_inventory(opts.conn_id, |inv| {
+                                    inv.craft_result(click.button);
+                                });
+                            }
                         } else if let Some(ds) = &opts.drops {
                             if click.click_type == packets::CLICK_THROW {
                                 thrown = ds

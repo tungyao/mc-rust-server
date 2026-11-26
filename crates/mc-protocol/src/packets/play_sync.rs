@@ -14,6 +14,43 @@ pub const PLAY_PLAYER_POSITION_SYNC_ID: i32 = super::packet_id("clientbound.play
 /// KeepAlive S2C/C2S 包 ID（Play CB `0x2D` / SB `0x1C` keep_alive）。已按P4A对照表核对777（旧值0x26实为unload_chunk/0x1A实为interact）。
 pub const PLAY_KEEPALIVE_S2C_ID: i32 = super::packet_id("clientbound.play", "keep_alive");
 pub const PLAY_KEEPALIVE_C2S_ID: i32 = super::packet_id("serverbound.play", "keep_alive");
+/// Set Health S2C 包 ID（Play CB `set_health`，777 = 106 = 0x6A），由
+/// `data/777/packets.json` 经 mc-registry 生成表查得，不手写字节。
+/// 包体（minecraft.wiki Play#Set_Health，26.3）：Health Float / Food VarInt /
+/// Food Saturation Float（顺序固定；0 血=死亡，满血=20，满饱食度=20，满饱和=5.0）。
+pub const PLAY_SET_HEALTH_S2C_ID: i32 = super::packet_id("clientbound.play", "set_health");
+
+/// S2C Set Health（生命/饥饿/饱和三点状态，字段顺序见上面的 wiki 口径）。
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct SetHealth {
+    pub health: f32,
+    pub food: i32,
+    pub saturation: f32,
+}
+
+impl SetHealth {
+    pub fn encode_body(&self, out: &mut Vec<u8>) {
+        write_f32_be(self.health, out);
+        write_varint(self.food, out);
+        write_f32_be(self.saturation, out);
+    }
+
+    pub fn decode_body(buf: &[u8]) -> Result<(Self, usize), ProtocolError> {
+        let (health, mut off) = read_f32_be(&buf[0..])?;
+        let (food, n) = read_varint(&buf[off..])?;
+        off += n;
+        let (saturation, n) = read_f32_be(&buf[off..])?;
+        off += n;
+        Ok((Self { health, food, saturation }, off))
+    }
+}
+
+/// SetHealth 打成完整线包（测试模拟服务端/单测用）。
+pub fn encode_set_health_packet(v: &SetHealth, out: &mut Vec<u8>) {
+    let mut body = Vec::new();
+    v.encode_body(&mut body);
+    encode_packet(PLAY_SET_HEALTH_S2C_ID, &body, out);
+}
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct PlayerPositionSync {
@@ -376,6 +413,27 @@ mod tests {
         got.encode_body(&mut re);
         assert_eq!(re, body, "player_position 编码必须与原版抓包逐字节一致");
     }
+    /// P40：set_health 包 ID 从生成表查得 106（0x6A），包体 Float+VarInt+Float。
+    #[test]
+    fn set_health_id_and_body_roundtrip() {
+        assert_eq!(PLAY_SET_HEALTH_S2C_ID, 106);
+        let v = SetHealth { health: 20.0, food: 20, saturation: 5.0 };
+        let mut body = Vec::new();
+        v.encode_body(&mut body);
+        assert_eq!(body.len(), 9, "Float health + VarInt food + Float saturation");
+        let (got, used) = SetHealth::decode_body(&body).unwrap();
+        assert_eq!(used, body.len());
+        assert_eq!(got, v);
+        let mut pkt = Vec::new();
+        encode_set_health_packet(&v, &mut pkt);
+        let (_, n) = read_varint(&pkt).unwrap();
+        let (id, m) = decode_packet_id(&pkt[n..]).unwrap();
+        assert_eq!(id, PLAY_SET_HEALTH_S2C_ID);
+        let (decoded, _) = SetHealth::decode_body(&pkt[n + m..]).unwrap();
+        assert_eq!(decoded, v);
+        assert_eq!(mc_registry::packet_id_in("clientbound.play", "set_health"), Some(106));
+    }
+
     #[test]
     fn play_keepalive_roundtrip() {
         let mut b = Vec::new(); encode_keepalive_s2c_packet(7, &mut b);

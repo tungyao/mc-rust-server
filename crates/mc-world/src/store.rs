@@ -319,14 +319,22 @@ fn decode_journal(seq: u64, b: &[u8]) -> Result<JournalRecord, StoreError> {
     })
 }
 
-/// 玩家记录：`version u8 | selected u8 | state i32 | xp i32 | slot_count u8`
-/// + 每个非空槽 `slot u8 | item i32 | count i32`（9B）。
+/// 玩家记录：
+/// - v1：`version u8(1) | selected u8 | state i32 | xp i32 | slot_count u8`
+/// - v2（P40）：`version u8(2) | selected u8 | state i32 | xp i32 |
+///   health f32 | food i32 | saturation f32 | slot_count u8`
+/// 之后都是每个非空槽 `slot u8 | item i32 | count i32`（9B）。v1 旧记录仍可读，
+/// 生存字段缺省为满状态（与 `.dat` v1/v2 同口径）。
 fn encode_player(inv: &PlayerInventory) -> Vec<u8> {
-    let mut b = Vec::with_capacity(11 + SLOT_COUNT * 9);
-    b.push(1);
+    let mut b = Vec::with_capacity(23 + SLOT_COUNT * 9);
+    b.push(2);
     b.push(inv.selected());
     b.extend_from_slice(&inv.state_id().to_be_bytes());
     b.extend_from_slice(&inv.total_xp().to_be_bytes());
+    let surv = inv.survival();
+    b.extend_from_slice(&surv.health.to_be_bytes());
+    b.extend_from_slice(&surv.food.to_be_bytes());
+    b.extend_from_slice(&surv.saturation.to_be_bytes());
     let entries: Vec<(usize, i32, i32)> = (0..SLOT_COUNT)
         .filter_map(|i| inv.get(i).map(|(id, c)| (i, id, c)))
         .collect();
@@ -340,13 +348,18 @@ fn encode_player(inv: &PlayerInventory) -> Vec<u8> {
 }
 
 fn decode_player(b: &[u8]) -> Result<PlayerInventory, StoreError> {
-    if b.len() < 11 || b[0] != 1 {
-        return Err(StoreError::BadRecord("bad player record header".into()));
+    let (version, header_len) = match b.first().copied() {
+        Some(1) => (1u8, 11usize),
+        Some(2) => (2u8, 23usize),
+        _ => return Err(StoreError::BadRecord("bad player record header".into())),
+    };
+    if b.len() < header_len {
+        return Err(StoreError::BadRecord("truncated player record header".into()));
     }
     let selected = b[1];
     let state = i32::from_be_bytes(take::<4>(b, 2)?);
     let xp = i32::from_be_bytes(take::<4>(b, 6)?);
-    let count = b[10] as usize;
+    let count = b[header_len - 1] as usize;
     if count > SLOT_COUNT {
         return Err(StoreError::BadRecord(format!("too many player slots {count}")));
     }
@@ -354,7 +367,13 @@ fn decode_player(b: &[u8]) -> Result<PlayerInventory, StoreError> {
     inv.set_selected(selected);
     inv.set_state_id(state);
     inv.set_total_xp(xp);
-    let mut off = 11;
+    if version == 2 {
+        let health = f32::from_be_bytes(take::<4>(b, 10)?);
+        let food = i32::from_be_bytes(take::<4>(b, 14)?);
+        let saturation = f32::from_be_bytes(take::<4>(b, 18)?);
+        inv.set_survival(crate::survival::SurvivalState { health, food, saturation });
+    }
+    let mut off = header_len;
     for _ in 0..count {
         let slot = b[off] as usize;
         let id = i32::from_be_bytes(take::<4>(b, off + 1)?);
@@ -1383,6 +1402,29 @@ mod tests {
         let world = crate::MutableWorld::with_store(seed, Arc::new(again)).unwrap();
         assert_eq!(world.get(10, 100, 10), STONE_BLOCK_ID);
         assert_eq!(world.get(11, 100, 11), DIRT_BLOCK_ID);
+        cleanup(&dir);
+    }
+
+    /// P40：生存字段随 players 表 roundtrip；v1 旧记录（无生存字段）读回满状态。
+    #[test]
+    fn player_record_survival_roundtrip_and_legacy_v1() {
+        let dir = tmp("player-survival");
+        let store = WorldStore::open(&dir, 70).unwrap();
+        let mut inv = PlayerInventory::new();
+        inv.add_item(55, 3);
+        inv.set_survival(crate::survival::SurvivalState { health: 9.5, food: 4, saturation: 1.0 });
+        store.save_player("survivor", &inv).unwrap();
+        let back = store.load_player("survivor").unwrap().unwrap();
+        assert_eq!(back.survival(), inv.survival());
+        assert_eq!(back.total_xp(), inv.total_xp());
+        // v1 旧记录（无生存字段）经 decode_player 读回仍是满状态。
+        let mut v1 = vec![1u8, 0];
+        v1.extend_from_slice(&1i32.to_be_bytes());
+        v1.extend_from_slice(&7i32.to_be_bytes());
+        v1.push(0);
+        let old = decode_player(&v1).unwrap();
+        assert_eq!(old.total_xp(), 7);
+        assert_eq!(old.survival(), crate::survival::SurvivalState::full());
         cleanup(&dir);
     }
 

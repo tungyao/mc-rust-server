@@ -438,6 +438,18 @@ async fn send_join_inventory(
             debug!("play uuid={} join held sync failed ({e})", profile.uuid);
         }
     }
+    // P40 Join 生存同步：新玩家默认满血/满饥饿/饱和=5 与客户端默认完全一致，
+    // 发一个相同的 SetHealth 只会改变既有包序（403 个既有 e2e 一字不改必须全绿），
+    // 故只在读盘得到的生存状态非满值时发送；非满值的重进/进食/受伤必发。
+    let needs_health = drops
+        .survival_state(opts.conn_id)
+        .map(|s| s != mc_world::SurvivalState::full())
+        .unwrap_or(false);
+    if needs_health {
+        if let Err(e) = super::survival_sync::send_set_health(stream, opts, drops, opts.conn_id).await {
+            debug!("play uuid={} join health sync failed ({e})", profile.uuid);
+        }
+    }
 }
 
 /// 压缩感知写包：threshold>=0 走压缩帧，否则普通帧。
