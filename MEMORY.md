@@ -70,3 +70,4 @@
 - [2026-11-26 01:41 UTC] agent=subagent-admin-vue task=p34-admin-vue status=start detail=claim files=
 - [2026-11-26 01:42 UTC] agent=main task=handoff-refresh status=done detail=修正HANDOFF过期描述：P19-P28已合入main、放置无石头回退/点击背包P18.1/P21广播/数据驱动/336测试实跑；新增§5.24 P33多作物与§5.25 Vue面板 files=HANDOFF.md
 - [2026-11-26 01:42 UTC] agent=main task=p31-p34-dispatch status=done detail=p32 blocked暂缓；新建p33多作物(todo)与p34-admin-vue(p1)；claim p31/p34并建worktree分支p31-xp-orbs、p34-admin-vue并行派发；两agent禁改tasks/HANDOFF/MEMORY、禁push files=tasks/*,worktrees/
+- [2026-11-26 01:47 UTC] agent=subagent-admin-vue task=p34-admin-vue status=done detail=Vue3.5.13+NaiveUI2.41.0 CDN/importmap 单文件重写 admin_page.html，零构建/零Rust改动，7个API与3个admin_e2e不变；336 passed；merge 53f1016 files=crates/mc-server/src/admin_page.html
