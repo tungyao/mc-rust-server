@@ -58,6 +58,47 @@ fn ensure_world_storage_key(path: &Path) {
     let _ = std::fs::write(path, updated);
 }
 
+/// 生成器版本默认值：v1=legacy 永久冻结；v2 只对新 seed / 显式配置启用。
+pub const DEFAULT_GENERATOR_VERSION: u32 = 1;
+
+/// 旧 `server.toml` 缺 `generator_version` 键时补一行（默认 1，老 seed 不受影响）。
+fn ensure_generator_version_key(path: &Path) {
+    let Ok(text) = std::fs::read_to_string(path) else { return };
+    if text.contains("generator_version") {
+        return;
+    }
+    let mut updated = text;
+    if !updated.ends_with('\n') {
+        updated.push('\n');
+    }
+    updated.push_str("\n# P44 world generator: 1=legacy (frozen default), 2=new-seed visuals\ngenerator_version = 1\n");
+    let _ = std::fs::write(path, updated);
+}
+
+/// 读取生成器版本（独立 toml 键，避免给穷举的 `ServerConfig` 字面量加字段）。
+/// 只有 1/2 合法；非法值警告后回退 v1。
+pub fn load_generator_version(path: impl AsRef<Path>) -> u32 {
+    let path = path.as_ref();
+    let Ok(text) = std::fs::read_to_string(path) else { return DEFAULT_GENERATOR_VERSION };
+    ensure_generator_version_key(path);
+    let value = match toml::from_str::<toml::Value>(&text) {
+        Ok(v) => v.get("generator_version").and_then(|x| x.as_integer()),
+        Err(_) => None,
+    };
+    match value {
+        Some(1) => 1,
+        Some(2) => 2,
+        Some(other) => {
+            eprintln!(
+                "warn: {}: generator_version {other} unsupported (expected 1|2), defaulting to 1",
+                path.display()
+            );
+            DEFAULT_GENERATOR_VERSION
+        }
+        None => DEFAULT_GENERATOR_VERSION,
+    }
+}
+
 /// 读取存储后端开关（缺键按默认 redb 补齐到文件）。非法值警告后回退默认。
 pub fn load_world_storage(path: impl AsRef<Path>) -> WorldStorage {
     let path = path.as_ref();
@@ -130,6 +171,7 @@ impl ServerConfig {
         let path = path.as_ref();
         let cfg = Self::load_or_create_inner(path)?;
         ensure_world_storage_key(path);
+        ensure_generator_version_key(path);
         Ok(cfg)
     }
 
@@ -269,6 +311,26 @@ mod tests {
         assert_eq!(load_world_storage(&p), WorldStorage::Redb);
         std::fs::write(&p, "seed = 42\nworld_storage = \"nonsense\"\n").unwrap();
         assert_eq!(load_world_storage(&p), WorldStorage::Redb, "unknown value falls back to default");
+        let _ = std::fs::remove_file(&p);
+    }
+
+    /// P44 开关：独立 toml 键，缺键补 1，1/2 合法，非法值回退 1。
+    #[test]
+    fn generator_version_switch_reads_1_and_2_and_fills_missing_key() {
+        let p = tmp_toml();
+        std::fs::write(&p, "seed = 42\n").unwrap();
+        assert_eq!(load_generator_version(&p), 1);
+        let filled = std::fs::read_to_string(&p).unwrap();
+        assert!(filled.contains("generator_version = 1"), "old toml must gain the key");
+        // 旧测试穷举的 ServerConfig 字面量不需要新字段，仍可解析。
+        assert_eq!(ServerConfig::load_or_create(&p).unwrap().seed, 42);
+
+        std::fs::write(&p, "seed = 42\ngenerator_version = 2\n").unwrap();
+        assert_eq!(load_generator_version(&p), 2);
+        std::fs::write(&p, "seed = 42\ngenerator_version = 1\n").unwrap();
+        assert_eq!(load_generator_version(&p), 1);
+        std::fs::write(&p, "seed = 42\ngenerator_version = 9\n").unwrap();
+        assert_eq!(load_generator_version(&p), 1, "unknown value falls back to legacy");
         let _ = std::fs::remove_file(&p);
     }
 }

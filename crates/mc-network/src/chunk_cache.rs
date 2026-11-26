@@ -7,7 +7,7 @@
 //! P16 起 `bodies()` 用 rayon 并行生成/编码一批缺失区块（Join 441 块的主路径）。
 use mc_core::ChunkPos;
 use mc_protocol::packets;
-use mc_world::{MutableWorld, WorldGen};
+use mc_world::{GeneratorVersion, MutableWorld, WorldGen};
 use std::collections::{HashMap, VecDeque};
 use std::sync::{Arc, Mutex};
 use tracing::warn;
@@ -45,12 +45,25 @@ pub struct ChunkCacheStats {
     pub misses: u64,
 }
 
-#[derive(Debug, Default)]
+#[derive(Debug)]
 struct CacheInner {
     map: HashMap<ChunkPos, Arc<Vec<u8>>>,
     /// FIFO：命中不移动，只有新插入才 push_back；淘汰从队首跳过已不存在的项。
     order: VecDeque<ChunkPos>,
     stats: ChunkCacheStats,
+    /// 缓存包体绑定的生成器版本；变更时必须全量失效（基底变了）。
+    version: GeneratorVersion,
+}
+
+impl Default for CacheInner {
+    fn default() -> Self {
+        Self {
+            map: HashMap::new(),
+            order: VecDeque::new(),
+            stats: ChunkCacheStats::default(),
+            version: GeneratorVersion::V1,
+        }
+    }
 }
 
 impl CacheInner {
@@ -77,8 +90,20 @@ pub struct ChunkCache {
 }
 
 impl ChunkCache {
+    /// 默认固定 v1（legacy）：旧调用方/旧测试行为完全不变。
     pub fn new(seed: i64, capacity: usize) -> Self {
-        Self { seed, capacity, mutable: None, inner: Mutex::new(CacheInner::default()) }
+        Self::new_with_version(seed, capacity, GeneratorVersion::V1)
+    }
+
+    /// 显式版本：缓存内容从这一刻起由 `(seed, version)` 决定。
+    pub fn new_with_version(
+        seed: i64,
+        capacity: usize,
+        version: GeneratorVersion,
+    ) -> Self {
+        let mut inner = CacheInner::default();
+        inner.version = version;
+        Self { seed, capacity, mutable: None, inner: Mutex::new(inner) }
     }
 
     /// 绑定可变世界（P17 挖掘/放置后重编用）；seed 不一致时 warn（仍绑定，
@@ -91,6 +116,13 @@ impl ChunkCache {
                 mutable.seed()
             );
         }
+        if self.version() != mutable.generator_version() {
+            warn!(
+                "chunk cache generator {:?} != mutable world {:?}, encoding follows the mutable world",
+                self.version(),
+                mutable.generator_version()
+            );
+        }
         self.mutable = Some(mutable);
         self
     }
@@ -101,6 +133,31 @@ impl ChunkCache {
 
     pub fn capacity(&self) -> usize {
         self.capacity
+    }
+
+    /// 当前缓存绑定的生成器版本。
+    pub fn version(&self) -> GeneratorVersion {
+        self.lock().version
+    }
+
+    /// 切换版本：只要版本变化就丢弃**全部**已编码包体（基底算法变了，
+    /// 任何旧条目都不能复用）。返回是否真的发生了切换。
+    pub fn set_version(&self, version: GeneratorVersion) -> bool {
+        let mut inner = self.lock();
+        if inner.version == version {
+            return false;
+        }
+        inner.version = version;
+        inner.map.clear();
+        inner.order.clear();
+        true
+    }
+
+    /// 清空全部缓存（供存档版本校验失败/配置重载时用）。
+    pub fn clear(&self) {
+        let mut inner = self.lock();
+        inner.map.clear();
+        inner.order.clear();
     }
 
     /// 当前缓存块数。
@@ -134,7 +191,13 @@ impl ChunkCache {
         }
         let body = match &self.mutable {
             Some(m) => Arc::new(encode_chunk_data_body_mutable(m, pos)),
-            None => Arc::new(encode_chunk_data_body(&WorldGen::new(self.seed), pos)),
+            None => {
+                let version = self.version();
+                Arc::new(encode_chunk_data_body(
+                    &WorldGen::with_version(self.seed, version),
+                    pos,
+                ))
+            }
         };
         let mut inner = self.lock();
         // 生成期间可能有其他线程先插入同一区块：复用已有字节，保持确定性。
@@ -294,6 +357,50 @@ mod tests {
             a.body(position(23, 23)).as_slice(),
             b.body(position(23, 23)).as_slice(),
             "different seeds must produce different chunk bodies"
+        );
+    }
+
+    /// P44：生成器版本变化必须使全部已缓存包体失效，且新包体按 v2 基底生成。
+    #[test]
+    fn generator_version_change_invalidates_whole_cache() {
+        let pos = position(23, 23);
+        let cache = ChunkCache::new(DEFAULT_SEED, 8);
+        assert_eq!(cache.version(), GeneratorVersion::V1);
+        let before = cache.body(pos);
+        assert!(cache.contains(pos));
+        assert!(cache.set_version(GeneratorVersion::V2));
+        assert_eq!(cache.version(), GeneratorVersion::V2);
+        assert_eq!(cache.len(), 0, "version switch must drop every cached body");
+        assert!(!cache.contains(pos));
+        let after = cache.body(pos);
+        assert_ne!(before.as_slice(), after.as_slice(), "v2 body must differ from v1");
+        assert_eq!(
+            after.as_slice(),
+            encode_chunk_data_body(
+                &WorldGen::with_version(DEFAULT_SEED, GeneratorVersion::V2),
+                pos
+            )
+            .as_slice()
+        );
+        // 相同版本重复设置不失效。
+        assert!(!cache.set_version(GeneratorVersion::V2));
+        assert!(cache.contains(pos));
+    }
+
+    #[test]
+    fn new_with_version_generates_v2_bodies_and_stays_deterministic() {
+        let cache = ChunkCache::new_with_version(42, 8, GeneratorVersion::V2);
+        let pos = position(4, 7);
+        let a = cache.body(pos);
+        let b = cache.body(pos);
+        assert!(Arc::ptr_eq(&a, &b));
+        assert_eq!(
+            a.as_slice(),
+            encode_chunk_data_body(&WorldGen::with_version(42, GeneratorVersion::V2), pos).as_slice()
+        );
+        assert_ne!(
+            a.as_slice(),
+            encode_chunk_data_body(&WorldGen::with_version(42, GeneratorVersion::V1), pos).as_slice()
         );
     }
 }

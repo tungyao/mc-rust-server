@@ -6,6 +6,16 @@ use mc_protocol::packets::{
 };
 use std::collections::HashMap;
 
+// P44 新增测试用的额外导入（旧测试本体一字未改）。
+use crate::crops::{BIRCH, DARK_OAK, OAK_TREE, SPRUCE};
+use crate::{
+    CLAY_BLOCK_ID, COARSE_DIRT_BLOCK_ID, COPPER_ORE_BLOCK_ID, CORNFLOWER_BLOCK_ID,
+    DIAMOND_ORE_BLOCK_ID, EMERALD_ORE_BLOCK_ID, FERN_BLOCK_ID, GOLD_ORE_BLOCK_ID,
+    GRAVEL_BLOCK_ID, ICE_BLOCK_ID, KELP_BLOCK_ID, LAPIS_ORE_BLOCK_ID, LILY_PAD_BLOCK_ID,
+    POPPY_BLOCK_ID, PODZOL_BLOCK_ID, REDSTONE_ORE_BLOCK_ID, SANDSTONE_BLOCK_ID,
+    SEAGRASS_BLOCK_ID, SHORT_GRASS_BLOCK_ID, SNOW_BLOCK_ID, TALL_GRASS_BLOCK_ID,
+};
+
 const WATER_SEED: i64 = -987654321;
 
 fn block_at(g: &GeneratedChunk, lx: i32, y: i32, lz: i32) -> u16 {
@@ -654,4 +664,324 @@ fn default_seed_matches_server_default() {
         WorldGen::new(987654321).spawn_pos().1,
         "different seed must produce a different spawn y"
     );
+}
+
+// ---------------------------------------------------------------------------
+// P44：v1 冻结 + v2 低风险视觉。以下全部是新增测试，上面 20 个旧测试一字未改。
+// ---------------------------------------------------------------------------
+
+fn fnv1a64(bytes: &[u8]) -> u64 {
+    let mut h = 0xcbf2_9ce4_8422_2325u64;
+    for &b in bytes {
+        h ^= b as u64;
+        h = h.wrapping_mul(0x100_0000_01b3);
+    }
+    h
+}
+
+fn chunk_digest(g: &GeneratedChunk) -> u64 {
+    let mut h = fnv1a64(&g.heights.iter().flat_map(|v| v.to_be_bytes()).collect::<Vec<_>>());
+    h ^= fnv1a64(&g.motion_heights.iter().flat_map(|v| v.to_be_bytes()).collect::<Vec<_>>());
+    h ^= fnv1a64(&g.network_bytes());
+    h ^= fnv1a64(&g.heightmaps_bytes());
+    h ^= fnv1a64(&g.light_bytes());
+    h
+}
+
+/// v1 是 golden：P1 之后任何基底/编码改动都会让这些哈希漂移。
+#[test]
+fn v1_is_frozen_byte_for_byte() {
+    for ((x, z), want) in [
+        ((23, 23), 0xb88a629b884d4457u64),
+        ((0, 0), 0xbff1225f680a85d7u64),
+        ((-1, -1), 0xf3b0397a3dc1a783u64),
+        ((1_800_000, -900_000), 0xeae777396d266b85u64),
+    ] {
+        let g = WorldGen::with_version(DEFAULT_SEED, GeneratorVersion::V1)
+            .generate(ChunkPos(x, z));
+        assert_eq!(chunk_digest(&g), want, "v1 golden drift at {x},{z}");
+    }
+    // 默认构造器始终是 v1。
+    let pos = ChunkPos(23, 23);
+    assert_eq!(
+        WorldGen::new(DEFAULT_SEED).generate(pos).sections,
+        WorldGen::with_version(DEFAULT_SEED, GeneratorVersion::V1).generate(pos).sections
+    );
+    assert_eq!(WorldGen::default().version, GeneratorVersion::V1);
+}
+
+/// v2 矿种高度带：每种新矿在 3×3 chunk 里都出现，且 y 严格落在声明带内。
+#[test]
+fn v2_new_ores_appear_in_documented_height_bands() {
+    let gen = WorldGen::with_version(42, GeneratorVersion::V2);
+    let center = gen.spawn_chunk();
+    let mut counts = HashMap::new();
+    for dx in -1..=1 {
+        for dz in -1..=1 {
+            let g = gen.generate(ChunkPos(center.0 + dx, center.1 + dz));
+            for lz in 0..16 {
+                for lx in 0..16 {
+                    let h = g.heights[(lz * 16 + lx) as usize];
+                    for y in (MIN_Y + 9)..=(h - 9) {
+                        let id = block_at(&g, lx, y, lz);
+                        if let Some(band) = ores::band_for_id(id) {
+                            assert!(
+                                (band.min_y..=band.max_y).contains(&y),
+                                "ore {} at y={y} outside {}..={}",
+                                band.id, band.min_y, band.max_y
+                            );
+                            *counts.entry(id).or_insert(0usize) += 1;
+                        }
+                    }
+                }
+            }
+        }
+    }
+    for id in [
+        COAL_ORE_BLOCK_ID,
+        IRON_ORE_BLOCK_ID,
+        COPPER_ORE_BLOCK_ID,
+        GOLD_ORE_BLOCK_ID,
+        REDSTONE_ORE_BLOCK_ID,
+        LAPIS_ORE_BLOCK_ID,
+        DIAMOND_ORE_BLOCK_ID,
+        EMERALD_ORE_BLOCK_ID,
+    ] {
+        assert!(counts.get(&id).copied().unwrap_or(0) > 0, "ore {id} never generated in v2");
+    }
+}
+
+/// v2 树种来自 `crops::TREE_SPECS` 的真实 log/leaves ID，且树冠跨 chunk 连续。
+#[test]
+fn v2_multiple_tree_species_and_cross_chunk_canopy_continuity() {
+    use std::collections::HashSet;
+    let gen = WorldGen::with_version(DEFAULT_SEED, GeneratorVersion::V2);
+    let center = gen.spawn_chunk();
+    let mut species = HashSet::new();
+    let logs = [
+        OAK_TREE.log_id,
+        BIRCH.log_id,
+        SPRUCE.log_id,
+        DARK_OAK.log_id,
+    ];
+    for dx in -2..=2 {
+        for dz in -2..=2 {
+            let g = gen.generate(ChunkPos(center.0 + dx, center.1 + dz));
+            for lz in 0..16 {
+                for lx in 0..16 {
+                    let h = g.heights[(lz * 16 + lx) as usize];
+                    for y in (h + 1)..=(h + 12) {
+                        let id = block_at(&g, lx, y, lz);
+                        if logs.contains(&id) {
+                            species.insert(id);
+                        }
+                    }
+                }
+            }
+        }
+    }
+    assert!(species.len() >= 2, "expected multiple tree species, got {species:?}");
+
+    // 找一棵树冠跨东边界的候选树，验证两侧 chunk 都写到了它的方块。
+    let base_x = center.0 * 16;
+    let base_z = center.1 * 16;
+    let mut found = None;
+    'outer: for wx in (base_x + 12)..=(base_x + 17) {
+        for wz in (base_z + 3)..=(base_z + 12) {
+            let h = gen.height_at(wx, wz);
+            let slope_ok = (gen.height_at(wx - 1, wz) - h).abs() <= 1
+                && (gen.height_at(wx + 1, wz) - h).abs() <= 1
+                && (gen.height_at(wx, wz - 1) - h).abs() <= 1
+                && (gen.height_at(wx, wz + 1) - h).abs() <= 1;
+            if let Some(t) = features::tree_for(&gen, wx, wz, h, slope_ok, gen.biome_at(wx, wz)) {
+                if t.x + 2 > base_x + 15 {
+                    found = Some(t);
+                    break 'outer;
+                }
+            }
+        }
+    }
+    let tree = found.expect("expected a boundary-crossing v2 tree near spawn");
+    let west = gen.generate(center);
+    let east = gen.generate(ChunkPos(center.0 + 1, center.1));
+    let mut outside = 0;
+    let mut check = |wx: i32, y: i32, wz: i32, want: &[u16]| {
+        let owner = ChunkPos(wx.div_euclid(16), wz.div_euclid(16));
+        let g = if owner == center { &west } else { &east };
+        if owner != center {
+            outside += 1;
+        }
+        let got = block_at(g, wx - owner.0 * 16, y, wz - owner.1 * 16);
+        assert!(want.contains(&got), "v2 tree block {wx},{y},{wz} is {got}, want {want:?}");
+    };
+    // 邻树的树冠可能与本树重叠，所以接受任意树种的 log/leaves（只验证本树
+    // 的方块确实写进了两侧 chunk，而非把重叠冠形误判为错误）。
+    let tree_blocks = [
+        OAK_TREE.log_id,
+        OAK_TREE.leaves_id,
+        BIRCH.log_id,
+        BIRCH.leaves_id,
+        SPRUCE.log_id,
+        SPRUCE.leaves_id,
+        DARK_OAK.log_id,
+        DARK_OAK.leaves_id,
+    ];
+    let top = tree.top_y();
+    for y in (tree.ground_y + 1)..=top {
+        check(tree.x, y, tree.z, &tree_blocks);
+    }
+    for dy in -2i32..=1 {
+        let y = top + dy;
+        let radius: i32 = if tree.spec.name == "spruce" {
+            match dy {
+                -2 => 1,
+                -1 => 2,
+                0 => 1,
+                _ => 0,
+            }
+        } else {
+            2
+        };
+        for dx in -radius..=radius {
+            for dz in -radius..=radius {
+                let shape = if tree.spec.name == "spruce" {
+                    true
+                } else {
+                    match dy {
+                        -2 | -1 => !(dx.abs() == 2 && dz.abs() == 2),
+                        0 => dx.abs() <= 1 && dz.abs() <= 1,
+                        _ => dx.abs() + dz.abs() <= 1,
+                    }
+                };
+                if shape {
+                    check(tree.x + dx, y, tree.z + dz, &tree_blocks);
+                }
+            }
+        }
+    }
+    assert!(outside > 0, "expected canopy blocks in the neighbouring chunk");
+}
+
+/// v2 地表过渡 / 草花 / 静态水岸植被：新方块确实被生成，且 ID 来自查表。
+#[test]
+fn v2_surface_materials_and_plants_are_generated() {
+    // 直接判定高地材质分支与冰封分支（避免依赖具体 seed 的地形分布）。
+    let high = features::surface_layers(DEFAULT_SEED, 100, 100, 90, FOREST_BIOME_ID_777);
+    assert!(
+        high.iter().any(|&id| id == SNOW_BLOCK_ID || id == COARSE_DIRT_BLOCK_ID || id == STONE_BLOCK_ID),
+        "high ground must use transition materials: {high:?}"
+    );
+    let mut ice = false;
+    for x in 0..512 {
+        if features::water_at(DEFAULT_SEED, x, 300, SEA_LEVEL - 1) == ICE_BLOCK_ID {
+            ice = true;
+            break;
+        }
+    }
+    assert!(ice, "shallow water must be able to freeze in v2");
+
+    let gen = WorldGen::with_version(WATER_SEED, GeneratorVersion::V2);
+    let center = gen.spawn_chunk();
+    let mut found = std::collections::HashSet::new();
+    for dx in -8..=8 {
+        for dz in -8..=8 {
+            let g = gen.generate(ChunkPos(center.0 + dx, center.1 + dz));
+            for section in &g.sections {
+                for &id in section.iter() {
+                    found.insert(id);
+                }
+            }
+        }
+    }
+    for id in [
+        GRAVEL_BLOCK_ID,
+        SANDSTONE_BLOCK_ID,
+        COARSE_DIRT_BLOCK_ID,
+        PODZOL_BLOCK_ID,
+        CLAY_BLOCK_ID,
+        ICE_BLOCK_ID,
+        SHORT_GRASS_BLOCK_ID,
+        TALL_GRASS_BLOCK_ID,
+        FERN_BLOCK_ID,
+        POPPY_BLOCK_ID,
+        CORNFLOWER_BLOCK_ID,
+        SEAGRASS_BLOCK_ID,
+        KELP_BLOCK_ID,
+        LILY_PAD_BLOCK_ID,
+    ] {
+        assert!(found.contains(&id), "v2 block {id} never generated near water seed");
+    }
+    assert!(is_plant(SHORT_GRASS_BLOCK_ID));
+    assert!(!is_plant(STONE_BLOCK_ID));
+}
+
+/// v2 纯函数性：同 seed 同块逐字节一致；高度场与出生点保持 v1 冻结口径；
+/// 出生圈内不出现新树/新植物，3×3 仍是干燥草地。
+#[test]
+fn v2_is_pure_deterministic_and_spawn_stays_safe() {
+    let gen = WorldGen::with_version(DEFAULT_SEED, GeneratorVersion::V2);
+    let pos = ChunkPos(23, 23);
+    let a = gen.generate(pos);
+    let b = WorldGen::with_version(DEFAULT_SEED, GeneratorVersion::V2).generate(pos);
+    assert_eq!(a.sections, b.sections);
+    assert_eq!(a.heights, b.heights);
+    assert_eq!(a.motion_heights, b.motion_heights);
+    assert_eq!(a.network_bytes(), b.network_bytes());
+    assert_eq!(a.heights, WorldGen::new(DEFAULT_SEED).generate(pos).heights, "height field must be frozen");
+    assert_eq!(gen.spawn_pos(), WorldGen::new(DEFAULT_SEED).spawn_pos());
+
+    for seed in [DEFAULT_SEED, 42, -987654321] {
+        let gen = WorldGen::with_version(seed, GeneratorVersion::V2);
+        let center = gen.spawn_chunk();
+        let spawn = gen.spawn_pos();
+        assert_eq!(spawn.1, WorldGen::new(seed).spawn_pos().1, "spawn y must not change");
+        let g = gen.generate(center);
+        for dz in -1..=1 {
+            for dx in -1..=1 {
+                let wx = SPAWN_BLOCK_X + dx;
+                let wz = SPAWN_BLOCK_Z + dz;
+                let owner = ChunkPos(wx.div_euclid(16), wz.div_euclid(16));
+                let owned;
+                let chunk = if owner == center { &g } else { owned = gen.generate(owner); &owned };
+                let lx = wx - owner.0 * 16;
+                let lz = wz - owner.1 * 16;
+                let h = chunk.heights[(lz * 16 + lx) as usize];
+                assert_eq!(h, gen.height_at(wx, wz));
+                assert!(h > SEA_LEVEL + 1, "spawn 3x3 must stay dry for seed {seed}");
+                assert_eq!(block_at(chunk, lx, h, lz), GRASS_BLOCK_ID, "spawn 3x3 grass");
+            }
+        }
+        // 出生点 4 格内没有树/草花（树候选排除半径 7 + 冠半径 2 = 最近 6 格），
+        // 脚下是草，头顶是空气。
+        let lx = SPAWN_BLOCK_X - center.0 * 16;
+        let lz = SPAWN_BLOCK_Z - center.1 * 16;
+        let h = g.heights[(lz * 16 + lx) as usize];
+        assert_eq!(block_at(&g, lx, h, lz), GRASS_BLOCK_ID);
+        assert_eq!(block_at(&g, lx, h + 1, lz), AIR_BLOCK_ID);
+        for dz in -4..=4 {
+            for dx in -4..=4 {
+                let wx = SPAWN_BLOCK_X + dx;
+                let wz = SPAWN_BLOCK_Z + dz;
+                let owner = ChunkPos(wx.div_euclid(16), wz.div_euclid(16));
+                let owned;
+                let chunk = if owner == center { &g } else { owned = gen.generate(owner); &owned };
+                let bx = wx - owner.0 * 16;
+                let bz = wz - owner.1 * 16;
+                let bh = chunk.heights[(bz * 16 + bx) as usize];
+                for y in (bh + 1)..=(bh + 10) {
+                    let id = block_at(chunk, bx, y, bz);
+                    assert!(
+                        id != OAK_LOG_BLOCK_ID
+                            && id != OAK_LEAVES_BLOCK_ID
+                            && id != BIRCH.log_id
+                            && id != BIRCH.leaves_id
+                            && id != SPRUCE.log_id
+                            && id != SPRUCE.leaves_id
+                            && !is_plant(id),
+                        "v2 vegetation inside spawn 4 for seed {seed} at {wx},{y},{wz}: {id}"
+                    );
+                }
+            }
+        }
+    }
 }

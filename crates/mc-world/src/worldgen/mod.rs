@@ -16,9 +16,13 @@
 //!
 //! `heights` 是地形顶（草/沙），`motion_heights` 才是 MOTION_BLOCKING（含水面/树）。
 mod encode;
+mod features;
 mod noise;
+mod ores;
 #[cfg(test)]
 mod tests;
+
+pub use features::is_plant;
 
 use crate::{
     AIR_BLOCK_ID, COAL_ORE_BLOCK_ID, DIRT_BLOCK_ID, GRASS_BLOCK_ID, IRON_ORE_BLOCK_ID, MIN_Y,
@@ -53,7 +57,7 @@ const SPAWN_PROTECT_RADIUS: f64 = 16.0;
 const SPAWN_PLATEAU_RADIUS: f64 = 4.5;
 /// 出生点 4 格内不长树（含树冠）：树冠半径 2，故排除原点 7 格内的候选，
 /// 保证最近树叶也在 5 格外，不挡玩家/视线。
-const SPAWN_TREE_CLEAR: i32 = 7;
+pub(super) const SPAWN_TREE_CLEAR: i32 = 7;
 
 /// biome：低频率森林噪声 + chunk 内水/沙占比。
 const FOREST_SCALE: f64 = 96.0;
@@ -64,12 +68,12 @@ const BIOME_SAMPLE_OFFSETS: [i32; 4] = [2, 6, 10, 14];
 const BIOME_WATER_SAMPLES: u32 = 7;
 const BIOME_SAND_SAMPLES: u32 = 7;
 
-/// 树：密度与形状。
-const TREE_SALT: u64 = 0xA076_1D64_78BD_642F;
+/// 树：密度与形状（v1 使用；v2 复用 salt/干高范围，密度在 features 内）。
+pub(super) const TREE_SALT: u64 = 0xA076_1D64_78BD_642F;
 const FOREST_TREE_DENSITY: f64 = 0.10; // 1/10 列
 const PLAINS_TREE_DENSITY: f64 = 0.025; // 1/40 列
-const TREE_MIN_TRUNK: i32 = 4;
-const TREE_MAX_TRUNK: i32 = 6;
+pub(super) const TREE_MIN_TRUNK: i32 = 4;
+pub(super) const TREE_MAX_TRUNK: i32 = 6;
 
 /// 洞穴：3D value noise，按 4×4×4 格采样（同格 64 个方块一起挖，省 CPU），
 /// y ∈ (MIN_Y+8, h-8) 且只挖石头。P16 只有地下数据、不可见，形状精度不是重点。
@@ -82,7 +86,7 @@ const CAVE_CELLS_Y: usize = ((MAX_SURFACE_Y - 8 - MIN_Y) / CAVE_CELL + 1) as usi
 
 /// 矿：只替换 stone，确定性 hash 概率；坐标预筛选保留 1/8 方块，
 /// 阈值在选中方块内放大 8 倍，整体仍约 1.0% 煤 / 0.8% 铁。
-const ORE_SALT: u64 = 0x8EBC_6AF0_9C88_C6E3;
+pub(super) const ORE_SALT: u64 = 0x8EBC_6AF0_9C88_C6E3;
 const ORE_SELECT_ONE_IN: u32 = 8;
 const COAL_RATE_PER_MILLE: u32 = 10; // 1.0%
 const IRON_RATE_PER_MILLE: u32 = 8; // 0.8%
@@ -99,10 +103,10 @@ const SECTION_VOLUME: usize = 4096;
 const CHUNK_COLUMNS: usize = 256;
 
 /// 树扫描范围：base-2..=base+17（涵盖树冠半径 2），高度缓存再外扩 1 格用于坡度。
-const TREE_SCAN_MIN: i32 = -2;
-const TREE_SCAN_MAX: i32 = 17;
-const HEIGHT_CACHE_MIN: i32 = -3;
-const HEIGHT_CACHE_SIDE: i32 = 22; // -3..=18
+pub(super) const TREE_SCAN_MIN: i32 = -2;
+pub(super) const TREE_SCAN_MAX: i32 = 17;
+pub(super) const HEIGHT_CACHE_MIN: i32 = -3;
+pub(super) const HEIGHT_CACHE_SIDE: i32 = 22; // -3..=18
 
 /// 候选树：世界坐标 + 地表 y + 树干高度。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -120,21 +124,64 @@ impl Tree {
     }
 }
 
+/// 生成器版本：
+/// - `V1`（legacy）永久冻结，是所有旧 seed / 现有测试的默认口径；
+/// - `V2` 仅对新 seed 或显式配置启用：不改高度场，只补矿种、地表材质、
+///   多树种与草花、静态水岸植被。
+///
+/// 版本变化意味着基底输出变化：必须让 `ChunkCache` 全失效，并对 redb 的
+/// `meta.generator` 做启动校验（见 `store::WorldStore::ensure_generator_version`）。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum GeneratorVersion {
+    V1,
+    V2,
+}
+
+impl Default for GeneratorVersion {
+    fn default() -> Self {
+        Self::V1
+    }
+}
+
+impl GeneratorVersion {
+    pub const fn number(self) -> u32 {
+        match self {
+            Self::V1 => 1,
+            Self::V2 => 2,
+        }
+    }
+
+    pub const fn from_number(n: u32) -> Option<Self> {
+        match n {
+            1 => Some(Self::V1),
+            2 => Some(Self::V2),
+            _ => None,
+        }
+    }
+}
+
 impl Default for WorldGen {
     fn default() -> Self {
         Self::new(DEFAULT_SEED)
     }
 }
 
-/// 确定性世界生成器：同一 seed + 坐标永远生成同一地形。
+/// 确定性世界生成器：同一 `(seed, version, 坐标)` 永远生成同一地形。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct WorldGen {
     pub seed: i64,
+    pub version: GeneratorVersion,
 }
 
 impl WorldGen {
+    /// 默认构造器固定 v1：所有旧调用方/旧测试逐字节不变。
     pub fn new(seed: i64) -> Self {
-        Self { seed }
+        Self::with_version(seed, GeneratorVersion::V1)
+    }
+
+    /// 显式指定生成器版本（v2 只应由新 seed 或显式配置启用）。
+    pub fn with_version(seed: i64, version: GeneratorVersion) -> Self {
+        Self { seed, version }
     }
 
     /// 世界坐标 (x,z) 的地表 y（草/沙方块），已包含出生点平滑保护。
@@ -237,6 +284,14 @@ impl WorldGen {
 
     /// 生成一个完整 chunk：24 个 section + 地形高度 + MOTION_BLOCKING + biome。
     pub fn generate(&self, pos: ChunkPos) -> GeneratedChunk {
+        match self.version {
+            GeneratorVersion::V1 => self.generate_v1(pos),
+            GeneratorVersion::V2 => self.generate_v2(pos),
+        }
+    }
+
+    /// v1 legacy 基底：永久冻结，算法与字节输出不得改动。
+    fn generate_v1(&self, pos: ChunkPos) -> GeneratedChunk {
         let base_x = pos.0 * 16;
         let base_z = pos.1 * 16;
         let mut sections: Vec<Box<[u16; SECTION_VOLUME]>> = (0..SECTION_COUNT)
@@ -297,6 +352,70 @@ impl WorldGen {
         }
         self.place_trees(base_x, base_z, &hcache, &mut sections, &mut motion);
         let biome_id = self.chunk_biome(pos);
+        GeneratedChunk {
+            pos,
+            sections,
+            heights,
+            motion_heights: motion,
+            biome_id,
+        }
+    }
+
+    /// v2 基底：高度场/biome/洞穴/编码与 v1 完全一致，只替换地表材质、
+    /// 矿物集合，并追加多树种、草花与静态水岸植被。仍是单 chunk 纯函数。
+    fn generate_v2(&self, pos: ChunkPos) -> GeneratedChunk {
+        let base_x = pos.0 * 16;
+        let base_z = pos.1 * 16;
+        let mut sections: Vec<Box<[u16; SECTION_VOLUME]>> = (0..SECTION_COUNT)
+            .map(|_| Box::new([AIR_BLOCK_ID; SECTION_VOLUME]))
+            .collect();
+        let mut heights = [0i32; CHUNK_COLUMNS];
+        let mut motion = [0i32; CHUNK_COLUMNS];
+        let mut hcache = [0i32; (HEIGHT_CACHE_SIDE * HEIGHT_CACHE_SIDE) as usize];
+        for oz in HEIGHT_CACHE_MIN..(HEIGHT_CACHE_MIN + HEIGHT_CACHE_SIDE) {
+            for ox in HEIGHT_CACHE_MIN..(HEIGHT_CACHE_MIN + HEIGHT_CACHE_SIDE) {
+                hcache[height_cache_index(ox, oz)] = self.height_at(base_x + ox, base_z + oz);
+            }
+        }
+        let caves = self.cave_mask(base_x, base_z);
+        let biome_id = self.chunk_biome(pos);
+        for lz in 0..16i32 {
+            for lx in 0..16i32 {
+                let column = (lz * 16 + lx) as usize;
+                let h = hcache[height_cache_index(lx, lz)];
+                heights[column] = h;
+                let wx = base_x + lx;
+                let wz = base_z + lz;
+                let layers = features::surface_layers(self.seed, wx, wz, h, biome_id);
+                for y in MIN_Y..=h {
+                    let d = (h - y) as usize;
+                    let mut id = if d < layers.len() {
+                        layers[d]
+                    } else {
+                        STONE_BLOCK_ID
+                    };
+                    if id == STONE_BLOCK_ID {
+                        if y <= h - 9 && y >= MIN_Y + 9 && cave_carved(&caves, lx, y, lz) {
+                            id = AIR_BLOCK_ID;
+                        } else if let Some(ore) = ores::ore_at(self.seed, wx, y, wz) {
+                            id = ore;
+                        }
+                    }
+                    put_block(&mut sections, lx, y, lz, id);
+                }
+                if h < SEA_LEVEL {
+                    // 底部 h+1..=SEA_LEVEL-1 保持 source water；顶层可能是冰。
+                    for y in (h + 1)..SEA_LEVEL {
+                        put_block(&mut sections, lx, y, lz, WATER_BLOCK_ID);
+                    }
+                    put_block(&mut sections, lx, SEA_LEVEL, lz, features::water_at(self.seed, wx, wz, h));
+                }
+                let blocking_top = h.max(SEA_LEVEL);
+                motion[column] = blocking_top + 1 - MIN_Y;
+            }
+        }
+        features::place_trees(self, base_x, base_z, &hcache, &mut sections, &mut motion);
+        features::place_plants(self.seed, base_x, base_z, &hcache, &mut sections);
         GeneratedChunk {
             pos,
             sections,
@@ -497,7 +616,7 @@ fn biome_from_stats(water: u32, sand: u32, forest: f64) -> i32 {
     }
 }
 
-fn height_cache_index(ox: i32, oz: i32) -> usize {
+pub(super) fn height_cache_index(ox: i32, oz: i32) -> usize {
     ((oz - HEIGHT_CACHE_MIN) * HEIGHT_CACHE_SIDE + (ox - HEIGHT_CACHE_MIN)) as usize
 }
 
@@ -527,7 +646,7 @@ fn put_block(
 }
 
 /// 仅当目标方块属于 `replaceable` 时写入；返回是否真的写入。
-fn set_block_if(
+pub(super) fn set_block_if(
     sections: &mut [Box<[u16; SECTION_VOLUME]>],
     lx: i32,
     y: i32,

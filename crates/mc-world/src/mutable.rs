@@ -14,11 +14,14 @@
 //! 被触碰列（自顶向下扫描），`heights` 取“地形集合”（石头/土/草/沙/矿），
 //! `motion` 取最高非空气（含水/树叶/原木），与 P16 基底规则对齐。
 use crate::{
-    AIR_BLOCK_ID, COAL_ORE_BLOCK_ID, COBBLESTONE_BLOCK_ID, DIRT_BLOCK_ID, FARMLAND_BLOCK_ID,
-    GRASS_BLOCK_ID,
-    IRON_ORE_BLOCK_ID, MIN_Y, OAK_LOG_BLOCK_ID, SAND_BLOCK_ID, SECTION_COUNT, STONE_BLOCK_ID,
-    WATER_BLOCK_ID,
+    AIR_BLOCK_ID, CLAY_BLOCK_ID, COAL_ORE_BLOCK_ID, COARSE_DIRT_BLOCK_ID, COBBLESTONE_BLOCK_ID,
+    COPPER_ORE_BLOCK_ID, DIAMOND_ORE_BLOCK_ID, DIRT_BLOCK_ID, EMERALD_ORE_BLOCK_ID,
+    FARMLAND_BLOCK_ID, GRASS_BLOCK_ID, GRAVEL_BLOCK_ID, GOLD_ORE_BLOCK_ID, ICE_BLOCK_ID,
+    IRON_ORE_BLOCK_ID, LAPIS_ORE_BLOCK_ID, MIN_Y, OAK_LOG_BLOCK_ID, PODZOL_BLOCK_ID,
+    REDSTONE_ORE_BLOCK_ID, SANDSTONE_BLOCK_ID, SAND_BLOCK_ID, SECTION_COUNT, SNOW_BLOCK_ID,
+    STONE_BLOCK_ID, WATER_BLOCK_ID,
 };
+use crate::worldgen::GeneratorVersion;
 use crate::store::{BlockEdit, StoreError, WorldStore};
 use mc_core::{BlockPos, ChunkPos};
 
@@ -52,12 +55,16 @@ pub fn is_placeable(id: u16) -> bool {
 }
 
 /// 可替换（放置目标必须）方块：空气/水。
+/// P44 v2 只用 water source（89）与静态冰，不引入新的 water state，
+/// 所以口径不变；流动水属 P3，届时再同步。
 pub fn is_replaceable(id: u16) -> bool {
     id == AIR_BLOCK_ID || id == WATER_BLOCK_ID
 }
 
-/// `heights` 地形集合：石头/泥土/草/沙/煤/铁/耕地（树叶/原木/水不算地形顶）。
+/// `heights` 地形集合：石头/泥土/草/沙/矿/耕地（树叶/原木/水/草花不算地形顶）。
 /// P27 耕地计入地形：耕后地表高度不变（与草/泥土同口径），天空光起点也不动。
+/// P44 v2 新矿物与新地表材质（gravel/sandstone/coarse_dirt/podzol/clay/snow/ice）
+/// 必须一并计入，否则编辑后 `heights` 回退口径会漂移。
 fn is_terrain(id: u16) -> bool {
     matches!(
         id,
@@ -68,6 +75,19 @@ fn is_terrain(id: u16) -> bool {
             | COAL_ORE_BLOCK_ID
             | IRON_ORE_BLOCK_ID
             | FARMLAND_BLOCK_ID
+            | GRAVEL_BLOCK_ID
+            | SANDSTONE_BLOCK_ID
+            | COARSE_DIRT_BLOCK_ID
+            | PODZOL_BLOCK_ID
+            | CLAY_BLOCK_ID
+            | SNOW_BLOCK_ID
+            | ICE_BLOCK_ID
+            | COPPER_ORE_BLOCK_ID
+            | GOLD_ORE_BLOCK_ID
+            | REDSTONE_ORE_BLOCK_ID
+            | DIAMOND_ORE_BLOCK_ID
+            | EMERALD_ORE_BLOCK_ID
+            | LAPIS_ORE_BLOCK_ID
     )
 }
 
@@ -102,19 +122,40 @@ pub struct MutableWorld {
 }
 
 impl MutableWorld {
+    /// 默认构造器固定 v1（legacy），旧调用方/旧测试字节语义不变。
     pub fn new(seed: i64) -> Self {
+        Self::new_with_version(seed, GeneratorVersion::V1)
+    }
+
+    /// 显式生成器版本：v2 只应用于新 seed 或显式配置。
+    pub fn new_with_version(seed: i64, version: GeneratorVersion) -> Self {
         Self {
             seed,
-            base: crate::WorldGen::new(seed),
+            base: crate::WorldGen::with_version(seed, version),
             inner: RwLock::new(Inner::default()),
             store: None,
         }
     }
 
+    pub fn generator_version(&self) -> GeneratorVersion {
+        self.base.version
+    }
+
     /// redb 模式构造：打开时把 `blocks` 物化视图注入 override 热层
     /// （与基底相同的条目自愈丢弃，保持稀疏），后续编辑暂存在内存等 flush。
     pub fn with_store(seed: i64, store: Arc<WorldStore>) -> Result<Self, StoreError> {
-        let world = Self::new(seed);
+        Self::with_store_and_version(seed, store, GeneratorVersion::V1)
+    }
+
+    /// 带版本的 redb 构造：先校验存档 `meta.generator` 与请求版本一致，
+    /// 不一致直接拒绝（绝不静默混用两种基底），再用请求的基底注入 override。
+    pub fn with_store_and_version(
+        seed: i64,
+        store: Arc<WorldStore>,
+        version: GeneratorVersion,
+    ) -> Result<Self, StoreError> {
+        store.validate_generator_version(version.number())?;
+        let world = Self::new_with_version(seed, version);
         let mut inner = world.lock_write();
         for ((x, y, z), id) in store.blocks()? {
             if (MIN_Y..=WORLD_TOP_Y).contains(&y) && id != world.base_value(x, y, z) {
@@ -467,7 +508,16 @@ impl MutableWorld {
 
     /// 启动加载：文件缺失 → 空世界；seed 由文件名隔离，文件内 seed 不符报错。
     pub fn load_from_dir(dir: &Path, seed: i64) -> std::io::Result<Self> {
-        let world = Self::new(seed);
+        Self::load_from_dir_with_version(dir, seed, GeneratorVersion::V1)
+    }
+
+    /// P44：旧稀疏档没有版本位，版本由配置显式指定（仅新 seed 方可传 v2）。
+    pub fn load_from_dir_with_version(
+        dir: &Path,
+        seed: i64,
+        version: GeneratorVersion,
+    ) -> std::io::Result<Self> {
+        let world = Self::new_with_version(seed, version);
         let path = Self::save_path(dir, seed);
         let mut f = match std::fs::File::open(&path) {
             Ok(f) => f,
@@ -557,7 +607,9 @@ fn column_heights(
         if id == AIR_BLOCK_ID {
             continue;
         }
-        if motion_top.is_none() {
+        // P44：草花/水草/睡莲不构成 MOTION_BLOCKING，编辑后重算时跳过，
+        // 与生成端 `GeneratedChunk.motion_heights` 口径保持一致。
+        if motion_top.is_none() && !crate::worldgen::is_plant(id) {
             motion_top = Some(y);
         }
         if is_terrain(id) {
@@ -869,5 +921,50 @@ mod tests {
         assert!(store.blocks().unwrap().is_empty(), "materialized view agrees with replay");
         assert_eq!(world.flush_to_store(78).unwrap(), 0, "no edits after successful flush");
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// P44：新矿物/新地表材质必须被认作地形，草花/树叶/水不算，
+    /// 否则编辑后的高度图口径会与生成端漂移。
+    #[test]
+    fn p44_new_terrain_blocks_are_in_height_whitelist() {
+        for id in [
+            STONE_BLOCK_ID,
+            DIRT_BLOCK_ID,
+            GRASS_BLOCK_ID,
+            SAND_BLOCK_ID,
+            COAL_ORE_BLOCK_ID,
+            IRON_ORE_BLOCK_ID,
+            FARMLAND_BLOCK_ID,
+            GRAVEL_BLOCK_ID,
+            SANDSTONE_BLOCK_ID,
+            COARSE_DIRT_BLOCK_ID,
+            PODZOL_BLOCK_ID,
+            CLAY_BLOCK_ID,
+            SNOW_BLOCK_ID,
+            ICE_BLOCK_ID,
+            COPPER_ORE_BLOCK_ID,
+            GOLD_ORE_BLOCK_ID,
+            REDSTONE_ORE_BLOCK_ID,
+            DIAMOND_ORE_BLOCK_ID,
+            EMERALD_ORE_BLOCK_ID,
+            LAPIS_ORE_BLOCK_ID,
+        ] {
+            assert!(is_terrain(id), "block {id} must count as terrain");
+        }
+        for id in [
+            AIR_BLOCK_ID,
+            WATER_BLOCK_ID,
+            crate::OAK_LEAVES_BLOCK_ID,
+            crate::OAK_LOG_BLOCK_ID,
+            crate::SHORT_GRASS_BLOCK_ID,
+            crate::SEAGRASS_BLOCK_ID,
+            crate::LILY_PAD_BLOCK_ID,
+        ] {
+            assert!(!is_terrain(id), "block {id} must not count as terrain");
+        }
+        // v2 装了草花的列编辑后 motion 仍回到草，而不是被草花顶高。
+        let m = MutableWorld::new_with_version(DEFAULT_SEED, GeneratorVersion::V2);
+        assert_eq!(m.generator_version(), GeneratorVersion::V2);
+        assert_eq!(MutableWorld::new(DEFAULT_SEED).generator_version(), GeneratorVersion::V1);
     }
 }

@@ -33,6 +33,10 @@ fn main() {
     // P36.2：启动时按 seed 打开 redb（必要时一次性迁移旧档），把 blocks 注入内存热层。
     // 显式 legacy 配置仍走原 P17/P18 稀疏档；redb 打开失败不静默回退（避免绕过新格式）。
     let storage = config::load_world_storage("server.toml");
+    let generator_version = mc_world::GeneratorVersion::from_number(
+        config::load_generator_version("server.toml"),
+    )
+    .unwrap_or(mc_world::GeneratorVersion::V1);
     let world_dir = cfg.world_dir.clone();
     let world_path = std::path::Path::new(&world_dir);
     let (mutable, shared_store): (
@@ -52,7 +56,20 @@ fn main() {
                 cfg.seed, report.blocks, report.players.len(), report.renamed, report.legacy_ignored
             );
             let store = Arc::new(store);
-            let loaded = match mc_world::MutableWorld::with_store(cfg.seed, Arc::clone(&store)) {
+            // P44：存档若由其它生成器版本写入则拒绝启动，绝不静默混用基底。
+            if let Err(e) = store.ensure_generator_version(generator_version.number()) {
+                warn!(
+                    "world generator version mismatch dir={world_dir} seed={} ({e}), exiting; \
+                     use a new seed or set generator_version back to the stored value",
+                    cfg.seed
+                );
+                std::process::exit(1);
+            }
+            let loaded = match mc_world::MutableWorld::with_store_and_version(
+                cfg.seed,
+                Arc::clone(&store),
+                generator_version,
+            ) {
                 Ok(w) => w,
                 Err(e) => {
                     warn!("redb world load failed dir={world_dir} seed={} ({e}), exiting", cfg.seed);
@@ -62,15 +79,21 @@ fn main() {
             (Arc::new(loaded), Some(store))
         }
         config::WorldStorage::Legacy => {
-            let loaded = mc_world::MutableWorld::load_from_dir(world_path, cfg.seed).unwrap_or_else(|e| {
+            let loaded = mc_world::MutableWorld::load_from_dir_with_version(
+                world_path,
+                cfg.seed,
+                generator_version,
+            )
+            .unwrap_or_else(|e| {
                 warn!("world load failed dir={world_dir} seed={} ({e}), starting fresh", cfg.seed);
-                mc_world::MutableWorld::new(cfg.seed)
+                mc_world::MutableWorld::new_with_version(cfg.seed, generator_version)
             });
             (Arc::new(loaded), None)
         }
     };
     info!(
-        "world loaded storage={storage:?} dir={world_dir} seed={} overrides={} dirty={}",
+        "world loaded storage={storage:?} generator={:?} dir={world_dir} seed={} overrides={} dirty={}",
+        generator_version,
         cfg.seed,
         mutable.override_count(),
         mutable.dirty_len()
@@ -78,8 +101,12 @@ fn main() {
     // 多连接共享同一份已编码 ChunkData 缓存（seed 必须与 cfg.seed 一致）。
     // P17 起缓存绑定可变世界：编辑后失效对应 chunk，下次重编即含新方块。
     let chunk_cache = Arc::new(
-        mc_network::ChunkCache::new(cfg.seed, mc_network::DEFAULT_CHUNK_CACHE_CAPACITY)
-            .with_mutable(Arc::clone(&mutable)),
+        mc_network::ChunkCache::new_with_version(
+            cfg.seed,
+            mc_network::DEFAULT_CHUNK_CACHE_CAPACITY,
+            generator_version,
+        )
+        .with_mutable(Arc::clone(&mutable)),
     );
     // P18 掉落物实体 + 背包：net 线程共享状态（存档与 overrides 同目录、seed 隔离）。
     // P36.2：redb 模式下背包/XP 读写也走同一个 `WorldStore`。
