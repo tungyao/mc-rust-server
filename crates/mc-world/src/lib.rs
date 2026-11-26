@@ -5,6 +5,7 @@ pub mod drops;
 pub mod load;
 pub mod mutable;
 pub mod save;
+pub mod store; // P36：redb 自有世界存储原型（不接入生产路径，不做 Anvil）
 pub mod worldgen;
 pub mod items;
 pub mod inventory;

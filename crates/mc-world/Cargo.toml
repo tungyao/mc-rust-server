@@ -11,3 +11,4 @@ mc-registry = { workspace = true }
 thiserror.workspace = true
 serde.workspace = true
 rayon.workspace = true
+redb.workspace = true

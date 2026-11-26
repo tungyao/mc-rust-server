@@ -38,3 +38,5 @@ tracing = "0.1"
 tracing-subscriber = "0.3"
 uuid = { version = "1", features = ["v4", "serde"] }
 bytes = "1"
+# P36 世界存储原型（纯 Rust 嵌入式 KV，MVCC/事务/零拷贝；不做 Anvil 兼容）
+redb = "2"

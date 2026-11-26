@@ -270,6 +270,21 @@ impl PlayerInventory {
         self.slots.get(idx).copied().flatten()
     }
 
+    /// 直接写入指定槽（P36 存储原型的读盘/迁移辅助；不校验堆叠上限，
+    /// 调用方负责合法性）。生产逻辑仍走 `add_item`/`apply_click`。
+    pub fn set_slot(&mut self, idx: usize, stack: Option<(i32, i32)>) -> bool {
+        if idx >= SLOT_COUNT {
+            return false;
+        }
+        self.slots[idx] = stack;
+        true
+    }
+
+    /// 读盘恢复 state_id（P36 存储原型用；钳制到 >=1 与旧读盘口径一致）。
+    pub fn set_state_id(&mut self, v: i32) {
+        self.state_id = v.max(1);
+    }
+
     pub fn is_empty(&self) -> bool {
         self.slots.iter().all(|s| s.is_none())
     }
