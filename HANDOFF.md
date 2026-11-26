@@ -14,8 +14,9 @@
 > 已完成地图生成器调研（见 §5.29，用户已定：v1 冻结 + v2 新 seed、允许改协议 helper、
 > 流动水 + 游泳、单 chunk 小遗迹）；`p41-all-recipes` 283 条配方与 `p43-player-visible`
 > 玩家实体互见均已合入（见 §5.30）；`p44-worldgen-p1` v1 冻结 + v2 低风险视觉已合入
-> （见 §5.29）；`p45-worldgen-p2` v2 地形/多 biome/洞穴/光照已合入（见 §5.29）；
-> P3 待派发；`p32-broadcast-chat` 暂缓；
+> （见 §5.29）；`p45-worldgen-p2` v2 地形/多 biome/洞穴/光照与 `p46-worldgen-p3`
+> v2 流动水/游泳/block light/遗迹均已合入（见 §5.29）；地图生成三阶段全部落地，
+> **真机复验仍未做**；`p32-broadcast-chat` 暂缓；
 > 后台管理面板已用 Vue 3 + Naive UI 重写并**完全离线化**合入（`p34-admin-vue` / `53f1016`、
 > `p35-admin-offline` / `48e14bd`，见 §5.25）；当前无进行中的派发任务。
 
@@ -414,10 +415,10 @@ $natives = 'C:\Users\qwe\AppData\Local\Temp\mc263natives'
 
 ### 本地检查
 
-- `cargo test --workspace`：全部通过（2026-11-26 实跑 **471 passed / 0 failed**；
-  P18 当时 215，之后 P18.1–P45 又追加单测与 play_stream / play_actions / play_crops /
+- `cargo test --workspace`：全部通过（2026-11-26 实跑 **490 passed / 0 failed**；
+  P18 当时 215，之后 P18.1–P46 又追加单测与 play_stream / play_actions / play_crops /
   play_all_crops / timer_persist / play_survival / play_recipes / player_visibility /
-  admin_e2e 集成测试）。
+  fluid / admin_e2e 集成测试）。
 - redb 生产核心真机进程冒烟（2026-11-26）：临时 `server.toml` 设 `world_storage="redb"`、
   独立端口与 world_dir，启动后日志 `redb world opened seed=... / world loaded storage=Redb`
   → `listening` → ticker/keepalive 正常，目录下生成 `state-<seed>.redb` 与 `migration-<seed>.json`，
@@ -894,7 +895,24 @@ $natives = 'C:\Users\qwe\AppData\Local\Temp\mc263natives'
       456 个旧测试一字未改；合并后 471 passed。
     - **性能风险**：本地 debug rayon 估算 441 块 v1 685ms / v2 **1060ms**（约 1.55×），
       包体 54KB/块；真机红线为无压缩 ≤700ms，v2 是否达标待真机复测（v1 仍是默认，不受影响）。
-    **P3 已排期**（任务 `p46-worldgen-p3`：流动水+游泳/block light/单 chunk 小遗迹）。
+    **P3 已实现并合入（`p46-worldgen-p3`，仅 v2）**：
+    - 流动水：`minecraft:water` 16 个 state（89..104）全部经 `state_index_id` 查表；
+      level0=源、1..8=流水，只向 air 扩散每格 +1、最大 8 格，失 inflow 退 air；
+      **全服唯一 50ms ticker**（`fluid_sync.rs`，`serve()` 启动一次，V1 不启动），
+      每拍 ≤64 任务/≤48 落子，写 `MutableWorld` + cache 失效 + `BlockUpdate 0x08`
+      经 hub 广播（Ack 仍只回操作者）。无压力均衡/双源造源/跨 chunk 水流。
+    - 游泳：查脚/脚上/眼格判水中，豁免坠落伤害，脚陷入支撑时用
+      `entity_position_sync 0x23` 只给本人做最小修正；水中位置经 P43 互见广播。
+      无原版游泳动画/浮力手感/水下视野。
+    - block light：torch/wall_torch=14、soul_torch=10、lantern/sea_lantern/glowstone/
+      lava=15（真实 ID 与亮度查表），chunk 内 BFS 每格 -1；`mc-protocol` 新增
+      `encode_light_data` 合并 sky/block mask+数组（wiki 26.3 布局 + 逐字节测试，
+      **未抓包需真机复验**）。玩家编辑后不重算光照（沿用老缺口）。
+    - 遗迹：每 chunk 6% hash，5×5 足迹全在单 chunk、25 列干燥落差≤1、避出生圈，
+      石砖地基+环墙+柱+灯笼；无 jigsaw/loot/block entity，纯函数适配 rayon/缓存。
+    - 隔离：全部仅 V2；V1 golden FNV 与 471 个旧测试一字未改；合并后 490 passed。
+    - 真机待验：挖墙灌水/堵源退水、重连状态、双连接 BlockUpdate/Ack、block light
+      接缝、游泳手感、441 块 Join ≤700ms（P2 本地 v2 估算 1060ms 已超红线，需实测）。
 
 30. **P41 全配方 + P43 玩家实体互见（均已合入）**：
     - **P41 配方补齐**：`crafting.rs` 从 7 条扩到 **283 条**（原 7 条逐字节保留）；
@@ -936,12 +954,14 @@ crates/mc-network/src/
   login_route/               Play 接线目录：login.rs（登录/Join序列）+ mod.rs（play_loop）+ block_edit.rs（decide_dig/decide_place + BlockUpdate/Ack）+ crops.rs（P37 作物路由/种植/骨粉/挖掘副作用）+ drop_sync.rs（掉落生成/50ms tick/拾取/背包同步 + P19 Q扔）+ view_sync.rs（视距节流/flush）
   broadcast.rs               P21 per-player 写通道 hub（conn_id → 队列 + 位置/视距快照，BlockUpdate/Spawn/Data/Remove/TakeItem 视距广播）+ P43 玩家实体状态/known
   player_visibility.rs       P43 对外玩家 id 分配、Join/移动/视距/断线广播
+  fluid_sync.rs              P46 v2 全服唯一流体 ticker + BlockUpdate 广播
   drop_state.rs / drop_state/{timer_io,survival}.rs / timer_spec.rs   DropState：ItemEntities + 背包 + 视距集 + 存档 + P39 timer IO + P40 生存 ticker
   login_route/survival_sync.rs SetHealth/位置同步/进食发包
   tests/timer_persist.rs      P39 真实 redb + ticker 跨重启续算集成测试
   tests/play_survival.rs      P40 合成/饥饿/死亡掉落/重生 e2e
   tests/play_recipes.rs       P41 新配方放料→结果→扣料→同步 e2e
   tests/player_visibility.rs  P43 双连接玩家互见 e2e
+  tests/fluid.rs              P46 流体存档/广播/游泳互见 e2e
   chunk_view.rs              clamp_view_radius/view_chunk_count、per-connection 视距集合/去重/跨区块 add/remove 规划
   chunk_cache.rs             共享已编码 ChunkData 0x2E 包体缓存（Mutex+HashMap+FIFO，默认 1024；`bodies` rayon 并行批量；P17 `with_mutable` + `invalidate`）
   play_events.rs             net 线程 → ECS 的移动/KeepAlive/Disconnect/BlockEdit 事件（conn_id 实体键）
@@ -961,6 +981,8 @@ crates/mc-world/src/
     mod.rs                   WorldGen + GeneratorVersion(v1 冻结/v2 显式)、高度/出生保护/biome/洞穴/树、跨 chunk 扫描
     ores.rs / features.rs    P44 v2 矿种高度带 / 地表材质·多树种·草花水岸植被
     terrain.rs / caves.rs / biome.rs / light.rs   P45 v2 侵蚀河流 / 细洞穴 / 4×4×4 多 biome / 逐列天空光
+    ruins.rs                 P46 v2 单 chunk 确定性小遗迹
+    fluid.rs                 P46 v2 水体 state/流动规则/游泳纯判定
     noise.rs                 2D/3D 平滑 value noise + 确定性 hash
     encode.rs                GeneratedChunk（sections/heights/motion_heights/biome_id）+ network/heightmap/light 编码
     tests.rs                 水/沙岸/树/biome/洞穴/矿/高度图/编码/4 seed 出生点测试
