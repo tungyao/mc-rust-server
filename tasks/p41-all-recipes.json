@@ -1,13 +1,16 @@
 {
   "id": "p41-all-recipes",
   "title": "补齐 2x2 完整合成配方",
-  "status": "doing",
+  "status": "done",
   "owner": "subagent-recipes",
   "priority": "p1",
   "deps": [],
   "branch": "",
   "created": "2026-11-26T05:36:08+00:00",
-  "updated": "2026-11-26T05:36:08+00:00",
-  "detail": "",
-  "files": []
+  "updated": "2026-11-26T05:57:51+00:00",
+  "detail": "2x2配方扩到283条(原7保留)+槽指纹消歧44组;ID全查表;play_recipes e2e;440 passed;merge见main",
+  "files": [
+    "crates/mc-world/src/crafting.rs",
+    "crates/mc-network/tests/play_recipes.rs"
+  ]
 }

@@ -11,8 +11,9 @@
 > （`p36-world-storage` / `f24a0bb`、`p38-store-core`、`p39-timer-persist`，redb，
 > 明确不做 Anvil 兼容，**默认 `world_storage = "redb"`**，见 §5.27）；
 > `p40-survival` 合成 + 生存基础已合入（见 §5.28）；`p42-worldgen-research`
-> 已完成地图生成器调研（见 §5.29）；`p41-all-recipes` / `p43-player-visible` 进行中；
-> `p32-broadcast-chat` 暂缓；
+> 已完成地图生成器调研（见 §5.29，用户已定：v1 冻结 + v2 新 seed、允许改协议 helper、
+> 流动水 + 游泳、单 chunk 小遗迹）；`p41-all-recipes` 283 条配方与 `p43-player-visible`
+> 玩家实体互见均已合入（见 §5.30）；`p32-broadcast-chat` 暂缓；
 > 后台管理面板已用 Vue 3 + Naive UI 重写并**完全离线化**合入（`p34-admin-vue` / `53f1016`、
 > `p35-admin-offline` / `48e14bd`，见 §5.25）；当前无进行中的派发任务。
 
@@ -181,7 +182,7 @@ $natives = 'C:\Users\qwe\AppData\Local\Temp\mc263natives'
 - 同步：生成 Spawn+Data（视距内才发）；每 50ms tick（读超时即跑，不改变 10s 半开语义）
   移动发 Teleport(0x23)，despawn/出视距发 Remove；进视距补发；拾取发 TakeItem+Remove。
   跨区块按 ChunkView 半径判定。P21 起方块/掉落包经 `BroadcastHub` fan-out 给视距内其它连接
-  （Ack 只回操作者本人），各连接按对端维护 known 集去重；玩家实体互见/挖掘动画仍缺（§5.17）。
+  （Ack 只回操作者本人），各连接按对端维护 known 集去重；玩家实体互见已由 §5.30 P43 补齐，挖掘动画 0x05 仍缺。
 - 背包（`mc-world/src/inventory.rs`，46 槽：9–35 主/36–44 快捷栏/0–8 合成盔甲未用；
   selected 0..=8 ↔ 36+selected）：
   Join 读盘+全量 Content（selected≠0 另发 S2C 0x6B，P28.3）；拾取 add_item
@@ -410,9 +411,10 @@ $natives = 'C:\Users\qwe\AppData\Local\Temp\mc263natives'
 
 ### 本地检查
 
-- `cargo test --workspace`：全部通过（2026-11-26 实跑 **424 passed / 0 failed**；
-  P18 当时 215，之后 P18.1–P40 又追加单测与 play_stream / play_actions / play_crops /
-  play_all_crops / timer_persist / play_survival / admin_e2e 集成测试）。
+- `cargo test --workspace`：全部通过（2026-11-26 实跑 **440 passed / 0 failed**；
+  P18 当时 215，之后 P18.1–P43 又追加单测与 play_stream / play_actions / play_crops /
+  play_all_crops / timer_persist / play_survival / play_recipes / player_visibility /
+  admin_e2e 集成测试）。
 - redb 生产核心真机进程冒烟（2026-11-26）：临时 `server.toml` 设 `world_storage="redb"`、
   独立端口与 world_dir，启动后日志 `redb world opened seed=... / world loaded storage=Redb`
   → `listening` → ticker/keepalive 正常，目录下生成 `state-<seed>.redb` 与 `migration-<seed>.json`，
@@ -457,7 +459,7 @@ $natives = 'C:\Users\qwe\AppData\Local\Temp\mc263natives'
    真实 ID 单一数据源，假 ID 已全部替换。
 9. ~~多人同步缺失~~ **方块/掉落同步已由第 17 条 P21 `BroadcastHub` 取代**：
    BlockUpdate / Spawn / Data / Remove / TakeItem 会 fan-out 给视距内其它连接（Ack 只回操作者）。
-   **仍缺**：玩家实体互见（位置广播 + Spawn Player 159）、挖掘动画 `Set Block Destroy Stage 0x05`、
+   **仍缺**：挖掘动画 `Set Block Destroy Stage 0x05`（玩家实体互见已由 §5.30 P43 补齐）、
    大视距广播风暴限流、两人同屏真机复验。
 10. **P18 剩余（生存完整版）**：~~窗口点击整理（ClickContainer 只忽略，整理留后续）~~ **已过时：P18.1 已实现
     PICKUP/SWAP/QUICK_MOVE（仅整箱 SHIFT 整理未做）**；
@@ -565,7 +567,7 @@ $natives = 'C:\Users\qwe\AppData\Local\Temp\mc263natives'
       `play_stream.rs` 新增 3 个 e2e（A 挖/放 B 收 `BlockUpdate` 且无 `Ack`；
       A 扔 B 收同 entity `Spawn`、A 拾取 B 收 `TakeItem`+`Remove`；
       断开一端 hub 条目清除、另一端照常挖放）。旧 20 项一个字未动，全绿。
-    - 遗留 TODO：玩家实体互见（位置广播 + Spawn Player 159）；挖掘动画 0x05；
+    - 遗留 TODO：玩家实体互见已由 §5.30 P43 补齐；挖掘动画 0x05；
       大视距（radius=10）广播风暴限流/合并（当前每变更即时广播，高频挖放 +
       多人同视距时包量线性增长）；真机两人同屏复验。
 18. **P22 种子种植（已合入 main，未真机）**：手持 `wheat_seeds`（物品 1065，
@@ -830,7 +832,8 @@ $natives = 'C:\Users\qwe\AppData\Local\Temp\mc263natives'
 28. **P40 2×2 合成 + 生存基础（已合入）**：`mc-world/src/crafting.rs` 无序精确匹配配方表，
     物品 ID 全部编译期查 `data/777/items.json` 生成表：原木→4 木板、2 木板→4 木棍、
     4 木板→工作台、3 木板+2 木棍→木镐、3 圆石+2 木棍→石镐、3 小麦→面包、
-    煤+木棍→4 火把。背包槽 1–4 为合成格、0 为结果槽（服务端权威判定 + 扣料 + 全量
+    煤+木棍→4 火把。**P41 已把配方扩充到 283 条（原 7 条逐字节保留 + 276 条），见 §5.30。**
+    背包槽 1–4 为合成格、0 为结果槽（服务端权威判定 + 扣料 + 全量
     Content 同步），9–45 的 PICKUP/SWAP/QUICK_MOVE/THROW 语义不变；合成格随背包/redb
     持久化。`mc-world/src/survival.rs` + `drop_state/survival.rs`：per-conn
     health/food/saturation（初始 20/20/5.0），饱和优先衰减、饥饿归零周期扣血、
@@ -859,6 +862,32 @@ $natives = 'C:\Users\qwe\AppData\Local\Temp\mc263natives'
     待用户决策：v1 冻结 vs 原地升级、是否允许改 `mc-protocol` 编码 helper、
     静态水 vs 流动水、结构范围、出生圈外是否强制水景、性能红线 700/600ms、
     是否先抓 vanilla ChunkData 再进 P2。本轮未改任何 Rust 代码/协议，未跑 cargo。
+    **用户决策（2026-11-26）**：v1 冻结 + v2 仅新 seed；允许改 `mc-protocol`
+    增加 biome 容器/非均匀 light helper；水体做**流动水 + 游泳**；结构做**单 chunk 小遗迹**。
+    其余（出生圈外是否强制水景、性能红线 700/600ms、是否先抓 vanilla ChunkData）
+    按文档默认值执行。
+
+30. **P41 全配方 + P43 玩家实体互见（均已合入）**：
+    - **P41 配方补齐**：`crafting.rs` 从 7 条扩到 **283 条**（原 7 条逐字节保留）；
+      144 木材类（10 树种原木/剥离原木→木板、木板→木棍/工作台/箱子/台阶/楼梯/门/
+      活板门/告示牌/栅栏/栅栏门/船/压力板/按钮、桶）、35 工具（7 系 × 镐斧铲锄剑）、
+      16 盔甲、48 羊毛/床/地毯、40 杂项。ID 全部编译期查表。44 组输入多重集相同的
+      冲突以**槽分布指纹**（按 (id,count) 排序的占用槽列表）确定性拆分，未命中时按
+      表序回退，不用随机/哈希序。未覆盖：熔炼/锻造专属产物（锭、木炭、玻璃、
+      下界合金盔甲）、需 >4 种输入或工作台专属 3×3 形状的配方。`play_recipes.rs`
+      2 个 e2e（铁镐、箱子+床）。
+    - **P43 玩家实体互见**：`player_visibility.rs` 独立全局 id 分配器（从
+      1_000_000_000 起，自己仍用 LoginPlay 的 1，不与掉落 1000+ 冲突）；BroadcastHub
+      存 `PlayerEntityState` 与**独立的 per-viewer 玩家 known 集**（不复用 item/orb known）。
+      Join 双向 Spawn（`add_entity 0x01`，type=`minecraft:player`=159，data=0）；
+      移动 C2S 0x1E/0x1F→`move_entity_pos(54)`/`move_entity_pos_rot(55)`、
+      0x20/0x21→`move_entity_rot(57)`，超 i16 差量回退 `entity_position_sync(35)`；
+      50ms 节拍视距进出补发/移除，断线先广播 `RemoveEntities 0x4E` 再 unregister。
+      Ack 只回操作者本人。功能为 opt-in（`with_player_visibility(true)`，生产入口已开）。
+      **未做**：`player_info_update 0x47` 名字/tab/皮肤（bitmask 无抓包不猜字节）、
+      挖掘动画 `0x05`。ID/类型查生成表，布局按 wiki 26.3 已验证口径，记录于
+      `docs/packet-map-777.md` §8。新增双连接 e2e（互见 Spawn / 移动 / Remove / 零 Ack）。
+    合计见 §4（440 passed）。
 
 ## 6. 关键文件
 
@@ -876,11 +905,14 @@ crates/mc-protocol/src/packets/
   data/*_777.bin             LoginPlay / PositionSync / UpdateTags 抓包
 crates/mc-network/src/
   login_route/               Play 接线目录：login.rs（登录/Join序列）+ mod.rs（play_loop）+ block_edit.rs（decide_dig/decide_place + BlockUpdate/Ack）+ crops.rs（P37 作物路由/种植/骨粉/挖掘副作用）+ drop_sync.rs（掉落生成/50ms tick/拾取/背包同步 + P19 Q扔）+ view_sync.rs（视距节流/flush）
-  broadcast.rs               P21 per-player 写通道 hub（conn_id → 队列 + 位置/视距快照，BlockUpdate/Spawn/Data/Remove/TakeItem 视距广播）
+  broadcast.rs               P21 per-player 写通道 hub（conn_id → 队列 + 位置/视距快照，BlockUpdate/Spawn/Data/Remove/TakeItem 视距广播）+ P43 玩家实体状态/known
+  player_visibility.rs       P43 对外玩家 id 分配、Join/移动/视距/断线广播
   drop_state.rs / drop_state/{timer_io,survival}.rs / timer_spec.rs   DropState：ItemEntities + 背包 + 视距集 + 存档 + P39 timer IO + P40 生存 ticker
   login_route/survival_sync.rs SetHealth/位置同步/进食发包
   tests/timer_persist.rs      P39 真实 redb + ticker 跨重启续算集成测试
   tests/play_survival.rs      P40 合成/饥饿/死亡掉落/重生 e2e
+  tests/play_recipes.rs       P41 新配方放料→结果→扣料→同步 e2e
+  tests/player_visibility.rs  P43 双连接玩家互见 e2e
   chunk_view.rs              clamp_view_radius/view_chunk_count、per-connection 视距集合/去重/跨区块 add/remove 规划
   chunk_cache.rs             共享已编码 ChunkData 0x2E 包体缓存（Mutex+HashMap+FIFO，默认 1024；`bodies` rayon 并行批量；P17 `with_mutable` + `invalidate`）
   play_events.rs             net 线程 → ECS 的移动/KeepAlive/Disconnect/BlockEdit 事件（conn_id 实体键）
@@ -893,7 +925,7 @@ crates/mc-world/src/
   crops/{mod,growth,drops}.rs P33/P37 通用作物规格表 + 各生长模型（Age/Tree/Vertical/Side/Fruit）+ 掉落规则
   items.rs                   P18 物品实体纯逻辑（生成/合并/重力/拾取/despawn/视距过滤）
   inventory.rs               P18 背包（46 槽/手持/合并/扣减）+ `player-<user>-<seed>.dat` 存档 + P19 throw_held/throw_from_slot
-  crafting.rs                P40 2×2 合成配方表 + 无序匹配/消耗
+  crafting.rs                P40/P41 2×2 合成 283 条配方 + 无序匹配/槽指纹消歧/消耗
   survival.rs                P40 生存状态（health/food/saturation）与食物表纯逻辑
   store.rs                   P36/P38/P39 redb 存储（生产核心 + 计时）
   worldgen/

@@ -99,3 +99,5 @@
 - [2026-11-26 05:36 UTC] agent=subagent-worldgen task=p42-worldgen-research status=start detail=claim files=
 - [2026-11-26 05:36 UTC] agent=subagent-visible task=p43-player-visible status=start detail=claim files=
 - [2026-11-26 05:43 UTC] agent=subagent-worldgen task=p42-worldgen-research status=done detail=交付docs/worldgen-plan.md(346行):现状缺陷/约束/算法方案/分阶段路线图/性能红线/7项待决策点;未改Rust代码;merge见main files=docs/worldgen-plan.md
+- [2026-11-26 05:57 UTC] agent=subagent-recipes task=p41-all-recipes status=done detail=2x2配方扩到283条(原7保留)+槽指纹消歧44组;ID全查表;play_recipes e2e;440 passed;merge见main files=crates/mc-world/src/crafting.rs,crates/mc-network/tests/play_recipes.rs
+- [2026-11-26 05:57 UTC] agent=subagent-visible task=p43-player-visible status=done detail=玩家实体互见:唯一对外id+add_entity type159+移动54/55/57+视距进出+断线Remove;Ack只回本人;双连接e2e;440 passed;merge见main files=crates/mc-network/src/player_visibility.rs,crates/mc-network/src/broadcast.rs,crates/mc-network/tests/player_visibility.rs,crates/mc-protocol/src/packets/play_entity.rs,docs/packet-map-777.md

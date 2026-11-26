@@ -1,13 +1,19 @@
 {
   "id": "p43-player-visible",
   "title": "多人玩家实体互见（生成/位置同步/断开移除）",
-  "status": "doing",
+  "status": "done",
   "owner": "subagent-visible",
   "priority": "p1",
   "deps": [],
   "branch": "",
   "created": "2026-11-26T05:36:08+00:00",
-  "updated": "2026-11-26T05:36:08+00:00",
-  "detail": "",
-  "files": []
+  "updated": "2026-11-26T05:57:51+00:00",
+  "detail": "玩家实体互见:唯一对外id+add_entity type159+移动54/55/57+视距进出+断线Remove;Ack只回本人;双连接e2e;440 passed;merge见main",
+  "files": [
+    "crates/mc-network/src/player_visibility.rs",
+    "crates/mc-network/src/broadcast.rs",
+    "crates/mc-network/tests/player_visibility.rs",
+    "crates/mc-protocol/src/packets/play_entity.rs",
+    "docs/packet-map-777.md"
+  ]
 }
