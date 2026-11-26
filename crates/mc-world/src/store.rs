@@ -55,6 +55,8 @@ pub mod op_code {
     pub const BLOCK_CLEAR: u8 = 2;
     pub const PLAYER_SAVE: u8 = 3;
     pub const TIMER_SET: u8 = 4;
+    /// P39：删除一条 timer（挖掉/到期/骨粉长树时清理）。
+    pub const TIMER_CLEAR: u8 = 5;
 }
 
 /// 逻辑编辑类型。
@@ -64,6 +66,8 @@ pub enum Op {
     BlockClear,
     PlayerSave,
     TimerSet,
+    /// P39：timer 行被删除，`new=u16::MAX` 表示删除条目。
+    TimerClear,
 }
 
 impl Op {
@@ -73,6 +77,7 @@ impl Op {
             Op::BlockClear => op_code::BLOCK_CLEAR,
             Op::PlayerSave => op_code::PLAYER_SAVE,
             Op::TimerSet => op_code::TIMER_SET,
+            Op::TimerClear => op_code::TIMER_CLEAR,
         }
     }
 
@@ -82,6 +87,7 @@ impl Op {
             op_code::BLOCK_CLEAR => Ok(Op::BlockClear),
             op_code::PLAYER_SAVE => Ok(Op::PlayerSave),
             op_code::TIMER_SET => Ok(Op::TimerSet),
+            op_code::TIMER_CLEAR => Ok(Op::TimerClear),
             other => Err(StoreError::BadRecord(format!("unknown journal op {other}"))),
         }
     }
@@ -104,7 +110,7 @@ pub struct JournalRecord {
 }
 
 /// 成长计时种类：与 §5.18–20 的作物/树苗/树叶观察一一对应。
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum TimerKind {
     Crop = 1,
     Sapling = 2,
@@ -768,6 +774,94 @@ impl WorldStore {
         }
     }
 
+    /// P39 生产入口：一批 timer 更新 + 当前全局 tick 基线，在**同一个事务**落盘。
+    ///
+    /// `tick_offset` 是 `DropState::tick_count`（全服唯一物理 ticker），重启后
+    /// `now = tick_offset`，于是 `now - planted_tick` 继续按原进度推进（§3.6）。
+    /// 每条更新仍记一条 `TimerSet` journal，`tick` 保持 planted tick 口径不变。
+    pub fn set_timers(&self, timers: &[TimerRecord], tick_offset: u64) -> Result<usize, StoreError> {
+        if timers.is_empty() {
+            return Ok(0);
+        }
+        self.with_write(|tx, seq| {
+            {
+                let mut t = tx.open_table(TIMERS)?;
+                for rec in timers {
+                    let key = timer_key(rec.kind, rec.pos);
+                    let value = encode_timer(rec);
+                    t.insert(key.as_slice(), value.as_slice())?;
+                }
+            }
+            let b = tick_offset.to_be_bytes();
+            meta_put(tx, META_TICK, b.as_slice())?;
+            for rec in timers {
+                append_journal(
+                    tx,
+                    seq,
+                    &JournalRecord {
+                        seq: *seq,
+                        op: Op::TimerSet,
+                        tick: rec.planted_tick,
+                        actor: 0,
+                        pos: rec.pos,
+                        old: rec.kind.code() as u16,
+                        new: rec.stage as u16,
+                    },
+                )?;
+            }
+            Ok(timers.len())
+        })
+    }
+
+    /// P39：删除一条 timer（挖掉/取消/到期完成），并记一条 `TimerClear` journal。
+    /// 返回 `true` 表示本来有这一行；`tick` 沿用当前 tick_offset 基线。
+    pub fn delete_timer(&self, kind: TimerKind, pos: (i32, i32, i32)) -> Result<bool, StoreError> {
+        self.with_write(|tx, seq| {
+            let key = timer_key(kind, pos);
+            let removed = {
+                let mut t = tx.open_table(TIMERS)?;
+                let was_present = t.remove(key.as_slice())?.is_some();
+                was_present
+            };
+            if removed {
+                let tick = meta_u64(tx, META_TICK)?.unwrap_or(0);
+                append_journal(
+                    tx,
+                    seq,
+                    &JournalRecord {
+                        seq: *seq,
+                        op: Op::TimerClear,
+                        tick,
+                        actor: 0,
+                        pos,
+                        old: kind.code() as u16,
+                        new: u16::MAX,
+                    },
+                )?;
+            }
+            Ok(removed)
+        })
+    }
+
+    /// P39：启动认领用——列出当前全部 timer（`DropState::with_store` 一次读入内存）。
+    pub fn timers(&self) -> Result<Vec<TimerRecord>, StoreError> {
+        let tx = self.db.begin_read()?;
+        let t = tx.open_table(TIMERS)?;
+        let mut out = Vec::new();
+        for item in t.iter()? {
+            let (k, v) = item?;
+            let kb = k.value();
+            let kind = TimerKind::from_code(kb[0])?;
+            let pos = (
+                i32::from_be_bytes(take::<4>(kb, 1)?),
+                i32::from_be_bytes(take::<4>(kb, 5)?),
+                i32::from_be_bytes(take::<4>(kb, 9)?),
+            );
+            out.push(decode_timer(kind, pos, v.value())?);
+        }
+        Ok(out)
+    }
+
     /// 日志条数（= 下一个 seq）。
     pub fn journal_len(&self) -> Result<u64, StoreError> {
         Ok(meta_u64_read(&self.db, META_SEQ)?.unwrap_or(0))
@@ -797,7 +891,7 @@ impl WorldStore {
                 Op::BlockClear => {
                     out.remove(&rec.pos);
                 }
-                Op::PlayerSave | Op::TimerSet => {}
+                Op::PlayerSave | Op::TimerSet | Op::TimerClear => {}
             }
         }
         Ok(out)
@@ -1068,6 +1162,38 @@ mod tests {
         assert!(s.timer(TimerKind::Sapling, (5, 71, 5)).unwrap().is_none());
         assert!(s.timer(TimerKind::Leaf, (7, 80, 7)).unwrap().is_some());
         assert_eq!(s.replay().unwrap().iter().filter(|r| r.op == Op::TimerSet).count(), 3);
+        cleanup(&dir);
+    }
+
+    /// P39：批量 timer 写入与删除的 journal/回放口径（tick_offset 同事务更新）。
+    #[test]
+    fn timer_batch_set_clear_and_tick_offset_roundtrip() {
+        let dir = tmp("timer-batch");
+        let seed = 9;
+        {
+            let s = WorldStore::open(&dir, seed).unwrap();
+            let a = TimerRecord { kind: TimerKind::Crop, pos: (1, 71, 1), planted_tick: 10, stage: 2, spec: 0 };
+            let b = TimerRecord { kind: TimerKind::Sapling, pos: (2, 71, 2), planted_tick: 10, stage: 0, spec: 0 };
+            assert_eq!(s.set_timers(&[a, b], 1234).unwrap(), 2);
+            assert_eq!(s.tick_offset().unwrap(), 1234);
+            assert!(s.delete_timer(TimerKind::Crop, (1, 71, 1)).unwrap());
+            assert!(!s.delete_timer(TimerKind::Crop, (1, 71, 1)).unwrap(), "delete is idempotent");
+            assert_eq!(s.timers().unwrap().len(), 1);
+        }
+        let s = WorldStore::open(&dir, seed).unwrap();
+        assert_eq!(s.tick_offset().unwrap(), 1234);
+        let all = s.timers().unwrap();
+        assert_eq!(all.len(), 1);
+        assert_eq!(all[0].kind, TimerKind::Sapling);
+        assert_eq!(all[0].planted_tick, 10);
+        let recs = s.replay().unwrap();
+        assert_eq!(recs.len(), 3, "2 TimerSet + 1 TimerClear");
+        assert_eq!(recs[0].op, Op::TimerSet);
+        assert_eq!(recs[0].tick, 10, "TimerSet tick stays planted tick");
+        assert_eq!(recs[2].op, Op::TimerClear);
+        assert_eq!(recs[2].tick, 1234, "TimerClear tick uses current offset");
+        assert_eq!(recs[2].new, u16::MAX);
+        assert!(s.replay_blocks().unwrap().is_empty(), "timers do not alter blocks");
         cleanup(&dir);
     }
 

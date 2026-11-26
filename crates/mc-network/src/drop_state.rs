@@ -14,7 +14,8 @@
 //!   因离线模式 uuid 每次随机，见 `mc_world::inventory` 文档）。
 //! - `known`：conn_id → 该连接已见实体（视距过滤：离开视距发 Remove，进入补发）。
 
-use mc_world::store::WorldStore;
+use mc_world::crops::PlantKind;
+use mc_world::store::{TimerKind, TimerRecord, WorldStore};
 use mc_world::{ItemEntities, MutableWorld, PlayerInventory, XpOrbEntities};
 use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
@@ -27,6 +28,8 @@ use tracing::warn;
 
 use super::broadcast::BroadcastHub;
 use super::chunk_cache::ChunkCache;
+use super::timer_spec::{self, Restored};
+mod timer_io;
 
 /// 全服掉落物物理节拍（ms）：只由 [`DropState::start_global_tick`] 的一个 ticker 驱动。
 pub const DROP_TICK_MS: u64 = 50;
@@ -113,6 +116,9 @@ pub struct DropState {
     seed: i64,
     /// P36.2：redb 模式共享存储（`new()` 仍为 None，旧路径逐字节不变）。
     store: Option<Arc<WorldStore>>,
+    /// P39：构造时从 redb `timers` 一次读入、尚未被 `adopt_existing_*` 认领的记录。
+    /// 树叶观察在构造时直接进 `pending_leaves`；其余三类由 `serve` 的认领入口消耗。
+    restored_timers: Mutex<Vec<TimerRecord>>,
     /// conn_id → 用户名（redb 的 players 表键；load/unload 时维护）。
     player_tags: Mutex<HashMap<u64, String>>,
 }
@@ -124,14 +130,25 @@ impl DropState {
     }
 
     /// redb / legacy 双模式构造；背包读写只改这两个入口，发包与判定逻辑不变。
+    ///
+    /// P39 redb 模式：启动时把 `meta.tick_offset` 恢复为全局 tick 基线，并一次读入
+    /// `timers`（树叶观察直接进内存，其余留给 `adopt_existing_*` 按原 planted/stage
+    /// 认领）。legacy 模式（`store=None`）完全不变：tick 从 0 起、认领重计时。
     pub fn with_store(save_dir: PathBuf, seed: i64, store: Option<Arc<WorldStore>>) -> Self {
-        Self {
+        let tick_offset = store
+            .as_ref()
+            .map(|s| s.tick_offset().unwrap_or_else(|e| {
+                warn!("redb tick_offset load failed seed={seed} ({e})");
+                0
+            }))
+            .unwrap_or(0);
+        let me = Self {
             items: Mutex::new(ItemEntities::new()),
             orbs: Mutex::new(XpOrbEntities::new()),
             inventories: Mutex::new(HashMap::new()),
             known: Mutex::new(HashMap::new()),
             next_id: AtomicI32::new(FIRST_DROP_ENTITY_ID),
-            tick_count: AtomicU64::new(0),
+            tick_count: AtomicU64::new(tick_offset),
             crops: Mutex::new(HashMap::new()),
             stage_ticks: AtomicU64::new(mc_world::WHEAT_TICKS_PER_STAGE),
             saplings: Mutex::new(HashMap::new()),
@@ -147,8 +164,28 @@ impl DropState {
             save_dir,
             seed,
             store,
+            restored_timers: Mutex::new(Vec::new()),
             player_tags: Mutex::new(HashMap::new()),
+        };
+        if let Some(store) = &me.store {
+            match store.timers() {
+                Ok(timers) => {
+                    let mut pending = me.pending_leaves.lock().unwrap_or_else(|p| p.into_inner());
+                    let mut restored = me.restored_timers.lock().unwrap_or_else(|p| p.into_inner());
+                    for rec in timers {
+                        match Restored::from_record(&rec) {
+                            Some(Restored::Leaf) => {
+                                pending.entry(rec.pos).or_insert(rec.planted_tick);
+                            }
+                            Some(_) => restored.push(rec),
+                            None => warn!("redb timer ignored: unknown spec={} kind={:?}", rec.spec, rec.kind),
+                        }
+                    }
+                }
+                Err(e) => warn!("redb timers load failed seed={} ({e})", me.seed),
+            }
         }
+        me
     }
 
     pub fn seed(&self) -> i64 {
@@ -292,6 +329,7 @@ impl DropState {
         let due: Vec<(
             (i32, i32, i32),
             u8,
+            u64,
             u8,
             &'static mc_world::crops::CropSpec,
         )> = {
@@ -315,9 +353,9 @@ impl DropState {
                     };
                     let want = ((now.saturating_sub(e.planted_tick)) / interval)
                         .min(e.crop.max_age as u64) as u8;
-                    (*pos, e.stage, want, e.crop)
+                    (*pos, e.stage, e.planted_tick, want, e.crop)
                 })
-                .filter(|(_, old, want, _)| want != old)
+                .filter(|(_, old, _, want, _)| want != old)
                 .collect()
         };
         if due.is_empty() {
@@ -325,11 +363,14 @@ impl DropState {
         }
         let hub = self.hub.lock().unwrap_or_else(|p| p.into_inner()).clone();
         let cache = self.cache.lock().unwrap_or_else(|p| p.into_inner()).clone();
-        for ((x, y, z), old_stage, want, crop) in due {
+        let mut updates: HashMap<(TimerKind, (i32, i32, i32)), TimerRecord> = HashMap::new();
+        let mut stale = Vec::new();
+        for ((x, y, z), old_stage, planted, want, crop) in due {
             let expected_old = mc_world::crop_stage_id(crop, old_stage);
             if world.get(x, y, z) != expected_old {
                 // 已被挖掉或改掉：摘除跟踪，不广播（挖掘路径的 BlockUpdate 已发出）。
                 self.crops.lock().unwrap_or_else(|p| p.into_inner()).remove(&(x, y, z));
+                stale.push((TimerKind::Crop, (x, y, z)));
                 continue;
             }
             if want <= old_stage {
@@ -355,7 +396,21 @@ impl DropState {
             {
                 e.stage = want;
             }
+            // P39：stage 更新而 planted 不变（口径与内存一致）；同 tick 多条按 pos 去重。
+            updates.insert(
+                (TimerKind::Crop, (x, y, z)),
+                TimerRecord {
+                    kind: TimerKind::Crop,
+                    pos: (x, y, z),
+                    planted_tick: planted,
+                    stage: want,
+                    spec: timer_spec::p33(crop),
+                },
+            );
         }
+        // 锁已全部释放才做 redb IO（P38 锁纪律）；每 tick 至多一个事务。
+        self.clear_timers(&stale);
+        self.persist_timers(&updates.into_values().collect::<Vec<_>>());
     }
 
     /// P22：种下登记（UseItemOn 种植路径调用，落子成功后）。
@@ -372,10 +427,21 @@ impl DropState {
         y: i32,
         z: i32,
     ) {
-        self.crops.lock().unwrap_or_else(|p| p.into_inner()).insert(
-            (x, y, z),
-            CropEntry { planted_tick: self.tick_count.load(Ordering::Relaxed), stage: 0, crop },
-        );
+        let now = self.tick_count.load(Ordering::Relaxed);
+        {
+            self.crops.lock().unwrap_or_else(|p| p.into_inner()).insert(
+                (x, y, z),
+                CropEntry { planted_tick: now, stage: 0, crop },
+            );
+        }
+        // P39：种下即写一条 timer，并把当前全局 tick 存为断点基线。
+        self.persist_timers(&[TimerRecord {
+            kind: TimerKind::Crop,
+            pos: (x, y, z),
+            planted_tick: now,
+            stage: 0,
+            spec: timer_spec::p33(crop),
+        }]);
     }
 
     /// P27：某作物的当前跟踪阶段（骨粉同步/e2e 断言用；未跟踪返回 None）。
@@ -400,25 +466,45 @@ impl DropState {
         z: i32,
         new_stage: u8,
     ) {
-        let mut crops = self.crops.lock().unwrap_or_else(|p| p.into_inner());
-        match crops.get_mut(&(x, y, z)) {
-            Some(e) => e.stage = new_stage,
-            None => {
-                crops.insert(
-                    (x, y, z),
-                    CropEntry {
-                        planted_tick: self.tick_count.load(Ordering::Relaxed),
+        let now = self.tick_count.load(Ordering::Relaxed);
+        let rec = {
+            let mut crops = self.crops.lock().unwrap_or_else(|p| p.into_inner());
+            match crops.get_mut(&(x, y, z)) {
+                Some(e) => {
+                    e.stage = new_stage;
+                    TimerRecord {
+                        kind: TimerKind::Crop,
+                        pos: (x, y, z),
+                        planted_tick: e.planted_tick,
                         stage: new_stage,
-                        crop,
-                    },
-                );
+                        spec: timer_spec::p33(crop),
+                    }
+                }
+                None => {
+                    crops.insert(
+                        (x, y, z),
+                        CropEntry { planted_tick: now, stage: new_stage, crop },
+                    );
+                    TimerRecord {
+                        kind: TimerKind::Crop,
+                        pos: (x, y, z),
+                        planted_tick: now,
+                        stage: new_stage,
+                        spec: timer_spec::p33(crop),
+                    }
+                }
             }
-        }
+        };
+        // P39：骨粉推进后同步 stage（planted 不变），避免重启回到催熟前阶段。
+        self.persist_timers(&[rec]);
     }
 
     /// P22：挖掉/移除时摘除跟踪（挖掘路径调用；ticker 内的懒摘除是兜底）。
     pub fn uproot_crop(&self, x: i32, y: i32, z: i32) {
-        self.crops.lock().unwrap_or_else(|p| p.into_inner()).remove(&(x, y, z));
+        let removed = self.crops.lock().unwrap_or_else(|p| p.into_inner()).remove(&(x, y, z));
+        if removed.is_some() {
+            self.clear_timer(TimerKind::Crop, (x, y, z));
+        }
     }
 
     /// P22：跟踪中的作物数（e2e/诊断用）。
@@ -443,31 +529,32 @@ impl DropState {
         *self.cache.lock().unwrap_or_else(|p| p.into_inner()) = Some(cache);
     }
 
-    /// P22/P33：重启后把存量作物（含小麦）重新纳入生长（stage 按存盘 age，
-    /// planted 按现在，即从重启时刻起重新计时满阶段；与 Anvil 的差距见 HANDOFF §5）。
-    pub fn adopt_existing_crops(&self, world: &MutableWorld) {
-        let now = self.tick_count.load(Ordering::Relaxed);
-        let mut crops = self.crops.lock().unwrap_or_else(|p| p.into_inner());
-        for ((x, y, z), id) in world.crop_blocks() {
-            if let Some((crop, age)) = mc_world::crop_age_of(id) {
-                crops
-                    .entry((x, y, z))
-                    .or_insert(CropEntry { planted_tick: now, stage: age, crop });
-            }
-        }
-    }
-
     /// P22 测试钩子：把某作物的种下 tick 改写为指定值（模拟流逝），返回是否命中。
     /// 生产代码不用；`set_stage_ticks` 调小间隔后一般不需要它。
     /// 注意：`planted_tick` 是绝对 tick（`tick_count` 坐标系），回拨过大—
     /// 即早于 `tick_count` 减去 `stage_ticks*7`—会直接跳到成熟，这是预期语义。
     pub fn retime_crop(&self, x: i32, y: i32, z: i32, planted_tick: u64) -> bool {
-        match self.crops.lock().unwrap_or_else(|p| p.into_inner()).get_mut(&(x, y, z)) {
-            Some(e) => {
-                e.planted_tick = planted_tick;
-                true
+        let rec = {
+            let mut crops = self.crops.lock().unwrap_or_else(|p| p.into_inner());
+            match crops.get_mut(&(x, y, z)) {
+                Some(e) => {
+                    e.planted_tick = planted_tick;
+                    Some(TimerRecord {
+                        kind: TimerKind::Crop,
+                        pos: (x, y, z),
+                        planted_tick,
+                        stage: e.stage,
+                        spec: timer_spec::p33(e.crop),
+                    })
+                }
+                None => None,
             }
-            None => false,
+        };
+        if let Some(rec) = rec {
+            self.persist_timers(&[rec]);
+            true
+        } else {
+            false
         }
     }
 
@@ -484,21 +571,23 @@ impl DropState {
         z: i32,
         facing: u8,
     ) {
-        self.plants.lock().unwrap_or_else(|p| p.into_inner()).insert(
-            (x, y, z),
-            PlantEntry {
-                kind,
-                planted_tick: self.tick_count.load(Ordering::Relaxed),
-                stage: 0,
-                facing,
-                fruit_done: false,
-            },
-        );
+        let now = self.tick_count.load(Ordering::Relaxed);
+        {
+            self.plants.lock().unwrap_or_else(|p| p.into_inner()).insert(
+                (x, y, z),
+                PlantEntry { kind, planted_tick: now, stage: 0, facing, fruit_done: false },
+            );
+        }
+        // P39：P37 五种模型统一登记，age/tree/vertical/side 各有自己的 spec 编号。
+        self.persist_timers(&[Self::plant_timer(kind, (x, y, z), now, 0, false)]);
     }
 
     /// 新植物挖掉/连带摘除（ticker 内的懒摘除是兜底）。
     pub fn uproot_plant(&self, x: i32, y: i32, z: i32) {
-        self.plants.lock().unwrap_or_else(|p| p.into_inner()).remove(&(x, y, z));
+        let removed = self.plants.lock().unwrap_or_else(|p| p.into_inner()).remove(&(x, y, z));
+        if let Some(e) = removed {
+            self.clear_timer(Self::plant_timer_kind(e.kind), (x, y, z));
+        }
     }
 
     /// 跟踪中的新植物数（e2e/诊断用）。
@@ -536,61 +625,35 @@ impl DropState {
             }
             _ => 0,
         };
-        let mut plants = self.plants.lock().unwrap_or_else(|p| p.into_inner());
-        match plants.get_mut(&(x, y, z)) {
-            Some(e) => e.stage = e.stage.max(stage),
-            None => {
-                plants.insert(
-                    (x, y, z),
-                    PlantEntry {
-                        kind: mc_world::plant_at(new_id).map(|(k, _)| k).unwrap_or(
-                            mc_world::crops::PlantKind::Age(&mc_world::crops::NETHER_WART),
-                        ),
-                        planted_tick: self.tick_count.load(Ordering::Relaxed),
-                        stage,
-                        facing: 0,
-                        fruit_done: false,
-                    },
-                );
-            }
-        }
-    }
-
-    /// P37：重启后认领存量新植物（从重启时刻重计时，与 P22/P26 同口径）。
-    pub fn adopt_existing_plants(&self, world: &MutableWorld) {
-        use mc_world::crops::{cocoa_of, plant_at, vertical_spec_of, PlantKind};
         let now = self.tick_count.load(Ordering::Relaxed);
-        let mut plants = self.plants.lock().unwrap_or_else(|p| p.into_inner());
-        for ((x, y, z), id) in world.plant_blocks() {
-            let Some((kind, age)) = plant_at(id) else { continue };
-            // 竖向只跟踪基部，并把已长高度写进 stage。
-            if let PlantKind::Vertical(spec) = kind {
-                if vertical_spec_of(world.get(x, y - 1, z)).map(|s| s.name) == Some(spec.name) {
-                    continue;
+        let rec = {
+            let mut plants = self.plants.lock().unwrap_or_else(|p| p.into_inner());
+            match plants.get_mut(&(x, y, z)) {
+                Some(e) => {
+                    e.stage = e.stage.max(stage);
+                    Some(Self::plant_timer(e.kind, (x, y, z), e.planted_tick, e.stage, e.fruit_done))
                 }
-                let mut h = 0u8;
-                while h < spec.max_height - 1
-                    && vertical_spec_of(world.get(x, y + h as i32 + 1, z)).map(|s| s.name) == Some(spec.name)
-                {
-                    h += 1;
+                None => {
+                    let kind = mc_world::plant_at(new_id).map(|(k, _)| k).unwrap_or(
+                        mc_world::crops::PlantKind::Age(&mc_world::crops::NETHER_WART),
+                    );
+                    plants.insert(
+                        (x, y, z),
+                        PlantEntry {
+                            kind,
+                            planted_tick: now,
+                            stage,
+                            facing: 0,
+                            fruit_done: false,
+                        },
+                    );
+                    Some(Self::plant_timer(kind, (x, y, z), now, stage, false))
                 }
-                plants.entry((x, y, z)).or_insert(PlantEntry {
-                    kind,
-                    planted_tick: now,
-                    stage: h,
-                    facing: 0,
-                    fruit_done: false,
-                });
-                continue;
             }
-            let facing = cocoa_of(id).map(|(_, _, f)| f).unwrap_or(0);
-            plants.entry((x, y, z)).or_insert(PlantEntry {
-                kind,
-                planted_tick: now,
-                stage: age,
-                facing,
-                fruit_done: false,
-            });
+        };
+        // P39：骨粉后 planted 不变、stage 与内存同步，重启不回退到催熟前。
+        if let Some(rec) = rec {
+            self.persist_timers(&[rec]);
         }
     }
 
@@ -685,6 +748,8 @@ impl DropState {
             .iter()
             .map(|(pos, e)| (*pos, *e))
             .collect();
+        // P39：同一 tick 的多次推进按 pos 去重，循环结束后一次性写 redb。
+        let mut updates: HashMap<(TimerKind, (i32, i32, i32)), TimerRecord> = HashMap::new();
         for ((x, y, z), e) in entries {
             match e.kind {
                 PlantKind::Age(spec) => {
@@ -719,6 +784,10 @@ impl DropState {
                         if let Some(slot) = self.plants.lock().unwrap_or_else(|p| p.into_inner()).get_mut(&(x, y, z)) {
                             *slot = grown;
                         }
+                        updates.insert(
+                            (TimerKind::Crop, (x, y, z)),
+                            Self::plant_timer(PlantKind::Age(spec), (x, y, z), e.planted_tick, want, e.fruit_done),
+                        );
                     }
                     // 瓜果：成熟后在邻格落整块瓜（每株仅一次）。
                     if !e.fruit_done && want >= spec.max_age {
@@ -734,6 +803,10 @@ impl DropState {
                                 {
                                     slot.fruit_done = true;
                                 }
+                                updates.insert(
+                                    (TimerKind::Crop, (x, y, z)),
+                                    Self::plant_timer(PlantKind::Age(spec), (x, y, z), e.planted_tick, want, true),
+                                );
                             }
                         }
                     }
@@ -770,6 +843,11 @@ impl DropState {
                         slot.stage += 1;
                         slot.planted_tick = now;
                     }
+                    // P39：竖著作物每长一段把 planted 重置为 now（与内存同口径）。
+                    updates.insert(
+                        (TimerKind::Crop, (x, y, z)),
+                        Self::plant_timer(PlantKind::Vertical(spec), (x, y, z), now, e.stage + 1, false),
+                    );
                 }
                 PlantKind::Side(spec) => {
                     if world.get(x, y, z) != cocoa_state(e.stage, e.facing) {
@@ -790,23 +868,43 @@ impl DropState {
                         if let Some(slot) = self.plants.lock().unwrap_or_else(|p| p.into_inner()).get_mut(&(x, y, z)) {
                             slot.stage = want;
                         }
+                        updates.insert(
+                            (TimerKind::Crop, (x, y, z)),
+                            Self::plant_timer(PlantKind::Side(spec), (x, y, z), e.planted_tick, want, false),
+                        );
                     }
                 }
             }
         }
+        // P39：锁已释放，才把本 tick 的阶段推进合成一个事务写盘。
+        self.persist_timers(&updates.into_values().collect::<Vec<_>>());
     }
 
     /// P26：种下树苗登记（UseItemOn 种植路径调用，落子成功后）。
     pub fn plant_sapling(&self, x: i32, y: i32, z: i32) {
-        self.saplings
-            .lock()
-            .unwrap_or_else(|p| p.into_inner())
-            .insert((x, y, z), self.tick_count.load(Ordering::Relaxed));
+        let now = self.tick_count.load(Ordering::Relaxed);
+        {
+            self.saplings
+                .lock()
+                .unwrap_or_else(|p| p.into_inner())
+                .insert((x, y, z), now);
+        }
+        // P39：橡树苗 spec=0（P37 其它树种走 plants 表，spec 带 TREE tag）。
+        self.persist_timers(&[TimerRecord {
+            kind: TimerKind::Sapling,
+            pos: (x, y, z),
+            planted_tick: now,
+            stage: 0,
+            spec: 0,
+        }]);
     }
 
     /// P26：树苗被挖/所在土被挖时摘除跟踪（挖掘路径调用；ticker 懒摘除是兜底）。
     pub fn uproot_sapling(&self, x: i32, y: i32, z: i32) {
-        self.saplings.lock().unwrap_or_else(|p| p.into_inner()).remove(&(x, y, z));
+        let removed = self.saplings.lock().unwrap_or_else(|p| p.into_inner()).remove(&(x, y, z));
+        if removed.is_some() {
+            self.clear_timer(TimerKind::Sapling, (x, y, z));
+        }
     }
 
     /// P26：跟踪中的树苗数（e2e/诊断用）。
@@ -819,15 +917,6 @@ impl DropState {
         self.sapling_ticks.store(n.max(1), Ordering::Relaxed);
     }
 
-    /// P26：重启后把存量树苗重新纳入生长（从重启时刻重计时；与小麦同口径）。
-    pub fn adopt_existing_saplings(&self, world: &MutableWorld) {
-        let now = self.tick_count.load(Ordering::Relaxed);
-        let mut saplings = self.saplings.lock().unwrap_or_else(|p| p.into_inner());
-        for pos in world.sapling_blocks() {
-            saplings.entry(pos).or_insert(now);
-        }
-    }
-
     /// P27：立即长树（骨粉催熟用；ticker 到期长树复用同一函数）：
     /// - 树苗格已不是树苗（被挖/被改）→ 摘除跟踪，返回 false；
     /// - 土壤（y-1）不是草/泥土/耕地 → 摘除跟踪，返回 false；
@@ -836,12 +925,12 @@ impl DropState {
     ///   摘除跟踪，返回 true。
     pub fn grow_sapling_now(&self, world: &MutableWorld, x: i32, y: i32, z: i32) -> bool {
         if world.get(x, y, z) != mc_world::OAK_SAPLING_BLOCK_ID {
-            self.saplings.lock().unwrap_or_else(|p| p.into_inner()).remove(&(x, y, z));
+            self.uproot_sapling(x, y, z);
             return false;
         }
         let soil = world.get(x, y - 1, z);
         if !mc_world::is_crop_soil(soil) {
-            self.saplings.lock().unwrap_or_else(|p| p.into_inner()).remove(&(x, y, z));
+            self.uproot_sapling(x, y, z);
             return false;
         }
         let hub = self.hub.lock().unwrap_or_else(|p| p.into_inner()).clone();
@@ -879,7 +968,7 @@ impl DropState {
                 );
             }
         }
-        self.saplings.lock().unwrap_or_else(|p| p.into_inner()).remove(&(x, y, z));
+        self.uproot_sapling(x, y, z);
         true
     }
 
@@ -919,20 +1008,35 @@ impl DropState {
     pub fn schedule_leaf_decay_around(&self, world: &MutableWorld, x: i32, y: i32, z: i32) {
         let now = self.tick_count.load(Ordering::Relaxed);
         let r = mc_world::LEAF_DECAY_RADIUS;
-        let mut pending = self.pending_leaves.lock().unwrap_or_else(|p| p.into_inner());
-        for dx in -r..=r {
-            for dy in -r..=r {
-                for dz in -r..=r {
-                    let p = (x + dx, y + dy, z + dz);
-                    let id = world.get(p.0, p.1, p.2);
-                    if id == mc_world::OAK_LEAVES_BLOCK_ID
-                        || mc_world::crops::tree_spec_for_leaves(id).is_some()
-                    {
-                        pending.entry(p).or_insert(now);
+        let mut added = Vec::new();
+        {
+            let mut pending = self.pending_leaves.lock().unwrap_or_else(|p| p.into_inner());
+            for dx in -r..=r {
+                for dy in -r..=r {
+                    for dz in -r..=r {
+                        let p = (x + dx, y + dy, z + dz);
+                        let id = world.get(p.0, p.1, p.2);
+                        if id == mc_world::OAK_LEAVES_BLOCK_ID
+                            || mc_world::crops::tree_spec_for_leaves(id).is_some()
+                        {
+                            // or_insert 保留最早登记时刻，多次挖同一片不续命。
+                            if let std::collections::hash_map::Entry::Vacant(e) = pending.entry(p) {
+                                e.insert(now);
+                                added.push(p);
+                            }
+                        }
                     }
                 }
             }
         }
+        // P39：新登记的观察写 timer；已有观察不续命、不重写。
+        self.persist_timers(&added.into_iter().map(|pos| TimerRecord {
+            kind: TimerKind::Leaf,
+            pos,
+            planted_tick: now,
+            stage: 0,
+            spec: 0,
+        }).collect::<Vec<_>>());
     }
 
     /// P27：半径内是否有橡木原木（有即有支撑，不 decay；简化判定，见 HANDOFF §5）。
@@ -974,16 +1078,19 @@ impl DropState {
         }
         let hub = self.hub.lock().unwrap_or_else(|p| p.into_inner()).clone();
         let cache = self.cache.lock().unwrap_or_else(|p| p.into_inner()).clone();
+        let mut stale = Vec::new();
         for (x, y, z) in due {
             let leaf = world.get(x, y, z);
             let is_leaf = leaf == mc_world::OAK_LEAVES_BLOCK_ID
                 || mc_world::crops::tree_spec_for_leaves(leaf).is_some();
             if !is_leaf {
                 self.pending_leaves.lock().unwrap_or_else(|p| p.into_inner()).remove(&(x, y, z));
+                stale.push((TimerKind::Leaf, (x, y, z)));
                 continue;
             }
             if Self::has_log_nearby(world, x, y, z) {
                 self.pending_leaves.lock().unwrap_or_else(|p| p.into_inner()).remove(&(x, y, z));
+                stale.push((TimerKind::Leaf, (x, y, z)));
                 continue;
             }
             world.set(x, y, z, mc_world::AIR_BLOCK_ID);
@@ -1021,7 +1128,10 @@ impl DropState {
                 );
             }
             self.pending_leaves.lock().unwrap_or_else(|p| p.into_inner()).remove(&(x, y, z));
+            stale.push((TimerKind::Leaf, (x, y, z)));
         }
+        // P39：观察结束（decay/被挖/恢复支撑）都删 timer，重启不再重复 decay。
+        self.clear_timers(&stale);
     }
 
     /// 分配全局唯一 entity_id（永不复用）。
@@ -1101,11 +1211,21 @@ impl DropState {
         if self.store.is_none() {
             return;
         }
-        let tags = self.lock_tags();
-        let invs = self.lock_invs();
-        for (conn_id, inv) in invs.iter() {
-            if let Some(tag) = tags.get(conn_id) {
-                self.persist_inventory(tag, inv);
+        let tick = self.tick_count.load(Ordering::Relaxed);
+        {
+            let tags = self.lock_tags();
+            let invs = self.lock_invs();
+            for (conn_id, inv) in invs.iter() {
+                if let Some(tag) = tags.get(conn_id) {
+                    self.persist_inventory(tag, inv);
+                }
+            }
+        }
+        // P39：60s/退出也刷一次 tick 基线（即使这期间没有任何 timer 变化），
+        // 使重启后的 now 尽量贴近停机时刻；timer 写入本身已同事务更新基线。
+        if let Some(store) = &self.store {
+            if let Err(e) = store.set_tick_offset(tick) {
+                warn!("redb tick_offset save failed seed={} tick={tick} ({e})", self.seed);
             }
         }
     }
