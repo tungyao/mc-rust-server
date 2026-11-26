@@ -13,7 +13,8 @@
 > `p40-survival` 合成 + 生存基础已合入（见 §5.28）；`p42-worldgen-research`
 > 已完成地图生成器调研（见 §5.29，用户已定：v1 冻结 + v2 新 seed、允许改协议 helper、
 > 流动水 + 游泳、单 chunk 小遗迹）；`p41-all-recipes` 283 条配方与 `p43-player-visible`
-> 玩家实体互见均已合入（见 §5.30）；`p32-broadcast-chat` 暂缓；
+> 玩家实体互见均已合入（见 §5.30）；`p44-worldgen-p1` v1 冻结 + v2 低风险视觉已合入
+> （见 §5.29）；P2/P3 已排期；`p32-broadcast-chat` 暂缓；
 > 后台管理面板已用 Vue 3 + Naive UI 重写并**完全离线化**合入（`p34-admin-vue` / `53f1016`、
 > `p35-admin-offline` / `48e14bd`，见 §5.25）；当前无进行中的派发任务。
 
@@ -63,6 +64,7 @@ compression_threshold = -1    # 默认：禁用压缩（原行为）
 # compression_threshold = 256 # 启用：Login Success 前发 SetCompression(256)
 world_dir = "world"           # P17/P36：存档目录；redb 模式为 state-<seed>.redb，旧 toml 缺键按此补齐
 world_storage = "redb"        # P38：新格式（默认）；"legacy" 回退到 overrides/player .dat，旧 toml 缺键补 redb
+generator_version = 1         # P44：1=v1 永久冻结（默认，老 seed 逐字节不变）；2=v2 仅新 seed/显式开启
 ```
 
 P16 的 seed 示例：默认 seed 视野（radius 10）内只有树林/丘陵、没有水面（P14 高度分布下 h<63 的列约 0.2%，且不在出生视距内）；`seed=42` 出生点朝南约 40 格是沙岸+池塘，`seed=-987654321` 出生点东侧约 25 格水域更大，两者都有大量 oak 树，真机截图见 §4。
@@ -411,8 +413,8 @@ $natives = 'C:\Users\qwe\AppData\Local\Temp\mc263natives'
 
 ### 本地检查
 
-- `cargo test --workspace`：全部通过（2026-11-26 实跑 **440 passed / 0 failed**；
-  P18 当时 215，之后 P18.1–P43 又追加单测与 play_stream / play_actions / play_crops /
+- `cargo test --workspace`：全部通过（2026-11-26 实跑 **456 passed / 0 failed**；
+  P18 当时 215，之后 P18.1–P44 又追加单测与 play_stream / play_actions / play_crops /
   play_all_crops / timer_persist / play_survival / play_recipes / player_visibility /
   admin_e2e 集成测试）。
 - redb 生产核心真机进程冒烟（2026-11-26）：临时 `server.toml` 设 `world_storage="redb"`、
@@ -866,6 +868,15 @@ $natives = 'C:\Users\qwe\AppData\Local\Temp\mc263natives'
     增加 biome 容器/非均匀 light helper；水体做**流动水 + 游泳**；结构做**单 chunk 小遗迹**。
     其余（出生圈外是否强制水景、性能红线 700/600ms、是否先抓 vanilla ChunkData）
     按文档默认值执行。
+    **P1 已实现并合入（`p44-worldgen-p1`）**：`GeneratorVersion::{V1,V2}` + 独立 toml 键
+    `generator_version`（默认 1，老 seed/20 个旧 worldgen 测试逐字节不变、golden FNV 锁定 4 块）；
+    v2 仅显式开启，redb `meta.generator` 追加 `|worldgen=<1|2>` 启动校验（不符直接退出），
+    `ChunkCache::set_version` 全量失效。v2 内容：新矿高度带（copper/gold/redstone/diamond/
+    emerald/lapis）、地表过渡（gravel/sandstone/clay/coarse_dirt/podzol/snow/ice）、
+    多树种（oak/birch/spruce/dark_oak，复用 P37 真实 ID）、草花与水岸植被；
+    拆 `worldgen/{ores,features}.rs`，`mutable` 白名单同步。高度场/biome 容器/光照/协议
+    包体均零改动。新增 16 个测试（旧 440 个一字未改），合计见 §4。
+    **P2 / P3 已排期**（任务 `p45-worldgen-p2` / `p46-worldgen-p3`）。
 
 30. **P41 全配方 + P43 玩家实体互见（均已合入）**：
     - **P41 配方补齐**：`crafting.rs` 从 7 条扩到 **283 条**（原 7 条逐字节保留）；
@@ -929,7 +940,8 @@ crates/mc-world/src/
   survival.rs                P40 生存状态（health/food/saturation）与食物表纯逻辑
   store.rs                   P36/P38/P39 redb 存储（生产核心 + 计时）
   worldgen/
-    mod.rs                   WorldGen、高度/出生保护/biome/洞穴/矿/树、跨 chunk 扫描
+    mod.rs                   WorldGen + GeneratorVersion(v1 冻结/v2 显式)、高度/出生保护/biome/洞穴/树、跨 chunk 扫描
+    ores.rs / features.rs    P44 v2 矿种高度带 / 地表材质·多树种·草花水岸植被
     noise.rs                 2D/3D 平滑 value noise + 确定性 hash
     encode.rs                GeneratedChunk（sections/heights/motion_heights/biome_id）+ network/heightmap/light 编码
     tests.rs                 水/沙岸/树/biome/洞穴/矿/高度图/编码/4 seed 出生点测试

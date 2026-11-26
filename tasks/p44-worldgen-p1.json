@@ -1,0 +1,24 @@
+{
+  "id": "p44-worldgen-p1",
+  "title": "worldgen P1：生成器版本开关 + 矿种/地表/多树种草花",
+  "status": "done",
+  "owner": "subagent-worldgen-p1",
+  "priority": "p1",
+  "deps": [],
+  "branch": "",
+  "created": "2026-11-26T05:58:13+00:00",
+  "updated": "2026-11-26T06:22:45+00:00",
+  "detail": "生成器v1冻结/v2显式开关+toml键+meta.generator校验+cache失效;v2矿种/地表/多树种/草花;旧440测试不改;456 passed;merge见main",
+  "files": [
+    "crates/mc-world/src/worldgen/{mod",
+    "ores",
+    "features",
+    "tests}.rs",
+    "crates/mc-world/src/mutable.rs",
+    "crates/mc-world/src/store.rs",
+    "crates/mc-network/src/chunk_cache.rs",
+    "crates/mc-server/src/{config",
+    "main}.rs",
+    "server.toml"
+  ]
+}
