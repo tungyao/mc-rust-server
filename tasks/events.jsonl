@@ -44,3 +44,8 @@
 {"ts": "2026-11-25 15:35 UTC", "agent": "main", "task": "p31-xp-orbs", "status": "todo", "detail": "XP orbs drop pickup", "files": ""}
 {"ts": "2026-11-25 15:35 UTC", "agent": "main", "task": "p32-broadcast-chat", "status": "todo", "detail": "broadcast real packet after 777 chat capture", "files": ""}
 {"ts": "2026-11-25 15:35 UTC", "agent": "main", "task": "p30-task-tracker-m1", "status": "done", "detail": "file store + CLI + migrate 41 events", "files": "scripts/task.py,tasks/"}
+{"ts": "2026-11-26 01:41 UTC", "agent": "main", "task": "p32-broadcast-chat", "status": "blocked", "detail": "暂缓（用户指示先不做）：等 777 聊天包抓包后再实现真实广播", "files": ""}
+{"ts": "2026-11-26 01:41 UTC", "agent": "main", "task": "p33-multi-crop-planting", "status": "todo", "detail": "多作物种植（扩展示有 wheat/sapling 之外的作物）", "files": ""}
+{"ts": "2026-11-26 01:41 UTC", "agent": "main", "task": "p34-admin-vue", "status": "todo", "detail": "后台管理面板 Vue3 + Naive UI 重写", "files": ""}
+{"ts": "2026-11-26 01:41 UTC", "agent": "subagent-p31", "task": "p31-xp-orbs", "status": "start", "detail": "claim", "files": ""}
+{"ts": "2026-11-26 01:41 UTC", "agent": "subagent-admin-vue", "task": "p34-admin-vue", "status": "start", "detail": "claim", "files": ""}

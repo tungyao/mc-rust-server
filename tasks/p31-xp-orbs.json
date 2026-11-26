@@ -1,13 +1,13 @@
 {
   "id": "p31-xp-orbs",
   "title": "XP orbs drop pickup",
-  "status": "todo",
-  "owner": "",
+  "status": "doing",
+  "owner": "subagent-p31",
   "priority": "p2",
   "deps": [],
   "branch": "",
   "created": "2026-11-25T15:35:21+00:00",
-  "updated": "2026-11-25T15:35:21+00:00",
+  "updated": "2026-11-26T01:41:08+00:00",
   "detail": "",
   "files": []
 }

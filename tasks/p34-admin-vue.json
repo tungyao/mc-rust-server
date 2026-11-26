@@ -1,0 +1,13 @@
+{
+  "id": "p34-admin-vue",
+  "title": "后台管理面板 Vue3 + Naive UI 重写",
+  "status": "doing",
+  "owner": "subagent-admin-vue",
+  "priority": "p1",
+  "deps": [],
+  "branch": "",
+  "created": "2026-11-26T01:41:08+00:00",
+  "updated": "2026-11-26T01:41:08+00:00",
+  "detail": "",
+  "files": []
+}

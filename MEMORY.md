@@ -63,3 +63,10 @@
 - [2026-11-25 15:35 UTC] agent=main task=p31-xp-orbs status=todo detail=XP orbs drop pickup files=
 - [2026-11-25 15:35 UTC] agent=main task=p32-broadcast-chat status=todo detail=broadcast real packet after 777 chat capture files=
 - [2026-11-25 15:35 UTC] agent=main task=p30-task-tracker-m1 status=done detail=file store + CLI + migrate 41 events files=scripts/task.py,tasks/
+- [2026-11-26 01:41 UTC] agent=main task=p32-broadcast-chat status=blocked detail=暂缓（用户指示先不做）：等 777 聊天包抓包后再实现真实广播 files=
+- [2026-11-26 01:41 UTC] agent=main task=p33-multi-crop-planting status=todo detail=多作物种植（扩展示有 wheat/sapling 之外的作物） files=
+- [2026-11-26 01:41 UTC] agent=main task=p34-admin-vue status=todo detail=后台管理面板 Vue3 + Naive UI 重写 files=
+- [2026-11-26 01:41 UTC] agent=subagent-p31 task=p31-xp-orbs status=start detail=claim files=
+- [2026-11-26 01:41 UTC] agent=subagent-admin-vue task=p34-admin-vue status=start detail=claim files=
+- [2026-11-26 01:42 UTC] agent=main task=handoff-refresh status=done detail=修正HANDOFF过期描述：P19-P28已合入main、放置无石头回退/点击背包P18.1/P21广播/数据驱动/336测试实跑；新增§5.24 P33多作物与§5.25 Vue面板 files=HANDOFF.md
+- [2026-11-26 01:42 UTC] agent=main task=p31-p34-dispatch status=done detail=p32 blocked暂缓；新建p33多作物(todo)与p34-admin-vue(p1)；claim p31/p34并建worktree分支p31-xp-orbs、p34-admin-vue并行派发；两agent禁改tasks/HANDOFF/MEMORY、禁push files=tasks/*,worktrees/
