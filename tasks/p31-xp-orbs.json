@@ -1,13 +1,22 @@
 {
   "id": "p31-xp-orbs",
   "title": "XP orbs drop pickup",
-  "status": "doing",
+  "status": "done",
   "owner": "subagent-p31",
   "priority": "p2",
   "deps": [],
   "branch": "",
   "created": "2026-11-25T15:35:21+00:00",
-  "updated": "2026-11-26T01:41:08+00:00",
-  "detail": "",
-  "files": []
+  "updated": "2026-11-26T02:03:50+00:00",
+  "detail": "矿物XP确定性掉落+经验球实体池(全服唯一ticker)+TakeItem/SetExperience+背包v2存档兼容v1；347 passed；merge见main",
+  "files": [
+    "crates/mc-world/src/xp.rs",
+    "crates/mc-world/src/drops.rs",
+    "crates/mc-world/src/inventory.rs",
+    "crates/mc-protocol/src/packets/play_entity.rs",
+    "crates/mc-network/src/drop_state.rs",
+    "crates/mc-network/src/login_route/drop_sync.rs",
+    "crates/mc-network/src/login_route/login.rs",
+    "crates/mc-network/tests/play_stream.rs"
+  ]
 }

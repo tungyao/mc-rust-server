@@ -5,8 +5,10 @@
 > P19 Q 扔、P20 `login_route` 拆目录、P21 多人广播、P22 种植、P25 管理面板、P26 树苗长树、
 > P27 种田闭环、P28 Q 扔按视角飞 + 三个补丁（拾取延迟/弹道/选中槽同步）均已合入 main；
 > 但除 P18 早期真机外，上述新增功能均**未做原版客户端真机复验**（见 §5 各条 TODO）。
-> 当前待办：`p31-xp-orbs`、`p33-multi-crop-planting`（多作物种植，很多作物目前种不了）；
-> `p32-broadcast-chat` 暂缓；后台管理面板已用 Vue 3 + Naive UI 重写并合入（`p34-admin-vue` / `53f1016`）。
+> `p31-xp-orbs` 经验球已合入（`2563ebe`，见 §5.26）；当前待办：`p33-multi-crop-planting`
+> （多作物种植，很多作物目前种不了）；`p32-broadcast-chat` 暂缓；
+> 后台管理面板已用 Vue 3 + Naive UI 重写并合入（`p34-admin-vue` / `53f1016`），
+> 正在改为完全离线本地打包（`p35-admin-offline`）。
 
 ## 1. 一句话现状
 
@@ -401,8 +403,8 @@ $natives = 'C:\Users\qwe\AppData\Local\Temp\mc263natives'
 
 ### 本地检查
 
-- `cargo test --workspace`：全部通过（2026-11-26 实跑 **336 passed / 0 failed**；
-  P18 当时 215，P18.1–P28 又追加单测与 play_stream / play_actions / admin_e2e 集成测试）。
+- `cargo test --workspace`：全部通过（2026-11-26 实跑 **347 passed / 0 failed**；
+  P18 当时 215，P18.1–P31 又追加单测与 play_stream / play_actions / admin_e2e 集成测试）。
 - `cargo check --workspace --tests`：0 error。
 - `scripts/check_budget.sh`（Windows 用 `C:\Program Files\Git\bin\bash.exe`）：通过（src ≤2000 行软约束）。
 
@@ -447,7 +449,7 @@ $natives = 'C:\Users\qwe\AppData\Local\Temp\mc263natives'
    大视距广播风暴限流、两人同屏真机复验。
 10. **P18 剩余（生存完整版）**：~~窗口点击整理（ClickContainer 只忽略，整理留后续）~~ **已过时：P18.1 已实现
     PICKUP/SWAP/QUICK_MOVE（仅整箱 SHIFT 整理未做）**；
-   工具等级/精准采集（掉落无视工具，TODO）；经验球（entity 50 → `p31-xp-orbs` 进行中）；
+   工具等级/精准采集（掉落无视工具，TODO）；经验球（entity 50，已由 §5.26 实现）；
    创造/生存模式切换（全按即时破坏+开局石头）；背包键为用户名（离线 uuid 随机，
    在线模式落地后切回 uuid，见 inventory 文档）；实体 UUID 为 id 派生（非随机，
    客户端仅 warn，不影响）；掉落落地高度重算已实现（`ItemEntity.support` 记录支撑坐标，
@@ -722,6 +724,26 @@ $natives = 'C:\Users\qwe\AppData\Local\Temp\mc263natives'
     API（`/api/online`/`world`/`items`/`inventory`/`give`/`kick`/`save`）与 3 个 admin_e2e 一字未动，
     336 passed / 0 failed；broadcast 仍 501 stub，页面只显示说明不发包。
     验证仅到 HTTP 层 + Vue 模板编译检查（环境无浏览器，未做真实渲染）。
+    **后续 `p35-admin-offline` 改为完全离线本地打包（Vite 单文件内联），见进度更新。**
+
+26. **P31 经验球（已合入 main，`2563ebe`）**：`mc-world/src/xp.rs` 新增独立 `XpOrbEntities`
+    池（与物品池分离、共用全局 entity_id；物理口径沿用 P18：10 tick 延迟、1.5 格拾取、
+    重力 0.04/阻尼 0.98、6000 tick despawn、支撑重算），等级曲线用原版公式。
+    `drops.rs` 确定性矿物 XP：煤矿 hash 0~2、铁矿 1，其它方块无 XP（铁矿 XP 是本服口径，
+    原版需熔炼才给，代码已注释）。包 ID/实体 ID 全部查 `data/777` 生成表
+    （`set_experience=105`/0x69、experience_orb=50）；`data/777/packets.json` 没有
+    `spawn_experience_orb` 条目，故复用已验证的 `add_entity 0x01`（type=50/data=0），
+    元数据 `SetEntityData 0x65` index 8 / VarInt(1) / 经验值，拾取 `TakeItemEntity 0x7F`
+    count=1 + Remove + `SetExperience`（Float 进度 + VarInt 等级 + VarInt 总经验）。
+    物理只在全服唯一 50ms ticker 推进（连接侧绝不 tick，P18.1 R1 不重犯），
+    广播走 BroadcastHub（Ack 仍只回操作者）。XP 存进 `player-<user>-<seed>.dat`
+    v2（尾部 +4B），v1 旧文件兼容读取、XP 缺省 0；拾取/断线即刷，Join 时 XP>0 补发 0x69。
+    测试：新增 `xp.rs` 单测、XP 掉落表、`play_entity` 包往返、存档 roundtrip/v1 兼容、
+    `play_stream` e2e（挖铁矿→Spawn→拾取→SetExperience→重进 XP 仍在）；
+    `cargo test --workspace` **347 passed / 0 failed**（重复多轮全绿；agent 首次并行跑曾
+    偶发一次 `p27_bonemeal_advances_wheat_and_grows_sapling` 失败，疑既有骨粉/ticker 竞态，
+    后续多轮未复现，需继续观察）。
+    未做：经验球合并、原版 7.25 格吸引、击杀/熔炼 XP、真机复验（客户端渲染大小/拾取动画）。
 
 ## 6. 关键文件
 

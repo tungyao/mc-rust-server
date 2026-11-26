@@ -1,0 +1,13 @@
+{
+  "id": "p35-admin-offline",
+  "title": "后台面板完全离线：Vite 本地打包 Vue3+NaiveUI 单文件",
+  "status": "doing",
+  "owner": "subagent-admin-offline",
+  "priority": "p1",
+  "deps": [],
+  "branch": "",
+  "created": "2026-11-26T01:50:43+00:00",
+  "updated": "2026-11-26T01:50:43+00:00",
+  "detail": "",
+  "files": []
+}
