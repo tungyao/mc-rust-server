@@ -82,3 +82,6 @@
 - [2026-11-26 02:33 UTC] agent=main task=p37-all-crops status=todo detail=全部作物可种 + 作物逻辑拆分为独立模块 files=
 - [2026-11-26 02:33 UTC] agent=subagent-all-crops task=p37-all-crops status=start detail=claim files=
 - [2026-11-26 02:42 UTC] agent=subagent-storage task=p36-world-storage status=done detail=选redb单文件KV(每seed)作真相源+稀疏内存热层;journal/players/timers同事务;P17W/P18I迁移,旧档.bak;明确不做Anvil兼容;原型store.rs不接生产;365 passed;merge f24a0bb files=docs/world-storage-plan.md,crates/mc-world/src/store.rs,crates/mc-world/src/inventory.rs,crates/mc-world/src/lib.rs,Cargo.toml
+- [2026-11-26 03:00 UTC] agent=main task=p38-store-core status=todo detail=新存储格式核心上生产：redb 替换方块/玩家存档 + 迁移 + 开关 files=
+- [2026-11-26 03:00 UTC] agent=subagent-store-core task=p38-store-core status=start detail=claim files=
+- [2026-11-26 03:12 UTC] agent=subagent-all-crops task=p37-all-crops status=done detail=全部作物可种(7树苗/地狱疣/瓜/浆果/花/可可/竖长植物)+crops独立模块+BLOCK_STATES生成表；旧测试不改；合并后388 passed；merge 66ed05f files=crates/mc-world/src/crops/,crates/mc-network/src/login_route/crops.rs,crates/mc-registry/build.rs,crates/mc-registry/src/lib.rs,crates/mc-network/tests/play_all_crops.rs

@@ -1,0 +1,13 @@
+{
+  "id": "p38-store-core",
+  "title": "新存储格式核心上生产：redb 替换方块/玩家存档 + 迁移 + 开关",
+  "status": "doing",
+  "owner": "subagent-store-core",
+  "priority": "p1",
+  "deps": [],
+  "branch": "",
+  "created": "2026-11-26T03:00:33+00:00",
+  "updated": "2026-11-26T03:00:33+00:00",
+  "detail": "",
+  "files": []
+}

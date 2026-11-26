@@ -1,13 +1,19 @@
 {
   "id": "p37-all-crops",
   "title": "全部作物可种 + 作物逻辑拆分为独立模块",
-  "status": "doing",
+  "status": "done",
   "owner": "subagent-all-crops",
   "priority": "p1",
   "deps": [],
   "branch": "",
   "created": "2026-11-26T02:33:38+00:00",
-  "updated": "2026-11-26T02:33:38+00:00",
-  "detail": "",
-  "files": []
+  "updated": "2026-11-26T03:12:35+00:00",
+  "detail": "全部作物可种(7树苗/地狱疣/瓜/浆果/花/可可/竖长植物)+crops独立模块+BLOCK_STATES生成表；旧测试不改；合并后388 passed；merge 66ed05f",
+  "files": [
+    "crates/mc-world/src/crops/",
+    "crates/mc-network/src/login_route/crops.rs",
+    "crates/mc-registry/build.rs",
+    "crates/mc-registry/src/lib.rs",
+    "crates/mc-network/tests/play_all_crops.rs"
+  ]
 }

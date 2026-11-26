@@ -6,7 +6,8 @@
 > P27 种田闭环、P28 Q 扔按视角飞 + 三个补丁（拾取延迟/弹道/选中槽同步）均已合入 main；
 > 但除 P18 早期真机外，上述新增功能均**未做原版客户端真机复验**（见 §5 各条 TODO）。
 > `p31-xp-orbs` 经验球已合入（`2563ebe`，见 §5.26），`p33-multi-crop-planting`
-> 多作物种植已合入（见 §5.24）；新世界存储格式已完成**方案设计 + 独立原型**
+> 多作物种植与 `p37-all-crops` **全部作物可种 + 作物模块拆分**均已合入（见 §5.24）；
+> 新世界存储格式已完成**方案设计 + 独立原型**
 > （`p36-world-storage` / `f24a0bb`，redb，明确不做 Anvil 兼容，尚未接生产路径，见 §5.27）；
 > `p32-broadcast-chat` 暂缓；
 > 后台管理面板已用 Vue 3 + Naive UI 重写并**完全离线化**合入（`p34-admin-vue` / `53f1016`、
@@ -405,9 +406,9 @@ $natives = 'C:\Users\qwe\AppData\Local\Temp\mc263natives'
 
 ### 本地检查
 
-- `cargo test --workspace`：全部通过（2026-11-26 实跑 **365 passed / 0 failed**；
-  P18 当时 215，之后 P18.1–P36 又追加单测与 play_stream / play_actions / play_crops /
-  admin_e2e 集成测试）。
+- `cargo test --workspace`：全部通过（2026-11-26 实跑 **388 passed / 0 failed**；
+  P18 当时 215，之后 P18.1–P37 又追加单测与 play_stream / play_actions / play_crops /
+  play_all_crops / admin_e2e 集成测试）。
 - `cargo check --workspace --tests`：0 error。
 - `scripts/check_budget.sh`（Windows 用 `C:\Program Files\Git\bin\bash.exe`）：通过（src ≤2000 行软约束）。
 
@@ -724,10 +725,24 @@ $natives = 'C:\Users\qwe\AppData\Local\Temp\mc263natives'
     挖土连带 pop → 掉落/广播/拾取；耕地减半加速同样生效。
     小麦/树苗/骨粉/树叶 decay/Q 扔/后台/经验球行为不变：`wheat_stage_id`/`wheat_age`
     与旧签名改为委托通用表，`BonemealAction::Wheat` 保留兼容旧测试。
-    地狱疣不做（原版需 soul_sand，扩 `is_crop_soil` 会改变小麦/树苗/锄头行为）。
+    地狱疣当时未做（需 soul_sand，扩公共土壤集合会影响小麦/树苗）——**已由 P37 用独立
+    `Soil::SoulSand` 解决，见下**。
     测试：347 个旧测试一字未改，新增 8 单测 + 3 e2e（`play_crops.rs`），共
     **358 passed / 0 failed**；`p27_bonemeal_advances_wheat_and_grows_sapling`
-    在并行负载下仍偶发一次竞态失败（未改测试，隔离 8/8 通过），继续观察。
+    在并行负载下偶发竞态失败（未改测试，隔离 8/8 通过），继续观察。
+
+    后续 **P37 全作物 + 模块拆分（`p37-all-crops` / `66ed05f`）** 在此之上补齐：
+    - 作物：地狱疣（soul_sand 独立土壤）、西瓜/南瓜梗（成熟邻格落真实瓜/南瓜）、
+      甜浆果丛、火把花、猪笼草（上下两格）、可可豆（jungle_log 侧面 face 映射）、
+      甘蔗/竹子/仙人掌（新增 Vertical 竖向生长）、其它 7 种树苗（各自真实 log/leaves）。
+      新增 `mc-registry` 生成表 `BLOCK_STATES` / `block_state_id(name,index)` 以解析多属性
+      blockstate（如可可 age×facing、竹子 age×leaves×stage），ID 全部查表。
+    - 模块拆分：`mc-world/src/crops/{mod,growth,drops}.rs`（规格/生长模型/掉落）+
+      `mc-network/src/login_route/crops.rs`（路由/种植/骨粉/挖掘副作用）；旧公开 API
+      保留为薄 shim，358 个 P33 之前旧测试一字未改。
+    - 与原版差异（有意 MVP）：固定 1200 拍/阶段；瓜每株只结一次且邻格任意可替换；
+      火把花/猪笼草成熟只掉花物品；甜浆果幼丛也掉 1 颗；树苗统一 P26 小树形只换材质；
+      decay 仍为原木距离 ≤3 简化。新增 5 个 e2e（`play_all_crops.rs`），合计见 §4。
 25. **后台管理面板 Vue + Naive UI 重写 + 完全离线化（已完成并合入：`p34-admin-vue` / `53f1016`，
     `p35-admin-offline` / `48e14bd`）**：`crates/mc-server/src/admin_page.html` 从 208 行原生 JS
     改为 1901 行**单文件自包含** Vue 3.5.13 + Naive UI 2.41.0 构建产物（JS/CSS 全内联，
@@ -798,7 +813,7 @@ crates/mc-protocol/src/packets/
   play_sync.rs               PlayerPositionSync/KeepAlive/C2S 移动包
   data/*_777.bin             LoginPlay / PositionSync / UpdateTags 抓包
 crates/mc-network/src/
-  login_route/               Play 接线目录：login.rs（登录/Join序列）+ mod.rs（play_loop）+ block_edit.rs（decide_dig/decide_place + BlockUpdate/Ack）+ drop_sync.rs（掉落生成/50ms tick/拾取/背包同步 + P19 Q扔）+ view_sync.rs（视距节流/flush）
+  login_route/               Play 接线目录：login.rs（登录/Join序列）+ mod.rs（play_loop）+ block_edit.rs（decide_dig/decide_place + BlockUpdate/Ack）+ crops.rs（P37 作物路由/种植/骨粉/挖掘副作用）+ drop_sync.rs（掉落生成/50ms tick/拾取/背包同步 + P19 Q扔）+ view_sync.rs（视距节流/flush）
   broadcast.rs               P21 per-player 写通道 hub（conn_id → 队列 + 位置/视距快照，BlockUpdate/Spawn/Data/Remove/TakeItem 视距广播）
   drop_state.rs              P18 DropState：ItemEntities + conn_id→背包 + entity_id 自增 + known 视距集 + 用户名键存档
   chunk_view.rs              clamp_view_radius/view_chunk_count、per-connection 视距集合/去重/跨区块 add/remove 规划
@@ -809,7 +824,8 @@ crates/mc-network/src/
 crates/mc-network/tests/play_stream.rs   移动事件/压缩配置/seed 透传/视距 2/4 初始块与跨区块批次/P17 挖放端到端/P18 挖→掉落→拾取→背包→放置扣减→存档端到端/P19 Q 扔（单扔/整扔/空手 ack/容器 THROW）集成测试
 crates/mc-world/src/
   mutable.rs                 MutableWorld（基底 + 稀疏 override + dirty）+ 自有稀疏存档读/写 + 出生点抬升 + P18 support_top_y
-  drops.rs                   P18 确定性掉落表 + item ID 常量 + 手持→方块映射
+  drops.rs                   P18 确定性掉落表 + item ID 常量 + 手持→方块映射（作物掉落委托 crops/drops.rs）
+  crops/{mod,growth,drops}.rs P33/P37 通用作物规格表 + 各生长模型（Age/Tree/Vertical/Side/Fruit）+ 掉落规则
   items.rs                   P18 物品实体纯逻辑（生成/合并/重力/拾取/despawn/视距过滤）
   inventory.rs               P18 背包（46 槽/手持/合并/扣减）+ `player-<user>-<seed>.dat` 存档 + P19 throw_held/throw_from_slot
   store.rs                   P36 redb 新存储原型（不接生产路径；设计见 docs/world-storage-plan.md）
