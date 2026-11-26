@@ -7,9 +7,9 @@
 > 但除 P18 早期真机外，上述新增功能均**未做原版客户端真机复验**（见 §5 各条 TODO）。
 > `p31-xp-orbs` 经验球已合入（`2563ebe`，见 §5.26），`p33-multi-crop-planting`
 > 多作物种植与 `p37-all-crops` **全部作物可种 + 作物模块拆分**均已合入（见 §5.24）；
-> 新世界存储格式已完成**方案设计 + 独立原型**
-> （`p36-world-storage` / `f24a0bb`，redb，明确不做 Anvil 兼容，尚未接生产路径，见 §5.27）；
-> `p32-broadcast-chat` 暂缓；
+> 新世界存储格式已完成**方案设计 + 原型 + 生产核心**
+> （`p36-world-storage` / `f24a0bb`、`p38-store-core`，redb，明确不做 Anvil 兼容，
+> **默认 `world_storage = "redb"`**，见 §5.27）；`p32-broadcast-chat` 暂缓；
 > 后台管理面板已用 Vue 3 + Naive UI 重写并**完全离线化**合入（`p34-admin-vue` / `53f1016`、
 > `p35-admin-offline` / `48e14bd`，见 §5.25）；当前无进行中的派发任务。
 
@@ -57,7 +57,8 @@ seed = 123456789              # 默认；决定 WorldGen 地形与出生点 y（
 # seed = -987654321           # 出生 (369,67,381)，东侧约 25 格有更大水域
 compression_threshold = -1    # 默认：禁用压缩（原行为）
 # compression_threshold = 256 # 启用：Login Success 前发 SetCompression(256)
-world_dir = "world"           # P17：override 存档目录（overrides-<seed>.dat），旧 toml 缺键按此补齐
+world_dir = "world"           # P17/P36：存档目录；redb 模式为 state-<seed>.redb，旧 toml 缺键按此补齐
+world_storage = "redb"        # P38：新格式（默认）；"legacy" 回退到 overrides/player .dat，旧 toml 缺键补 redb
 ```
 
 P16 的 seed 示例：默认 seed 视野（radius 10）内只有树林/丘陵、没有水面（P14 高度分布下 h<63 的列约 0.2%，且不在出生视距内）；`seed=42` 出生点朝南约 40 格是沙岸+池塘，`seed=-987654321` 出生点东侧约 25 格水域更大，两者都有大量 oak 树，真机截图见 §4。
@@ -406,9 +407,13 @@ $natives = 'C:\Users\qwe\AppData\Local\Temp\mc263natives'
 
 ### 本地检查
 
-- `cargo test --workspace`：全部通过（2026-11-26 实跑 **388 passed / 0 failed**；
-  P18 当时 215，之后 P18.1–P37 又追加单测与 play_stream / play_actions / play_crops /
+- `cargo test --workspace`：全部通过（2026-11-26 实跑 **395 passed / 0 failed**；
+  P18 当时 215，之后 P18.1–P38 又追加单测与 play_stream / play_actions / play_crops /
   play_all_crops / admin_e2e 集成测试）。
+- redb 生产核心真机进程冒烟（2026-11-26）：临时 `server.toml` 设 `world_storage="redb"`、
+  独立端口与 world_dir，启动后日志 `redb world opened seed=... / world loaded storage=Redb`
+  → `listening` → ticker/keepalive 正常，目录下生成 `state-<seed>.redb` 与 `migration-<seed>.json`，
+  无 panic/退出。
 - `cargo check --workspace --tests`：0 error。
 - `scripts/check_budget.sh`（Windows 用 `C:\Program Files\Git\bin\bash.exe`）：通过（src ≤2000 行软约束）。
 
@@ -796,7 +801,18 @@ $natives = 'C:\Users\qwe\AppData\Local\Temp\mc263natives'
     旧档迁移、schema/seed 守卫；7 个新单测，release 10k 编辑提交 73.6ms / 重放 1.37ms。
     依赖 `redb = "=2.6.4"`（仓库忽略 `Cargo.lock`，故锁确切版本防上游漂移）。
     当前 `cargo test --workspace` **365 passed / 0 failed**。
-    下一步待定：P36.2 生产替换 + 开关、P36.3 计时持久化。
+    **后续 P38 生产核心已合入**：`world_storage = "redb" | "legacy"`（**默认 redb**，
+    `server.toml` 显式写入、旧 toml 缺键自动补；`ServerConfig` 结构体未加字段以免破坏
+    穷举字面量的旧测试）；`main.rs` 启动按 seed 打开/迁移 `state-<seed>.redb`，
+    `MutableWorld::with_store` 注入 blocks 热层，编辑在内存排队，
+    `autosave_system`（60s/断线/退出）用**一个 redb 写事务**刷 `blocks` + `journal` 并清 dirty，
+    失败保留重试；`DropState::with_store` 把背包/XP 读写与 `save_all_inventories` 切到
+    `players` 表 + journal，旧构造函数 `new()` 仍是 legacy 以兼容全部旧测试。
+    迁移仅在库不存在时执行：读 `P17W`/`P18I`（含 v1 XP=0）→ 事务写入 → 写
+    `migration-<seed>.json` → 旧档改名 `.bak`；失败回滚，库已存在时旧档只告警不读。
+    协议包与权威判定零变化。真机进程冒烟见 §4。
+    **仍待**：P36.3 增长计时持久化（timers 表 + tick_offset）、journal 裁剪/运维、
+    net 调用点逐连接 `actor` 标注（已有 `set_with_context` API，当前 actor=0）。
 
 ## 6. 关键文件
 

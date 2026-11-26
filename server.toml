@@ -4,3 +4,5 @@ max_players = 100
 view_distance = 10
 seed = 123456789
 compression_threshold = -1
+# P38 世界存储后端："redb"（默认，world/state-<seed>.redb）或 "legacy"（旧 overrides/player .dat）
+world_storage = "redb"

@@ -30,17 +30,47 @@ fn main() {
     let bind = cfg.bind.clone();
     let online = PlayersOnline::default();
     let (play_tx, play_rx) = unbounded::<mc_network::PlayEvent>();
-    // P17 可变世界：启动时从存档目录加载（缺文件即空世界），net 线程与 ECS 共享同一 Arc。
-    // seed 由文件名隔离，换 seed 用新文件、旧存档保留。
+    // P36.2：启动时按 seed 打开 redb（必要时一次性迁移旧档），把 blocks 注入内存热层。
+    // 显式 legacy 配置仍走原 P17/P18 稀疏档；redb 打开失败不静默回退（避免绕过新格式）。
+    let storage = config::load_world_storage("server.toml");
     let world_dir = cfg.world_dir.clone();
-    let mutable = Arc::new(mc_world::MutableWorld::load_from_dir(std::path::Path::new(&world_dir), cfg.seed).unwrap_or_else(
-        |e| {
-            warn!("world load failed dir={world_dir} seed={} ({e}), starting fresh", cfg.seed);
-            mc_world::MutableWorld::new(cfg.seed)
-        },
-    ));
+    let world_path = std::path::Path::new(&world_dir);
+    let (mutable, shared_store): (
+        Arc<mc_world::MutableWorld>,
+        Option<Arc<mc_world::store::WorldStore>>,
+    ) = match storage {
+        config::WorldStorage::Redb => {
+            let (store, report) = match mc_world::store::WorldStore::open_with_migration(world_path, cfg.seed) {
+                Ok(v) => v,
+                Err(e) => {
+                    warn!("redb world open/migration failed dir={world_dir} seed={} ({e}), exiting", cfg.seed);
+                    std::process::exit(1);
+                }
+            };
+            info!(
+                "redb world opened seed={} blocks={} migrated_players={} renamed={} legacy_ignored={}",
+                cfg.seed, report.blocks, report.players.len(), report.renamed, report.legacy_ignored
+            );
+            let store = Arc::new(store);
+            let loaded = match mc_world::MutableWorld::with_store(cfg.seed, Arc::clone(&store)) {
+                Ok(w) => w,
+                Err(e) => {
+                    warn!("redb world load failed dir={world_dir} seed={} ({e}), exiting", cfg.seed);
+                    std::process::exit(1);
+                }
+            };
+            (Arc::new(loaded), Some(store))
+        }
+        config::WorldStorage::Legacy => {
+            let loaded = mc_world::MutableWorld::load_from_dir(world_path, cfg.seed).unwrap_or_else(|e| {
+                warn!("world load failed dir={world_dir} seed={} ({e}), starting fresh", cfg.seed);
+                mc_world::MutableWorld::new(cfg.seed)
+            });
+            (Arc::new(loaded), None)
+        }
+    };
     info!(
-        "world loaded dir={world_dir} seed={} overrides={} dirty={}",
+        "world loaded storage={storage:?} dir={world_dir} seed={} overrides={} dirty={}",
         cfg.seed,
         mutable.override_count(),
         mutable.dirty_len()
@@ -52,7 +82,12 @@ fn main() {
             .with_mutable(Arc::clone(&mutable)),
     );
     // P18 掉落物实体 + 背包：net 线程共享状态（存档与 overrides 同目录、seed 隔离）。
-    let drop_state = std::sync::Arc::new(mc_network::DropState::new(world_dir.clone().into(), cfg.seed));
+    // P36.2：redb 模式下背包/XP 读写也走同一个 `WorldStore`。
+    let drop_state = std::sync::Arc::new(mc_network::DropState::with_store(
+        world_dir.clone().into(),
+        cfg.seed,
+        shared_store.clone(),
+    ));
     // P25 管理面板：与游戏线程共享的 hub（在线映射唯一来源，计划 §5.2 推荐方案）。
     let hub = Arc::new(mc_network::BroadcastHub::new());
     let net_config = mc_network::NetConfig::new(cfg.max_players, cfg.motd.clone(), Arc::clone(&online.0))
@@ -84,6 +119,8 @@ fn main() {
     app.insert_resource(movement::PendingPlayerRemoval::default());
     app.insert_resource(persist::SharedWorld(Arc::clone(&mutable)));
     app.insert_resource(persist::WorldSaveDir(world_dir.clone().into()));
+    app.insert_resource(persist::SharedStore(shared_store));
+    app.insert_resource(persist::SharedDropState(Arc::clone(&drop_state)));
     app.add_systems(Startup, systems::startup_system);
     app.add_systems(
         Update,
@@ -127,10 +164,16 @@ fn main() {
     loop {
         if shutdown.load(Ordering::SeqCst) {
             info!("saving and exiting...");
-            // P17：优雅退出刷盘（autosave 只管周期/断线，退出走这里全量刷）。
-            match mutable.save_to_dir(std::path::Path::new(&world_dir)) {
-                Ok(n) => info!("world saved on exit dir={world_dir} overrides={n}"),
-                Err(e) => warn!("world save on exit failed dir={world_dir} ({e})"),
+            // 优雅退出刷盘（autosave 只管周期/断线，退出走这里全量刷）。
+            if mutable.has_store() {
+                drop_state.save_all_inventories();
+                let tick = app.world().get_resource::<TickCounter>().map(|c| c.0).unwrap_or(0);
+                match mutable.flush_to_store(tick) {
+                    Ok(n) => info!("world saved on exit to redb edits={n}"),
+                    Err(e) => warn!("world save on exit to redb failed ({e})"),
+                }
+            } else if let Err(e) = mutable.save_to_dir(std::path::Path::new(&world_dir)) {
+                warn!("world save on exit failed dir={world_dir} ({e})");
             }
             break;
         }

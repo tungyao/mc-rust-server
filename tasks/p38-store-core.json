@@ -1,13 +1,21 @@
 {
   "id": "p38-store-core",
   "title": "新存储格式核心上生产：redb 替换方块/玩家存档 + 迁移 + 开关",
-  "status": "doing",
+  "status": "done",
   "owner": "subagent-store-core",
   "priority": "p1",
   "deps": [],
   "branch": "",
   "created": "2026-11-26T03:00:33+00:00",
-  "updated": "2026-11-26T03:00:33+00:00",
-  "detail": "",
-  "files": []
+  "updated": "2026-11-26T03:18:03+00:00",
+  "detail": "redb生产核心: 启动打开/迁移state-<seed>.redb, 编辑队列+单事务刷blocks/journal, 背包XP走players表; 默认redb可切legacy; 真机进程冒烟正常; 合并后395 passed",
+  "files": [
+    "crates/mc-world/src/store.rs",
+    "crates/mc-world/src/mutable.rs",
+    "crates/mc-network/src/drop_state.rs",
+    "crates/mc-server/src/main.rs",
+    "crates/mc-server/src/persist.rs",
+    "crates/mc-server/src/config.rs",
+    "server.toml"
+  ]
 }
