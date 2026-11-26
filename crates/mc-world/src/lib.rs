@@ -160,6 +160,16 @@ pub const REDSTONE_ORE_BLOCK_ID: u16 = registry_id(mc_registry::BLOCKS, "minecra
 pub const DIAMOND_ORE_BLOCK_ID: u16 = registry_id(mc_registry::BLOCKS, "minecraft:diamond_ore") as u16;
 pub const EMERALD_ORE_BLOCK_ID: u16 = registry_id(mc_registry::BLOCKS, "minecraft:emerald_ore") as u16;
 pub const LAPIS_ORE_BLOCK_ID: u16 = registry_id(mc_registry::BLOCKS, "minecraft:lapis_ore") as u16;
+// P45 v2：深层板岩与深板岩矿，同样按 `data/777/blocks.json` 查表（不写死数字）。
+pub const DEEPSLATE_BLOCK_ID: u16 = registry_id(mc_registry::BLOCKS, "minecraft:deepslate") as u16;
+pub const DEEPSLATE_COAL_ORE_BLOCK_ID: u16 = registry_id(mc_registry::BLOCKS, "minecraft:deepslate_coal_ore") as u16;
+pub const DEEPSLATE_IRON_ORE_BLOCK_ID: u16 = registry_id(mc_registry::BLOCKS, "minecraft:deepslate_iron_ore") as u16;
+pub const DEEPSLATE_COPPER_ORE_BLOCK_ID: u16 = registry_id(mc_registry::BLOCKS, "minecraft:deepslate_copper_ore") as u16;
+pub const DEEPSLATE_GOLD_ORE_BLOCK_ID: u16 = registry_id(mc_registry::BLOCKS, "minecraft:deepslate_gold_ore") as u16;
+pub const DEEPSLATE_REDSTONE_ORE_BLOCK_ID: u16 = registry_id(mc_registry::BLOCKS, "minecraft:deepslate_redstone_ore") as u16;
+pub const DEEPSLATE_LAPIS_ORE_BLOCK_ID: u16 = registry_id(mc_registry::BLOCKS, "minecraft:deepslate_lapis_ore") as u16;
+pub const DEEPSLATE_DIAMOND_ORE_BLOCK_ID: u16 = registry_id(mc_registry::BLOCKS, "minecraft:deepslate_diamond_ore") as u16;
+pub const DEEPSLATE_EMERALD_ORE_BLOCK_ID: u16 = registry_id(mc_registry::BLOCKS, "minecraft:deepslate_emerald_ore") as u16;
 /// 草花 / 水下植被（均为非地形、非 MOTION_BLOCKING 装饰方块）。
 pub const SHORT_GRASS_BLOCK_ID: u16 = registry_id(mc_registry::BLOCKS, "minecraft:short_grass") as u16;
 pub const TALL_GRASS_BLOCK_ID: u16 = registry_id(mc_registry::BLOCKS, "minecraft:tall_grass") as u16;

@@ -43,6 +43,34 @@ pub const FOREST_BIOME_ID_777: i32 = 22;
 pub const BEACH_BIOME_ID_777: i32 = 3;
 pub const OCEAN_BIOME_ID_777: i32 = 36;
 
+/// P45 v2 用到的其余 biome 网络 ID，同样来自 `registry_00.bin` 的 67 项（下标即 ID）。
+/// 每项都由 `decode_config_registry_data` 的 `entries` 顺序核对过，见
+/// `play_chunk.rs::tests::extra_biome_ids_match_vanilla_registry`。
+pub const RIVER_BIOME_ID_777: i32 = 42;
+pub const BIRCH_FOREST_BIOME_ID_777: i32 = 4;
+pub const SNOWY_PLAINS_BIOME_ID_777: i32 = 47;
+pub const SNOWY_TAIGA_BIOME_ID_777: i32 = 49;
+pub const TAIGA_BIOME_ID_777: i32 = 57;
+pub const MEADOW_BIOME_ID_777: i32 = 33;
+pub const DESERT_BIOME_ID_777: i32 = 15;
+pub const SAVANNA_BIOME_ID_777: i32 = 43;
+pub const WARM_OCEAN_BIOME_ID_777: i32 = 60;
+pub const COLD_OCEAN_BIOME_ID_777: i32 = 6;
+pub const FROZEN_OCEAN_BIOME_ID_777: i32 = 23;
+pub const FROZEN_RIVER_BIOME_ID_777: i32 = 25;
+pub const SNOWY_BEACH_BIOME_ID_777: i32 = 46;
+pub const STONY_SHORE_BIOME_ID_777: i32 = 53;
+pub const SWAMP_BIOME_ID_777: i32 = 56;
+pub const MANGROVE_SWAMP_BIOME_ID_777: i32 = 32;
+pub const DARK_FOREST_BIOME_ID_777: i32 = 9;
+pub const FLOWER_FOREST_BIOME_ID_777: i32 = 21;
+pub const CHERRY_GROVE_BIOME_ID_777: i32 = 5;
+pub const GROVE_BIOME_ID_777: i32 = 26;
+pub const DEEP_DARK_BIOME_ID_777: i32 = 11;
+pub const DRIPSTONE_CAVES_BIOME_ID_777: i32 = 16;
+pub const LUSH_CAVES_BIOME_ID_777: i32 = 31;
+pub const MUSHROOM_FIELDS_BIOME_ID_777: i32 = 34;
+
 /// Heightmap类型：MOTION_BLOCKING = 4（Chunk_format#Heightmap结构表：WORLD_SURFACE=1，MOTION_BLOCKING=4）。
 pub const HEIGHTMAP_MOTION_BLOCKING_ID: i32 = 4;
 /// 空MOTION_BLOCKING的long数：256列、BPE=9（ceil(log2(384+1))）、每long 7项、ceil(256/7)=37。
@@ -219,12 +247,21 @@ pub fn encode_block_section_with_fluid(
     fluid_count: u16,
     out: &mut Vec<u8>,
 ) {
+    encode_block_states_with_fluid(block_states, fluid_count, out);
+    encode_single_valued_paletted_container(biome_id, out);
+}
+
+/// 只写 block_count/fluid_count/block states 容器（不写 biome）。
+/// 从 v1 的 `encode_block_section_with_fluid` 原样抽出，字节完全一致；
+/// v2 的多 biome 容器在它之后追加，v1 路径仍走老函数。
+fn encode_block_states_with_fluid(block_states: &[i32], fluid_count: u16, out: &mut Vec<u8>) {
     assert_eq!(block_states.len(), SECTION_VOLUME, "section must contain 4096 block states");
     let block_count = block_states.iter().filter(|&&b| b != 0).count() as u16;
     write_u16_be(block_count, out); // 非空气方块数（含水）
     write_u16_be(fluid_count, out); // 流体方块数（水）
 
     // 建立局部 palette（保持首次出现顺序），同时把 4096 项映射为 palette 索引。
+    // 线性查重在 debug 构建下比 HashMap 更快（palette 通常只有几项），顺序也可复现。
     let mut palette: Vec<i32> = Vec::new();
     let mut indices = [0u16; SECTION_VOLUME];
     for (i, &state) in block_states.iter().enumerate() {
@@ -265,7 +302,104 @@ pub fn encode_block_section_with_fluid(
             write_i64_be(word as i64, out);
         }
     }
-    encode_single_valued_paletted_container(biome_id, out);
+}
+
+// ---------------------------------------------------------------------------
+// P45 v2：64 项 biome 容器 + 非均匀天空光。线格式与 v1 完全相同，只是新 helper。
+// ---------------------------------------------------------------------------
+
+/// biome Paletted Container 的条目数：每 section 4×4×4 = 64 个 biome 单元。
+pub const BIOME_CONTAINER_ENTRIES: usize = 64;
+/// 原版 67 项 biome 注册表的 direct BPE = ceil(log2(67)) = 7。
+/// 来源：wiki Chunk_format#Palette_formats（biomes 的 direct BPE 按注册表大小运行时计算）。
+const BIOME_GLOBAL_BITS: u8 = 7;
+/// biome 间接 palette 的最大条目数（>8 走 direct，wiki 同节 + minecraftdocs.dev ladder）。
+const BIOME_MAX_INDIRECT: usize = 8;
+
+/// 64 项 biome paletted container（777/1.21.5+，无 Data Array 长度前缀）。
+/// - 1 项：BPE=0 + Value VarInt（无 data array）；
+/// - 2..=8 项：BPE=max(1,ceil(log2(n)))，VarInt palette 长度 + VarInt 各项；
+/// - >8 项：BPE=7 direct（全局 biome ID 直接打包，不写 palette 列表）。
+///
+/// 布局依据：minecraft.wiki `Java_Edition_protocol/Chunk_format`
+/// 「Chunk Section structure / Biomes = 64 entries (4×4×4)」「Palette formats」
+/// （biomes indirect 1–3 bit / direct 7 bit）、
+/// 「Data Array format」（1.21.5+ 长度不发送、不跨 long、低位在前）。
+/// 真机 vanilla 包体对照待补（本环境无原版客户端）。
+pub fn encode_biome_paletted_container(biomes: &[i32; BIOME_CONTAINER_ENTRIES], out: &mut Vec<u8>) {
+    let mut palette: Vec<i32> = Vec::new();
+    for &b in biomes {
+        if !palette.contains(&b) {
+            palette.push(b);
+        }
+    }
+    if palette.len() == 1 {
+        encode_single_valued_paletted_container(palette[0], out);
+        return;
+    }
+    let (bpe, direct) = if palette.len() <= BIOME_MAX_INDIRECT {
+        (ceil_log2(palette.len()).max(1), false)
+    } else {
+        (BIOME_GLOBAL_BITS, true)
+    };
+    out.push(bpe);
+    if !direct {
+        write_varint(palette.len() as i32, out);
+        for &b in &palette {
+            write_varint(b, out);
+        }
+    }
+    let per_long = 64 / bpe as usize;
+    let longs = BIOME_CONTAINER_ENTRIES.div_ceil(per_long);
+    for li in 0..longs {
+        let mut word: u64 = 0;
+        for k in 0..per_long {
+            let idx = li * per_long + k;
+            if idx >= BIOME_CONTAINER_ENTRIES {
+                break;
+            }
+            let value = if direct {
+                biomes[idx] as u64
+            } else {
+                palette.iter().position(|&p| p == biomes[idx]).unwrap() as u64
+            };
+            word |= value << (k * bpe as usize);
+        }
+        write_i64_be(word as i64, out);
+    }
+}
+
+/// 均匀 air section + 多 biome 容器（v2 空节路径）。
+pub fn encode_empty_section_with_biomes(biomes: &[i32; BIOME_CONTAINER_ENTRIES], out: &mut Vec<u8>) {
+    write_u16_be(0, out);
+    write_u16_be(0, out);
+    encode_single_valued_paletted_container(0, out);
+    encode_biome_paletted_container(biomes, out);
+}
+
+/// 均匀方块 section + 多 biome 容器（v2 全水/全石节路径）。
+pub fn encode_uniform_section_single_with_biomes(
+    block_id: i32,
+    block_count: u16,
+    fluid_count: u16,
+    biomes: &[i32; BIOME_CONTAINER_ENTRIES],
+    out: &mut Vec<u8>,
+) {
+    write_u16_be(block_count, out);
+    write_u16_be(fluid_count, out);
+    encode_single_valued_paletted_container(block_id, out);
+    encode_biome_paletted_container(biomes, out);
+}
+
+/// 混合 section + 多 biome 容器（v2 主路径）。
+pub fn encode_block_section_with_fluid_and_biomes(
+    block_states: &[i32],
+    fluid_count: u16,
+    biomes: &[i32; BIOME_CONTAINER_ENTRIES],
+    out: &mut Vec<u8>,
+) {
+    encode_block_states_with_fluid(block_states, fluid_count, out);
+    encode_biome_paletted_container(biomes, out);
 }
 
 /// 真实 MOTION_BLOCKING 高度图（777 结构化 Heightmaps，非 NBT）：
@@ -340,6 +474,45 @@ pub fn encode_sky_light_data(mask: u64, sky_level: u8, out: &mut Vec<u8>) {
     for _ in 0..count {
         write_varint(2048, out);
         out.resize(out.len() + 2048, packed);
+    }
+    write_varint(0, out); // block light 数组数
+}
+
+/// 非均匀天空光（P45 v2）：`sections` 每项为 `(section_index, 2048B nibble数组)`，
+/// nibble 索引按 `y*256 + z*16 + x`，低位在偶索引、高位在奇索引。
+///
+/// 线与 [`encode_sky_light_data`] 完全相同（wiki `Data_types#Light_Data`）：
+/// sky mask BitSet + block mask + empty sky + empty block + sky 数组数/数组 + block 数组数。
+/// 只把含非零 nibble 的 section 放进 mask（零节客户端按 0 处理）；
+/// BitSet = VarInt 字节数 + 小端 bit 字节（26.3 `FriendlyByteBuf.writeByteArray`）。
+/// 数组按 section 索引升序发送，与 mask 的 bit 顺序一致。
+/// 真机 vanilla 包体对照待补（本环境无原版客户端）。
+pub fn encode_nonuniform_sky_light_data(sections: &[(u32, [u8; 2048])], out: &mut Vec<u8>) {
+    if sections.is_empty() {
+        encode_empty_light_data(out);
+        return;
+    }
+    let mut mask = 0u64;
+    for &(section, _) in sections {
+        if section < 64 {
+            mask |= 1u64 << section;
+        }
+    }
+    let mut ordered: Vec<&(u32, [u8; 2048])> = sections.iter().collect();
+    ordered.sort_by_key(|(section, _)| *section);
+    let mut bits = mask.to_le_bytes().to_vec();
+    while bits.last() == Some(&0) {
+        bits.pop();
+    }
+    write_varint(bits.len() as i32, out);
+    out.extend_from_slice(&bits);
+    write_varint(0, out); // block mask
+    write_varint(0, out); // empty sky mask
+    write_varint(0, out); // empty block mask
+    write_varint(ordered.len() as i32, out);
+    for (_, nibble) in ordered {
+        write_varint(2048, out);
+        out.extend_from_slice(nibble);
     }
     write_varint(0, out); // block light 数组数
 }
@@ -702,6 +875,127 @@ mod tests {
             motion_blocking_heightmap(&[129; 256])
         );
     }
+    #[test]
+    fn extra_biome_ids_match_vanilla_registry() {
+        let body = include_bytes!(concat!(env!("CARGO_MANIFEST_DIR"), "/../../data/777/vanilla_config/registry_00.bin"));
+        let (reg, _) = super::super::decode_config_registry_data(body).unwrap();
+        let idx = |name: &str| reg.entries.iter().position(|e| e.entry_id == format!("minecraft:{name}")).unwrap() as i32;
+        for (name, id) in [
+            ("river", RIVER_BIOME_ID_777),
+            ("birch_forest", BIRCH_FOREST_BIOME_ID_777),
+            ("snowy_plains", SNOWY_PLAINS_BIOME_ID_777),
+            ("snowy_taiga", SNOWY_TAIGA_BIOME_ID_777),
+            ("taiga", TAIGA_BIOME_ID_777),
+            ("meadow", MEADOW_BIOME_ID_777),
+            ("desert", DESERT_BIOME_ID_777),
+            ("savanna", SAVANNA_BIOME_ID_777),
+            ("warm_ocean", WARM_OCEAN_BIOME_ID_777),
+            ("cold_ocean", COLD_OCEAN_BIOME_ID_777),
+            ("frozen_ocean", FROZEN_OCEAN_BIOME_ID_777),
+            ("frozen_river", FROZEN_RIVER_BIOME_ID_777),
+            ("snowy_beach", SNOWY_BEACH_BIOME_ID_777),
+            ("stony_shore", STONY_SHORE_BIOME_ID_777),
+            ("swamp", SWAMP_BIOME_ID_777),
+            ("mangrove_swamp", MANGROVE_SWAMP_BIOME_ID_777),
+            ("dark_forest", DARK_FOREST_BIOME_ID_777),
+            ("flower_forest", FLOWER_FOREST_BIOME_ID_777),
+            ("cherry_grove", CHERRY_GROVE_BIOME_ID_777),
+            ("grove", GROVE_BIOME_ID_777),
+            ("deep_dark", DEEP_DARK_BIOME_ID_777),
+            ("dripstone_caves", DRIPSTONE_CAVES_BIOME_ID_777),
+            ("lush_caves", LUSH_CAVES_BIOME_ID_777),
+            ("mushroom_fields", MUSHROOM_FIELDS_BIOME_ID_777),
+        ] {
+            assert_eq!(idx(name), id, "biome {name}");
+        }
+        assert_eq!(reg.entries.len(), 67);
+    }
+
+    #[test]
+    fn biome_paletted_container_byte_layout() {
+        // 单值：BPE0 + VarInt(biome)，无 data array。
+        let mut b = Vec::new();
+        encode_biome_paletted_container(&[PLAINS_BIOME_ID_777; 64], &mut b);
+        assert_eq!(b, vec![0, PLAINS_BIOME_ID_777 as u8]);
+
+        // 3 项间接：palette=[forest=22, plains=41, river=42]，BPE=2、2 个 long。
+        // 前 16 格 index0、中 16 格 index1、后 32 格 index2。
+        let mut biomes = [0i32; 64];
+        biomes[..16].fill(FOREST_BIOME_ID_777);
+        biomes[16..32].fill(PLAINS_BIOME_ID_777);
+        biomes[32..].fill(RIVER_BIOME_ID_777);
+        let mut b = Vec::new();
+        encode_biome_paletted_container(&biomes, &mut b);
+        assert_eq!(&b[..5], &[2, 3, 22, 41, 42], "BPE + palette");
+        assert_eq!(b.len(), 5 + 16, "2 longs, no length prefix");
+        let w0 = u64::from_be_bytes(b[5..13].try_into().unwrap());
+        let w1 = u64::from_be_bytes(b[13..21].try_into().unwrap());
+        // index0 在前 16 项；index1 占 bit32..63 的偶数位；word1 全是 index2。
+        assert_eq!(w0 & 0xffff_ffff, 0, "first 16 entries are palette[0]");
+        assert_eq!(w0 >> 32, 0x5555_5555, "next 16 entries are palette[1]");
+        assert_eq!(w1, 0xAAAA_AAAA_AAAA_AAAA, "last 32 entries are palette[2]");
+
+        // 9 项：超过间接上限 8 → direct BPE=7、无 palette、8 个 long（64/9 向上取整）。
+        let mut biomes = [0i32; 64];
+        for (i, b) in biomes.iter_mut().enumerate() {
+            *b = (i % 9) as i32;
+        }
+        let mut b = Vec::new();
+        encode_biome_paletted_container(&biomes, &mut b);
+        assert_eq!(b[0], 7, "direct BPE=7");
+        assert_eq!(b.len(), 1 + 8 * 8, "8 longs");
+        let w0 = u64::from_be_bytes(b[1..9].try_into().unwrap());
+        for k in 0..9 {
+            assert_eq!((w0 >> (k * 7)) & 0x7f, k as u64, "direct entry {k}");
+        }
+        // 组合 section：block 单值 air + 多 biome，字节与手工拼接一致。
+        let mut combined = Vec::new();
+        encode_empty_section_with_biomes(&[FOREST_BIOME_ID_777; 64], &mut combined);
+        assert_eq!(&combined[..6], &[0, 0, 0, 0, 0, 0]);
+        assert_eq!(&combined[6..], &[0, FOREST_BIOME_ID_777 as u8]);
+    }
+
+    #[test]
+    fn nonuniform_sky_light_byte_layout() {
+        let mut a = [0u8; 2048];
+        a.fill(0xff);
+        let mut c = [0u8; 2048];
+        c[0] = 0x0f; // 第 0 格 15、第 1 格 0
+        let sections = [(1u32, a), (3u32, c)];
+        let mut b = Vec::new();
+        encode_nonuniform_sky_light_data(&sections, &mut b);
+        // mask bits 1+3 = 0x0A，小端 1 字节。
+        assert_eq!(&b[..2], &[1, 0x0a]);
+        assert_eq!(&b[2..5], &[0, 0, 0], "block/empty masks");
+        assert_eq!(b[5], 2, "sky array count");
+        assert_eq!(&b[6..8], &[0x80, 0x10], "len 2048 VarInt");
+        assert!(b[8..8 + 2048].iter().all(|&x| x == 0xff));
+        assert_eq!(&b[2056..2058], &[0x80, 0x10]);
+        assert_eq!(b[2058], 0x0f);
+        assert!(b[2059..2058 + 2048].iter().all(|&x| x == 0));
+        assert_eq!(*b.last().unwrap(), 0, "block array count");
+        assert_eq!(b.len(), 2 + 3 + 1 + 2 * (2 + 2048) + 1);
+
+        // PlayChunkData 的 decode_body 能完整消费这段 LightData。
+        let v = PlayChunkData {
+            chunk_x: 0,
+            chunk_z: 0,
+            heightmaps_nbt: empty_heightmaps_bytes(),
+            section_bytes: Vec::new(),
+            light_bytes: b.clone(),
+        };
+        let mut body = Vec::new();
+        v.encode_body(&mut body);
+        let (got, used) = PlayChunkData::decode_body(&body).unwrap();
+        assert_eq!(used, body.len());
+        assert_eq!(got.light_bytes, b);
+
+        // 空 section 列表退回 6B 空光照。
+        let mut e = Vec::new();
+        encode_nonuniform_sky_light_data(&[], &mut e);
+        assert_eq!(e, vec![0, 0, 0, 0, 0, 0]);
+    }
+
     #[test]
     fn play_unload_chunk_is_packed_long() {
         // 0x26 在 777 就是 Unload（packet-map §4.1），不是 KeepAlive。

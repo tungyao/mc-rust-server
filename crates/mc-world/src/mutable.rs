@@ -88,6 +88,17 @@ fn is_terrain(id: u16) -> bool {
             | DIAMOND_ORE_BLOCK_ID
             | EMERALD_ORE_BLOCK_ID
             | LAPIS_ORE_BLOCK_ID
+            // P45 v2：深层板岩与深板岩矿变体同样算地形顶，
+            // 否则深挖编辑后 `heights`/天空光起点会回退错列。
+            | crate::DEEPSLATE_BLOCK_ID
+            | crate::DEEPSLATE_COAL_ORE_BLOCK_ID
+            | crate::DEEPSLATE_IRON_ORE_BLOCK_ID
+            | crate::DEEPSLATE_COPPER_ORE_BLOCK_ID
+            | crate::DEEPSLATE_GOLD_ORE_BLOCK_ID
+            | crate::DEEPSLATE_REDSTONE_ORE_BLOCK_ID
+            | crate::DEEPSLATE_LAPIS_ORE_BLOCK_ID
+            | crate::DEEPSLATE_DIAMOND_ORE_BLOCK_ID
+            | crate::DEEPSLATE_EMERALD_ORE_BLOCK_ID
     )
 }
 

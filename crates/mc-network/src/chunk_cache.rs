@@ -18,21 +18,28 @@ pub const DEFAULT_CHUNK_CACHE_CAPACITY: usize = 1024;
 /// 编码一个 chunk 的 ChunkData 包体（不含 packet id / 外层长度）。
 /// 纯基底路径（无 override 时用；与 [`encode_chunk_data_body_mutable`] 同编码）.
 pub fn encode_chunk_data_body(world: &WorldGen, pos: ChunkPos) -> Vec<u8> {
-    encode_generated(&world.generate(pos))
+    encode_generated(&world.generate(pos), world)
 }
 
 /// 编码一个带 override 的 chunk（P17 挖掘/放置后重发用）。
 pub fn encode_chunk_data_body_mutable(world: &MutableWorld, pos: ChunkPos) -> Vec<u8> {
-    encode_generated(&world.generate_chunk(pos))
+    let gen = WorldGen::with_version(world.seed(), world.generator_version());
+    encode_generated(&world.generate_chunk(pos), &gen)
 }
 
-fn encode_generated(chunk: &mc_world::GeneratedChunk) -> Vec<u8> {
+/// v1 走冻结的单值 biome / 简化天空光；v2 走多 biome 容器 + 逐列天空光。
+/// 两者都是同一个 0x2E 包体结构，只是 Data/Light 内容不同。
+fn encode_generated(chunk: &mc_world::GeneratedChunk, world: &WorldGen) -> Vec<u8> {
+    let (section_bytes, light_bytes) = match world.version {
+        GeneratorVersion::V1 => (chunk.network_bytes(), chunk.light_bytes()),
+        GeneratorVersion::V2 => (chunk.network_bytes_v2(world), chunk.light_bytes_v2()),
+    };
     let chunk_data = packets::PlayChunkData {
         chunk_x: chunk.pos.0,
         chunk_z: chunk.pos.1,
         heightmaps_nbt: chunk.heightmaps_bytes(),
-        section_bytes: chunk.network_bytes(),
-        light_bytes: chunk.light_bytes(),
+        section_bytes,
+        light_bytes,
     };
     let mut body = Vec::new();
     chunk_data.encode_body(&mut body);
