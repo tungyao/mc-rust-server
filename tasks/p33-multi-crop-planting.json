@@ -1,13 +1,22 @@
 {
   "id": "p33-multi-crop-planting",
   "title": "多作物种植（扩展示有 wheat/sapling 之外的作物）",
-  "status": "todo",
-  "owner": "",
+  "status": "done",
+  "owner": "subagent-p33",
   "priority": "p2",
   "deps": [],
   "branch": "",
   "created": "2026-11-26T01:41:08+00:00",
-  "updated": "2026-11-26T01:41:08+00:00",
-  "detail": "",
-  "files": []
+  "updated": "2026-11-26T02:25:21+00:00",
+  "detail": "CropSpec通用作物表+胡萝卜/马铃薯/甜菜；复用种植/ticker/骨粉/连带/掉落/广播；小麦行为不变；358 passed；merge见main",
+  "files": [
+    "crates/mc-world/src/crops.rs",
+    "crates/mc-world/src/drops.rs",
+    "crates/mc-world/src/lib.rs",
+    "crates/mc-world/src/mutable.rs",
+    "crates/mc-network/src/drop_state.rs",
+    "crates/mc-network/src/login_route/block_edit.rs",
+    "crates/mc-network/src/login_route/mod.rs",
+    "crates/mc-network/tests/play_crops.rs"
+  ]
 }

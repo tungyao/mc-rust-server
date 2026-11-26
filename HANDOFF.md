@@ -5,8 +5,9 @@
 > P19 Q 扔、P20 `login_route` 拆目录、P21 多人广播、P22 种植、P25 管理面板、P26 树苗长树、
 > P27 种田闭环、P28 Q 扔按视角飞 + 三个补丁（拾取延迟/弹道/选中槽同步）均已合入 main；
 > 但除 P18 早期真机外，上述新增功能均**未做原版客户端真机复验**（见 §5 各条 TODO）。
-> `p31-xp-orbs` 经验球已合入（`2563ebe`，见 §5.26）；当前待办：`p33-multi-crop-planting`
-> （多作物种植，很多作物目前种不了）；`p32-broadcast-chat` 暂缓；
+> `p31-xp-orbs` 经验球已合入（`2563ebe`，见 §5.26），`p33-multi-crop-planting`
+> 多作物种植已合入（见 §5.24）；当前新方向：**研究并采用新世界存储格式（不做 Anvil 兼容）**；
+> `p32-broadcast-chat` 暂缓；
 > 后台管理面板已用 Vue 3 + Naive UI 重写并**完全离线化**合入（`p34-admin-vue` / `53f1016`、
 > `p35-admin-offline` / `48e14bd`，见 §5.25）；当前无进行中的派发任务。
 
@@ -403,8 +404,9 @@ $natives = 'C:\Users\qwe\AppData\Local\Temp\mc263natives'
 
 ### 本地检查
 
-- `cargo test --workspace`：全部通过（2026-11-26 实跑 **347 passed / 0 failed**；
-  P18 当时 215，P18.1–P31 又追加单测与 play_stream / play_actions / admin_e2e 集成测试）。
+- `cargo test --workspace`：全部通过（2026-11-26 实跑 **358 passed / 0 failed**；
+  P18 当时 215，之后 P18.1–P33 又追加单测与 play_stream / play_actions / play_crops /
+  admin_e2e 集成测试）。
 - `cargo check --workspace --tests`：0 error。
 - `scripts/check_budget.sh`（Windows 用 `C:\Program Files\Git\bin\bash.exe`）：通过（src ≤2000 行软约束）。
 
@@ -711,11 +713,20 @@ $natives = 'C:\Users\qwe\AppData\Local\Temp\mc263natives'
     回归 e2e `rejoin_syncs_selected_held_slot`（切 3 格→断线→重进收到 0x6B=3）。
     真机待验：重进后选中与下线前一致。
 
-24. **P33 多作物种植（待办，未开始）**：当前 `decide_plant` 只认 `wheat_seeds`（小麦），
-    树苗另走 P26 路径；用户反馈“之后要种几种作物，很多都种不了”。范围：补多种作物
-    种子 → blockstate 映射（各自生长阶段与成熟掉落），保留现有小麦/树苗/骨粉/树叶 decay
-    行为（用户确认这些均正常），不改扔东西与后台 API 语义。任务见
-    `tasks/p33-multi-crop-planting.json`。
+24. **P33 多作物种植（已完成并合入，`p33-multi-crop`）**：新增 `mc-world/src/crops.rs`
+    通用作物表 `CropSpec`（种子 item / 方块 base / max_age / 每阶段 tick / 掉落口径），
+    ID 全部编译期从 `data/777` 查表（单测断言防漂移）。新增三种作物：
+    **胡萝卜**（carrot 1378，12402–12409，8 阶段，成熟 1~2 + 1/4 再 +1）、
+    **马铃薯**（potato 1379，12410–12417，8 阶段，成熟 1~2 + 1/100 毒马铃薯 1381）、
+    **甜菜**（beetroot_seeds 1439，16792–16795，4 阶段，成熟 beetroot 1438 + 种子 1~2）。
+    全部复用原链路：`decide_plant` → BlockUpdate → 全服唯一 ticker 生长 → 骨粉钳制 →
+    挖土连带 pop → 掉落/广播/拾取；耕地减半加速同样生效。
+    小麦/树苗/骨粉/树叶 decay/Q 扔/后台/经验球行为不变：`wheat_stage_id`/`wheat_age`
+    与旧签名改为委托通用表，`BonemealAction::Wheat` 保留兼容旧测试。
+    地狱疣不做（原版需 soul_sand，扩 `is_crop_soil` 会改变小麦/树苗/锄头行为）。
+    测试：347 个旧测试一字未改，新增 8 单测 + 3 e2e（`play_crops.rs`），共
+    **358 passed / 0 failed**；`p27_bonemeal_advances_wheat_and_grows_sapling`
+    在并行负载下仍偶发一次竞态失败（未改测试，隔离 8/8 通过），继续观察。
 25. **后台管理面板 Vue + Naive UI 重写 + 完全离线化（已完成并合入：`p34-admin-vue` / `53f1016`，
     `p35-admin-offline` / `48e14bd`）**：`crates/mc-server/src/admin_page.html` 从 208 行原生 JS
     改为 1901 行**单文件自包含** Vue 3.5.13 + Naive UI 2.41.0 构建产物（JS/CSS 全内联，
