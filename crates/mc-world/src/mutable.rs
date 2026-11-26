@@ -40,13 +40,14 @@ pub const EYE_HEIGHT: f64 = 1.62;
 /// P17 放置默认材料：石头（创造背包解析见 HANDOFF 限制 §5，暂不支持客户端自选）。
 pub const DEFAULT_PLACE_BLOCK_ID: u16 = STONE_BLOCK_ID;
 /// P17 允许放置的方块（真实 blockstate ID）：石头/泥土/草/橡木原木/沙子/圆石。
-pub const PLACEABLE_BLOCK_IDS: [u16; 6] = [
+pub const PLACEABLE_BLOCK_IDS: [u16; 7] = [
     STONE_BLOCK_ID,
     DIRT_BLOCK_ID,
     GRASS_BLOCK_ID,
     OAK_LOG_BLOCK_ID,
     SAND_BLOCK_ID,
     COBBLESTONE_BLOCK_ID,
+    crate::drops::CRAFTING_TABLE_BLOCK_ID, // P47：工作台可放置并开 3×3 会话
 ];
 
 /// 是否允许玩家放置该方块 ID（P17 allowlist，熔炉/水等不在内）。

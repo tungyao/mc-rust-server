@@ -77,6 +77,11 @@ impl PlayerInventory {
         self.cursor
     }
 
+    /// P47 工作台会话用：直接设置光标栈（背包 2×2 的 click 语义不变）。
+    pub fn set_cursor(&mut self, stack: Option<(i32, i32)>) {
+        self.cursor = stack;
+    }
+
     /// 手持栈搬回背包（断线时调用，避免凭空消失；实在装不下才丢弃）。
     pub fn stow_cursor(&mut self) {
         while let Some((id, c)) = self.cursor {
@@ -397,6 +402,27 @@ impl PlayerInventory {
     /// 拾取入库：先填同物品未满栈（只扫主背包 9-35 与快捷栏 36-44，不碰合成/盔甲槽），
     /// 再找空槽（**快捷栏 36-44 优先**，与原版一致；主背包 9-35 其次；副手 45 最后）；
     /// 返回未装下的剩余数量（0=全装下）。
+    /// P47：不修改背包，预估还能放下多少个 `item_id`（SHIFT 连续合成前的能力检查，
+    /// 保证扣了合成原料后不会吞掉放不下的产物）。
+    pub fn free_slots_for(&self, item_id: i32, limit: i32) -> i32 {
+        let mut room = 0;
+        for idx in (MAIN_START..=MAIN_END).chain(HOTBAR_START..=HOTBAR_END) {
+            match self.slots[idx] {
+                Some((id, count)) if id == item_id => room += MAX_STACK - count,
+                None => room += MAX_STACK,
+                _ => {}
+            }
+            if room >= limit {
+                return room;
+            }
+        }
+        // add_item 的空槽兜底也包含副手 45（但副手不参与同物合并）。
+        if self.slots[45].is_none() {
+            room += MAX_STACK;
+        }
+        room
+    }
+
     pub fn add_item(&mut self, item_id: i32, mut count: i32) -> i32 {
         for idx in (MAIN_START..=MAIN_END).chain(HOTBAR_START..=HOTBAR_END) {
             if count <= 0 {

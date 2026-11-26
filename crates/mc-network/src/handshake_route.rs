@@ -50,6 +50,8 @@ pub async fn handle_connection(
                 hub: config.hub.clone(),
                 fluid: config.fluid.clone(),
                 player_visibility: config.player_visibility,
+                destroy_stage: config.destroy_stage,
+                tool_rules: config.tool_rules,
             };
             handle_login_with_options(stream, addr, &tx, opts).await?;
         }

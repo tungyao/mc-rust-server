@@ -631,6 +631,58 @@ pub const RECIPES: &[Recipe] = &[
     Recipe { needs: &[(ITEM_REDSTONE, 9)], result: (ITEM_REDSTONE_BLOCK, 1), name: "redstone_block" },
 ];
 
+// ---------------------------------------------------------------------------
+// P47：3×3 工作台合成（与背包 2×2 完全隔离，GRID_SIZE/match_recipe/consume_grid 不动）。
+// 槽语义：窗口 1 = 工作台；槽 0 = 结果，槽 1..=9 = 合成格，10..=45 = 玩家背包。
+// 复用同一张 283 条配方表，只按多重集匹配（工作台专属形状/歧义槽型不在 MVP 范围）。
+// ---------------------------------------------------------------------------
+
+/// 工作台合成格数量（槽 1..=9）。
+pub const GRID9_SIZE: usize = 9;
+/// 工作台窗口 ID（玩家背包窗口仍是 0；非 0 的点击只在工作台会话里处理）。
+pub const CRAFT9_WINDOW_ID: i32 = 1;
+/// 工作台结果槽。
+pub const CRAFT9_RESULT_SLOT: i16 = 0;
+
+/// 3×3 配方匹配：与 2×2 共用配方表/多重集口径，但不套用 2×2 的槽分布指纹
+/// （那是为 4 格歧义组准备的）；多条候选按表序取首条，确定性且与 HashMap 无关。
+pub fn match_recipe_9(grid: [Option<(i32, i32)>; GRID9_SIZE]) -> Option<&'static Recipe> {
+    let input = normalized_multiset(&grid_stacks9(grid));
+    RECIPES.iter().find(|r| normalized_multiset(r.needs) == input)
+}
+
+/// 3×3 合成格展平。
+pub fn grid_stacks9(grid: [Option<(i32, i32)>; GRID9_SIZE]) -> Vec<(i32, i32)> {
+    grid.into_iter().flatten().collect()
+}
+
+/// 按 ID 从 3×3 格扣除原料（与 `consume_grid` 同语义，返回是否足够）。
+pub fn consume_grid9(grid: &mut [Option<(i32, i32)>; GRID9_SIZE], recipe: &Recipe) -> bool {
+    for (id, need) in recipe.needs {
+        let mut left = *need;
+        for slot in grid.iter_mut() {
+            if left <= 0 {
+                break;
+            }
+            if let Some((sid, count)) = slot {
+                if *sid != *id {
+                    continue;
+                }
+                let take = (*count).min(left);
+                *count -= take;
+                left -= take;
+                if *count <= 0 {
+                    *slot = None;
+                }
+            }
+        }
+        if left > 0 {
+            return false;
+        }
+    }
+    true
+}
+
 /// 把合成格展平成 `(id, count)` 列表（跳过空槽；未合并，匹配时按 ID 累计）。
 pub fn grid_stacks(grid: [Option<(i32, i32)>; GRID_SIZE]) -> Vec<(i32, i32)> {
     grid.into_iter().flatten().collect()
@@ -819,6 +871,33 @@ mod tests {
 
     /// 每条配方（含旧 7 条）的每个输入/输出 ID 都必须可在生成表中解析；
     /// 同时锁定若干关键 ID 的实测值，防 codegen 漂移。
+    #[test]
+    fn p47_grid9_uses_same_recipe_table_without_touching_2x2() {
+        assert_eq!(GRID_SIZE, 4, "2×2 slot semantics must stay intact");
+        assert_eq!(CRAFT9_WINDOW_ID, 1);
+        // 3×3 的 9 个小麦槽 → 干草捆（同一张配方表）。
+        let mut g9 = [None; GRID9_SIZE];
+        for slot in g9.iter_mut() {
+            *slot = Some((WHEAT, 1));
+        }
+        let r = match_recipe_9(g9).expect("9 wheat must match hay_block");
+        assert_eq!(r.name, "hay_block");
+        assert_eq!(r.result, (ITEM_HAY_BLOCK, 1));
+        assert!(consume_grid9(&mut g9, r));
+        assert!(g9.iter().all(|s| s.is_none()));
+        assert!(match_recipe_9(g9).is_none(), "empty grid has no recipe");
+        // 同一配方在 2×2（9 个塞一格）仍可命中，旧口径不变。
+        let mut g4 = [None; GRID_SIZE];
+        g4[0] = Some((WHEAT, 9));
+        assert_eq!(match_recipe(g4).unwrap().name, "hay_block");
+        // 工作台不存在 10 件小麦的配方：不多不少才算命中。
+        let mut too_many = [None; GRID9_SIZE];
+        for slot in too_many.iter_mut() {
+            *slot = Some((WHEAT, 2));
+        }
+        assert!(match_recipe_9(too_many).is_none());
+    }
+
     #[test]
     fn p41_all_recipe_ids_resolve_in_generated_table() {
         let mut seen = std::collections::BTreeSet::new();

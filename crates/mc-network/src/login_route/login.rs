@@ -47,6 +47,10 @@ pub struct PlayOptions {
     pub fluid: Option<Arc<FluidState>>,
     /// P43 玩家实体互见开关：仅生产入口/显式 e2e 打开；默认关闭保持旧包流。
     pub player_visibility: bool,
+    /// P47 挖掘动画 0x05 广播开关（默认关闭，旧 e2e 包流不变）。
+    pub destroy_stage: bool,
+    /// P47 工具等级/时运/精准采集开关（默认关闭，旧掉落测试口径不变）。
+    pub tool_rules: bool,
 }
 
 impl PlayOptions {
@@ -63,6 +67,8 @@ impl PlayOptions {
             hub: None,
             fluid: None,
             player_visibility: false,
+            destroy_stage: false,
+            tool_rules: false,
         }
     }
 
@@ -110,6 +116,18 @@ impl PlayOptions {
     /// P43：打开玩家实体互见（需同时带 `hub` 才真正发包）。
     pub fn with_player_visibility(mut self, enabled: bool) -> Self {
         self.player_visibility = enabled;
+        self
+    }
+
+    /// P47：打开挖掘进度广播（需同时带 `hub`）。
+    pub fn with_destroy_stage(mut self, enabled: bool) -> Self {
+        self.destroy_stage = enabled;
+        self
+    }
+
+    /// P47：打开工具等级/时运/精准采集判定。
+    pub fn with_tool_rules(mut self, enabled: bool) -> Self {
+        self.tool_rules = enabled;
         self
     }
 }

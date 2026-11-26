@@ -279,6 +279,117 @@ struct KickReq {
     conn_id: Option<u64>,
 }
 
+/// P47：工具附魔开关（`none` / `fortune` / `silk_touch`），按连接设置，仅当前会话。
+/// P47 游戏模式切换请求（username 或 conn_id + survival|creative）。
+#[derive(Debug, Deserialize)]
+struct GamemodeReq {
+    username: Option<String>,
+    conn_id: Option<u64>,
+    gamemode: Option<String>,
+}
+
+fn handle_gamemode(state: &AdminState, body: &[u8]) -> AdminResponse {
+    let req: GamemodeReq = match serde_json::from_slice(body) {
+        Ok(r) => r,
+        Err(_) => return AdminResponse::err(400, "bad json"),
+    };
+    let mode = match req.gamemode.as_deref() {
+        Some(s) => match mc_network::broadcast::GameMode::parse(s) {
+            Some(v) => v,
+            None => return AdminResponse::err(400, "gamemode must be survival|creative"),
+        },
+        None => return AdminResponse::err(400, "gamemode required"),
+    };
+    let (conn, user) = match resolve_conn(state, req.username.as_deref(), req.conn_id) {
+        Ok(v) => v,
+        Err(e) => return AdminResponse::err(400, e),
+    };
+    if !state.hub.set_gamemode(conn, mode) {
+        return AdminResponse::err(400, format!("offline conn {conn}"));
+    }
+    AdminResponse::json(
+        200,
+        serde_json::json!({"ok": true, "conn_id": conn, "username": user, "gamemode": mode.as_str()}),
+    )
+}
+
+#[derive(Debug, Deserialize)]
+struct ToolEnchantReq {
+    username: Option<String>,
+    conn_id: Option<u64>,
+    enchant: Option<String>,
+}
+
+/// P47 工具档位/可挖方块表：所有 ID 直接来自 `mc_registry` 生成表，
+/// 与挖掘判定用的 `mc_world::tools` 常量同源，不让面板自己猜数字。
+fn handle_tools() -> AdminResponse {
+    use mc_world::tools::{MINING_RULES, PICKAXES, TIER_NAMES};
+    let tiers: Vec<serde_json::Value> = TIER_NAMES
+        .iter()
+        .enumerate()
+        .map(|(tier, name)| {
+            let tool = PICKAXES.iter().find(|p| p.tier as usize == tier);
+            serde_json::json!({
+                "tier": tier,
+                "name": name,
+                "item_id": tool.map(|p| p.item_id),
+                "item": tool.map(|p| p.name),
+            })
+        })
+        .collect();
+    let tools: Vec<serde_json::Value> = PICKAXES
+        .iter()
+        .map(|p| serde_json::json!({ "name": p.name, "item": format!("minecraft:{}", p.name), "item_id": p.item_id, "tier": p.tier }))
+        .collect();
+    let blocks: Vec<serde_json::Value> = MINING_RULES
+        .iter()
+        .map(|r| {
+            serde_json::json!({
+                "block": r.block_name,
+                "block_id": r.block_id,
+                "tier": r.tier,
+                "tier_name": TIER_NAMES[r.tier as usize],
+                "item_id": r.item_id,
+                "item": mc_registry::item_name(r.item_id as u32),
+                "fortune": r.fortune,
+            })
+        })
+        .collect();
+    AdminResponse::json(
+        200,
+        serde_json::json!({
+            "ok": true,
+            "tiers": tiers,
+            "tools": tools,
+            "blocks": blocks,
+            "note": "P47 MVP: no durability / no mining speed; enchant is per-conn server flag",
+        }),
+    )
+}
+
+fn handle_tool_enchant(state: &AdminState, body: &[u8]) -> AdminResponse {
+    let req: ToolEnchantReq = match serde_json::from_slice(body) {
+        Ok(r) => r,
+        Err(_) => return AdminResponse::err(400, "bad json"),
+    };
+    let name = match req.enchant.as_deref() {
+        Some(s) => match mc_world::tools::ToolEnchant::parse(s) {
+            Some(v) => v,
+            None => return AdminResponse::err(400, "enchant must be none|fortune|silk_touch"),
+        },
+        None => return AdminResponse::err(400, "enchant required"),
+    };
+    let (conn, user) = match resolve_conn(state, req.username.as_deref(), req.conn_id) {
+        Ok(v) => v,
+        Err(e) => return AdminResponse::err(400, e),
+    };
+    state.drops.set_tool_enchant(conn, name);
+    AdminResponse::json(
+        200,
+        serde_json::json!({"ok": true, "conn_id": conn, "username": user, "enchant": name.as_str()}),
+    )
+}
+
 fn handle_online(state: &AdminState) -> AdminResponse {
     // 读锁内只拷贝快照（`snapshot` 内部处理），丢锁后组 JSON。
     let mut entries = state.hub.snapshot();
@@ -292,6 +403,8 @@ fn handle_online(state: &AdminState) -> AdminResponse {
                 "addr": e.addr,
                 "pos": [e.pos.0, e.pos.1, e.pos.2],
                 "online_secs": e.online_secs,
+                "gamemode": e.gamemode.as_str(),
+                "tool_enchant": state.drops.tool_enchant(e.conn_id).as_str(),
             })
         })
         .collect();
@@ -452,6 +565,78 @@ fn handle_items() -> AdminResponse {
     AdminResponse::raw(200, admin_items::items_catalog_json().to_vec())
 }
 
+/// P47 配方浏览：全部 283 条，输入/输出均带注册名 + ID + 分类；
+/// ID 来自同一张生成表，面板只展示、不自行拼数字。
+fn handle_recipes() -> AdminResponse {
+    let recipes: Vec<serde_json::Value> = mc_world::crafting::RECIPES
+        .iter()
+        .map(|r| {
+            let needs: Vec<serde_json::Value> = r
+                .needs
+                .iter()
+                .map(|(id, count)| {
+                    serde_json::json!({
+                        "item_id": id,
+                        "name": mc_registry::item_name(*id as u32),
+                        "count": count,
+                    })
+                })
+                .collect();
+            let category = admin_items::item_info_by_id(r.result.0 as u32)
+                .map(|(_, _, c)| c.to_string())
+                .unwrap_or_else(|| "其他".to_string());
+            serde_json::json!({
+                "name": r.name,
+                "needs": needs,
+                "result": { "item_id": r.result.0, "count": r.result.1,
+                            "name": mc_registry::item_name(r.result.0 as u32) },
+                "category": category,
+                "grids": [2, 3],
+            })
+        })
+        .collect();
+    AdminResponse::json(
+        200,
+        serde_json::json!({
+            "ok": true,
+            "count": recipes.len(),
+            "recipes": recipes,
+            "note": "P47: 2×2 player grid and 3×3 workbench share this table; no shaped matching",
+        }),
+    )
+}
+
+/// P47 工作台会话快照（仅内存会话，断线即丢；无 block entity 存档 MVP）。
+fn handle_craft9(state: &AdminState) -> AdminResponse {
+    let sessions: Vec<serde_json::Value> = state
+        .drops
+        .craft9_sessions()
+        .into_iter()
+        .map(|s| {
+            let grid: Vec<serde_json::Value> = s
+                .grid
+                .into_iter()
+                .enumerate()
+                .filter_map(|(i, stack)| {
+                    stack.map(|(id, count)| {
+                        serde_json::json!({
+                            "slot": i + 1,
+                            "item_id": id,
+                            "name": mc_registry::item_name(id as u32),
+                            "count": count,
+                        })
+                    })
+                })
+                .collect();
+            serde_json::json!({
+                "pos": [s.x, s.y, s.z],
+                "grid": grid,
+            })
+        })
+        .collect();
+    AdminResponse::json(200, serde_json::json!({"ok": true, "sessions": sessions}))
+}
+
 /// 路由（纯构造响应；M1 只读：`/` + `/api/online` + `/api/world`）。
 pub fn route(req: &HttpRequest, state: &AdminState) -> AdminResponse {
     match (req.method.as_str(), req.path.as_str()) {
@@ -459,8 +644,13 @@ pub fn route(req: &HttpRequest, state: &AdminState) -> AdminResponse {
         ("GET", "/api/online") => handle_online(state),
         ("GET", "/api/world") => handle_world(state),
         ("GET", "/api/items") => handle_items(),
+        ("GET", "/api/tools") => handle_tools(),
+        ("GET", "/api/recipes") => handle_recipes(),
+        ("GET", "/api/craft9") => handle_craft9(state),
         ("GET", "/api/inventory") => handle_inventory(state, &req.query),
         ("POST", "/api/give") => handle_give(state, &req.body),
+        ("POST", "/api/tool-enchant") => handle_tool_enchant(state, &req.body),
+        ("POST", "/api/gamemode") => handle_gamemode(state, &req.body),
         ("POST", "/api/kick") => handle_kick(state, &req.body),
         ("POST", "/api/save") => handle_save(state),
         ("POST", "/api/broadcast") => AdminResponse::err(
@@ -767,6 +957,70 @@ mod tests {
         let b = route(&get("/api/items"), &st).body.len();
         assert_eq!(b, crate::admin_items::items_catalog_json().len());
         assert_eq!(a, crate::admin_items::items_catalog_json().as_ptr());
+    }
+
+    #[test]
+    fn gamemode_endpoint_defaults_survival_and_switches_per_conn() {
+        let st = test_state();
+        assert_eq!(route(&post("/api/gamemode", r#"{"username":"Nobody","gamemode":"creative"}"#), &st).status, 400);
+        assert_eq!(route(&post("/api/gamemode", r#"{"username":"Nobody","gamemode":"spectator"}"#), &st).status, 400);
+        let (tx, _rx) = crossbeam_channel::unbounded();
+        st.hub.register_with_name(61, tx, 2, (0.0, 64.0, 0.0), "ModeUser".into(), "x".into());
+        let online = body_json(&route(&get("/api/online"), &st));
+        assert_eq!(online["online"][0]["gamemode"], "survival");
+        let r = route(&post("/api/gamemode", r#"{"username":"ModeUser","gamemode":"creative"}"#), &st);
+        assert_eq!(body_json(&r)["gamemode"], "creative");
+        assert_eq!(body_json(&route(&get("/api/online"), &st))["online"][0]["gamemode"], "creative");
+        let r = route(&post("/api/gamemode", r#"{"conn_id":61,"gamemode":"survival"}"#), &st);
+        assert_eq!(r.status, 200);
+        assert_eq!(body_json(&route(&get("/api/online"), &st))["online"][0]["gamemode"], "survival");
+    }
+
+    #[test]
+    fn recipes_catalog_exposes_all_recipes_and_craft9_sessions() {
+        let st = test_state();
+        let r = route(&get("/api/recipes"), &st);
+        assert_eq!(r.status, 200);
+        let v = body_json(&r);
+        assert_eq!(v["count"], mc_world::crafting::RECIPES.len() as i64);
+        assert_eq!(v["count"], 283);
+        let recipes = v["recipes"].as_array().unwrap();
+        let hay = recipes.iter().find(|x| x["name"] == "hay_block").unwrap();
+        assert_eq!(hay["result"]["item_id"], mc_registry::item_id("minecraft:hay_block").unwrap() as i64);
+        assert_eq!(hay["needs"][0]["item_id"], mc_registry::item_id("minecraft:wheat").unwrap() as i64);
+        assert!(hay["needs"][0]["name"].is_string());
+        assert!(hay["category"].is_string());
+        let sessions = body_json(&route(&get("/api/craft9"), &st));
+        assert_eq!(sessions["sessions"].as_array().unwrap().len(), 0);
+    }
+
+    #[test]
+    fn tools_catalog_is_table_driven_and_enchant_endpoint_sets_conn_state() {
+        let st = test_state();
+        let r = route(&get("/api/tools"), &st);
+        assert_eq!(r.status, 200);
+        let v = body_json(&r);
+        assert_eq!(v["ok"], true);
+        assert_eq!(v["tiers"].as_array().unwrap().len(), 7);
+        let tools = v["tools"].as_array().unwrap();
+        assert_eq!(tools.len(), 6);
+        let wood = tools.iter().find(|t| t["name"] == "wooden_pickaxe").unwrap();
+        assert_eq!(wood["item_id"], mc_registry::item_id("minecraft:wooden_pickaxe").unwrap() as i64);
+        assert_eq!(wood["tier"], 1);
+        let blocks = v["blocks"].as_array().unwrap();
+        let dia = blocks.iter().find(|b| b["block"] == "minecraft:diamond_ore").unwrap();
+        assert_eq!(dia["block_id"], mc_registry::block_id("minecraft:diamond_ore").unwrap() as i64);
+        assert_eq!(dia["tier"], 4);
+        assert_eq!(dia["fortune"], true);
+        // 离线/坏附魔 400；在线设置生效（默认无附魔）。
+        assert_eq!(route(&post("/api/tool-enchant", r#"{"username":"Nobody","enchant":"fortune"}"#), &st).status, 400);
+        assert_eq!(route(&post("/api/tool-enchant", r#"{"username":"Nobody","enchant":"nope"}"#), &st).status, 400);
+        let (tx, _rx) = crossbeam_channel::unbounded();
+        st.hub.register_with_name(51, tx, 2, (0.0, 64.0, 0.0), "Miner".into(), "x".into());
+        assert_eq!(st.drops.tool_enchant(51), mc_world::tools::ToolEnchant::None);
+        let r = route(&post("/api/tool-enchant", r#"{"username":"Miner","enchant":"silk_touch"}"#), &st);
+        assert_eq!(body_json(&r)["enchant"], "silk_touch");
+        assert_eq!(st.drops.tool_enchant(51), mc_world::tools::ToolEnchant::SilkTouch);
     }
 
     #[test]

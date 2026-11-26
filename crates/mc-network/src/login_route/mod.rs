@@ -4,6 +4,7 @@
 //! 视距来自 `ServerConfig.view_distance`（`clamp_view_radius` 限制 2..=10），
 //! 区块包体优先走共享 `ChunkCache`；连接结束在所有退出路径恰好投递一次 Disconnect。
 pub mod block_edit;
+pub mod craft9;
 pub mod crops;
 pub mod drop_sync;
 pub mod login;
@@ -11,8 +12,8 @@ pub mod survival_sync;
 pub mod view_sync;
 
 pub use self::block_edit::{
-    decide_bonemeal, decide_dig, decide_place, decide_plant, decide_till, BlockChange,
-    BlockEditOutcome, BonemealAction,
+    decide_bonemeal, decide_dig, decide_dig_with_tool, decide_place, decide_plant, decide_till,
+    BlockChange, BlockEditOutcome, BonemealAction,
 };
 pub use self::login::{config_finish, enter_play, enter_play_with_events, enter_play_with_options, handle_login, handle_login_configured, handle_login_with_options, handle_login_with_threshold, notify_login_success, PlayOptions};
 
@@ -55,6 +56,28 @@ async fn drain_outbox(
         write_packet_any(stream, pkt.id, &pkt.body, opts.threshold).await?;
     }
     Ok(())
+}
+
+/// P47：把挖掘进度发给视距内其它连接（本人由客户端本地动画驱动，Ack 只回本人）。
+/// 包 ID 与布局见 `mc_protocol::packets::BlockDestruction`（wiki 26.3 口径，查生成表）。
+fn queue_destroy_stage(opts: &PlayOptions, x: i32, y: i32, z: i32, stage: u8) {
+    // 默认关闭：旧 e2e 的包流逐字节不变；生产入口显式开启。
+    if !opts.destroy_stage {
+        return;
+    }
+    let Some(hub) = &opts.hub else { return };
+    let entity_id = hub
+        .player_state(opts.conn_id)
+        .map(|s| s.entity_id)
+        .unwrap_or(crate::drop_state::PLAYER_ENTITY_ID);
+    let mut body = Vec::new();
+    packets::BlockDestruction { entity_id, x, y, z, stage }.encode_body(&mut body);
+    hub.broadcast(
+        opts.conn_id,
+        mc_world::chunk_of_block(x, z),
+        packets::PLAY_BLOCK_DESTRUCTION_S2C_ID,
+        &body,
+    );
 }
 
 async fn play_loop(
@@ -314,6 +337,17 @@ async fn play_loop(
                 }
                 match packets::PlayerAction::decode_body(&payload) {
                     Ok((act, _)) => {
+                        // P47：创造模式即时破坏——客户端 START 视为已完成（原版口径），
+                                                // 且不带掉落；生存仍只在 STOP(3) 落子。
+                        let creative = opts
+                            .hub
+                            .as_ref()
+                            .map(|h| h.gamemode(opts.conn_id) == crate::broadcast::GameMode::Creative)
+                            .unwrap_or(false);
+                        let mut act = act;
+                        if creative && act.status == packets::PLAYER_ACTION_START_DIG {
+                            act.status = packets::PLAYER_ACTION_FINISH_DIG;
+                        }
                         if act.status == packets::PLAYER_ACTION_DROP_ITEM
                             || act.status == packets::PLAYER_ACTION_DROP_ALL_ITEMS
                         {
@@ -324,13 +358,54 @@ async fn play_loop(
                                 debug!("play uuid={} throw failed ({e}), closing", profile.uuid);
                                 break;
                             }
-                        } else if let Some(mut outcome) = decide_dig(
-                            mutable,
-                            eye_of(last_pos),
-                            view.center(),
-                            view.radius(),
-                            &act,
-                        ) {
+                        } else if let Some(mut outcome) = {
+                            // P47：手持镐档位 + 连接级附魔开关参与权威掉落判定；
+                            // 无 drops（旧入口）时退化为徒手无附魔，旧包流不变。
+                            let held = if opts.tool_rules {
+                                opts.drops.as_ref().and_then(|ds| {
+                                    ds.with_inventory(opts.conn_id, |inv| inv.held()).flatten()
+                                }).map(|(item_id, _)| item_id)
+                            } else {
+                                None
+                            };
+                            let enchant = if opts.tool_rules {
+                                opts.drops.as_ref()
+                                    .map(|ds| ds.tool_enchant(opts.conn_id))
+                                    .unwrap_or_default()
+                            } else {
+                                mc_world::tools::ToolEnchant::None
+                            };
+                            decide_dig_with_tool(
+                                mutable,
+                                eye_of(last_pos),
+                                view.center(),
+                                view.radius(),
+                                &act,
+                                held,
+                                enchant,
+                                opts.tool_rules,
+                            )
+                        } {
+                            // P47：START(0) 合法才给视者发进度 0；非法回滚不发动画。
+                            if act.status == packets::PLAYER_ACTION_START_DIG && outcome.changes.is_empty() {
+                                queue_destroy_stage(opts, act.x, act.y, act.z, 0);
+                            }
+                            if creative {
+                                outcome.drops.clear();
+                            }
+                            let broke = outcome.changes.iter().any(|c| {
+                                c.new_id == mc_world::AIR_BLOCK_ID && c.old_id != c.new_id
+                            });
+                            if broke {
+                                // STOP/创造即时破坏：取消对端的挖掘进度动画（stage 255）。
+                                queue_destroy_stage(
+                                    opts,
+                                    act.x,
+                                    act.y,
+                                    act.z,
+                                    packets::DESTROY_STAGE_CANCEL,
+                                );
+                            }
                             if let Some(world) = mutable {
                                 // P27/P33/P37：挖掘连带（土壤 pop 作物/树苗、新土壤 pop
                                 // 新作物、竖著作物连根、原木登记树叶 decay）。必须在
@@ -881,10 +956,42 @@ async fn play_loop(
                                     break;
                                 }
                                 if placed {
+                                    // P47：手持工作台右键放置成功 → 为该连接开 3×3 会话
+                                    // （同格重开保留原料；无 open_screen 包体真值，见 craft9 模块）。
+                                    if place_id == mc_world::drops::CRAFTING_TABLE_BLOCK_ID {
+                                        if let Some((dx, dy, dz)) = i8::try_from(act.face).ok()
+                                            .and_then(packets::face_offset)
+                                        {
+                                            if let Some(ds) = &opts.drops {
+                                                ds.open_craft9(
+                                                    opts.conn_id,
+                                                    act.x + dx,
+                                                    act.y + dy,
+                                                    act.z + dz,
+                                                );
+                                            }
+                                        }
+                                    }
+                                    // P47：生存扣 1；创造不消耗手持（无耐久/飞行简化，见 HANDOFF）。
+                                    let creative = opts
+                                        .hub
+                                        .as_ref()
+                                        .map(|h| {
+                                            h.gamemode(opts.conn_id)
+                                                == crate::broadcast::GameMode::Creative
+                                        })
+                                        .unwrap_or(false);
                                     if let Some(ds) = &opts.drops {
-                                        let consumed = ds.with_inventory(opts.conn_id, |inv| {
-                                            inv.consume_held()
-                                        });
+                                        if creative {
+                                            let _ = send_held_slot(stream, opts, ds).await;
+                                        }
+                                        let consumed = if creative {
+                                            None
+                                        } else {
+                                            ds.with_inventory(opts.conn_id, |inv| {
+                                                inv.consume_held()
+                                            })
+                                        };
                                         if consumed.flatten().is_some() {
                                             if let Err(e) = send_held_slot(stream, opts, ds).await {
                                                 debug!("play uuid={} held sync failed ({e}), closing", profile.uuid);
@@ -949,6 +1056,30 @@ async fn play_loop(
                 // 光标非空时原版无操作，只全量同步回滚预测）。
                 match packets::decode_container_click(&payload) {
                     Ok((click, _)) => {
+                        // P47：工作台窗口 1 走独立会话，绝不改写玩家背包窗口 0 的 2×2 语义。
+                        if click.container_id == mc_world::crafting::CRAFT9_WINDOW_ID {
+                            if let Some(ds) = &opts.drops {
+                                if craft9::apply_click(ds, opts.conn_id, &click) {
+                                    if let Some(body) =
+                                        craft9::build_craft9_content_body(ds, opts.conn_id)
+                                    {
+                                        if let Err(e) = write_packet_any(
+                                            stream,
+                                            packets::PLAY_SET_CONTAINER_CONTENT_S2C_ID,
+                                            &body,
+                                            threshold,
+                                        )
+                                        .await
+                                        {
+                                            debug!("play uuid={} craft9 sync failed ({e}), closing", profile.uuid);
+                                            break;
+                                        }
+                                    }
+                                    ds.save_inventory(opts.conn_id, &conn_user);
+                                }
+                            }
+                            continue;
+                        }
                         let mut thrown = None;
                         if click.container_id != packets::PLAYER_INVENTORY_WINDOW_ID {
                             debug!(

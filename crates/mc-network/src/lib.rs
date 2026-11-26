@@ -14,7 +14,7 @@ pub mod player_visibility;
 pub mod status_route;
 mod timer_spec;
 
-pub use broadcast::{OnlineEntry, PlayerEntityState, ADMIN_KICK_PACKET_ID, BroadcastHub, QueuedPacket};
+pub use broadcast::{GameMode, OnlineEntry, PlayerEntityState, ADMIN_KICK_PACKET_ID, BroadcastHub, QueuedPacket};
 pub use chunk_cache::{
     encode_chunk_data_body, encode_chunk_data_body_mutable, ChunkCache, ChunkCacheStats,
     DEFAULT_CHUNK_CACHE_CAPACITY,

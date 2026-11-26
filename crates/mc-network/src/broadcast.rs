@@ -37,9 +37,36 @@ pub struct QueuedPacket {
     pub body: Vec<u8>,
 }
 
+/// P47 游戏模式：默认生存；创造模式即时破坏不扣物品、放置不消耗手持。
+/// 飞行未做（Player Abilities 0x41 包体未抓包验证，不猜字节，见 HANDOFF）。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum GameMode {
+    #[default]
+    Survival,
+    Creative,
+}
+
+impl GameMode {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Survival => "survival",
+            Self::Creative => "creative",
+        }
+    }
+
+    pub fn parse(s: &str) -> Option<Self> {
+        match s.trim().to_ascii_lowercase().as_str() {
+            "survival" | "survive" | "0" => Some(Self::Survival),
+            "creative" | "creativity" | "1" => Some(Self::Creative),
+            _ => None,
+        }
+    }
+}
+
 struct HubConn {
     tx: crossbeam_channel::Sender<QueuedPacket>,
     radius: i32,
+    gamemode: GameMode,
     pos: (f64, f64, f64),
     /// P25 管理面板：Join 完成时的用户名（离线模式大小写精确匹配即身份）。
     username: String,
@@ -57,6 +84,8 @@ pub struct OnlineEntry {
     pub addr: String,
     pub pos: (f64, f64, f64),
     pub radius: i32,
+    /// P47 新增字段：旧字段不变，只增 gamemode。
+    pub gamemode: GameMode,
     /// 注册至今的秒数（快照时刻计算）。
     pub online_secs: u64,
 }
@@ -143,7 +172,18 @@ impl BroadcastHub {
         self.conns
             .write()
             .unwrap_or_else(|p| p.into_inner())
-            .insert(conn_id, HubConn { tx, radius, pos, username, addr, since: Instant::now() });
+            .insert(
+                conn_id,
+                HubConn {
+                    tx,
+                    radius,
+                    pos,
+                    gamemode: GameMode::Survival,
+                    username,
+                    addr,
+                    since: Instant::now(),
+                },
+            );
     }
 
     /// P25：在线快照（读锁内只做内存拷贝，丢锁后算时长；调用方拿到快照后再
@@ -160,6 +200,7 @@ impl BroadcastHub {
                 addr: c.addr.clone(),
                 pos: c.pos,
                 radius: c.radius,
+                gamemode: c.gamemode,
                 online_secs: now.duration_since(c.since).as_secs(),
             })
             .collect()
@@ -254,6 +295,26 @@ impl BroadcastHub {
         if let Some(c) = self.conns.write().unwrap_or_else(|p| p.into_inner()).get_mut(&conn_id) {
             c.pos = pos;
         }
+    }
+
+    /// P47：设置本连接游戏模式（管理面板调用）；离线返回 false。
+    pub fn set_gamemode(&self, conn_id: u64, mode: GameMode) -> bool {
+        if let Some(c) = self.conns.write().unwrap_or_else(|p| p.into_inner()).get_mut(&conn_id) {
+            c.gamemode = mode;
+            true
+        } else {
+            false
+        }
+    }
+
+    /// P47：读取连接游戏模式（无 hub 的旧入口按生存处理，由调用方 `unwrap_or_default`）。
+    pub fn gamemode(&self, conn_id: u64) -> GameMode {
+        self.conns
+            .read()
+            .unwrap_or_else(|p| p.into_inner())
+            .get(&conn_id)
+            .map(|c| c.gamemode)
+            .unwrap_or_default()
     }
 
     /// 事件所在区块视距内的其它连接（快照；调用方再逐个 `unicast` 并维护
@@ -416,6 +477,24 @@ mod tests {
         hub.unregister(7);
         assert!(hub.snapshot().iter().all(|e| e.conn_id != 7));
         assert_eq!(hub.find_conn_by_name("Steve"), None);
+    }
+
+    #[test]
+    fn gamemode_defaults_survival_and_is_per_conn() {
+        let hub = BroadcastHub::new();
+        let (atx, _arx) = crossbeam_channel::unbounded();
+        let (btx, _brx) = crossbeam_channel::unbounded();
+        hub.register_with_name(1, atx, 2, (0.0, 64.0, 0.0), "A".into(), "x".into());
+        hub.register_with_name(2, btx, 2, (0.0, 64.0, 0.0), "B".into(), "y".into());
+        assert_eq!(hub.gamemode(1), GameMode::Survival);
+        assert_eq!(GameMode::parse("creative"), Some(GameMode::Creative));
+        assert!(hub.set_gamemode(1, GameMode::Creative));
+        assert_eq!(hub.gamemode(1), GameMode::Creative);
+        assert_eq!(hub.gamemode(2), GameMode::Survival);
+        assert!(!hub.set_gamemode(99, GameMode::Creative));
+        let snap = hub.snapshot();
+        assert_eq!(snap.iter().find(|e| e.conn_id == 1).unwrap().gamemode, GameMode::Creative);
+        assert_eq!(snap.iter().find(|e| e.conn_id == 2).unwrap().gamemode, GameMode::Survival);
     }
 
     #[test]
