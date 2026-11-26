@@ -667,7 +667,8 @@ fn default_seed_matches_server_default() {
 }
 
 // ---------------------------------------------------------------------------
-// P44：v1 冻结 + v2 低风险视觉。以下全部是新增测试，上面 20 个旧测试一字未改。
+// P45：结构性地貌 / 多 biome / 逐列天空光。以下全部是新增测试；
+// 上面所有 P16 与 P44 测试一字未改。
 // ---------------------------------------------------------------------------
 
 fn fnv1a64(bytes: &[u8]) -> u64 {
@@ -984,4 +985,299 @@ fn v2_is_pure_deterministic_and_spawn_stays_safe() {
             }
         }
     }
+}
+
+// ---- P45 §1：洞穴仍保 8 格壳、且不再是 v1 的整格方块 ----
+
+#[test]
+fn p45_v2_caves_keep_surface_shell_and_are_not_v1_blocky() {
+    let gen = WorldGen::with_version(DEFAULT_SEED, GeneratorVersion::V2);
+    let old = WorldGen::with_version(DEFAULT_SEED, GeneratorVersion::V1);
+    let center = gen.spawn_chunk();
+    let mut cave = 0usize;
+    let mut changed = 0usize;
+    for dx in -1..=1 {
+        for dz in -1..=1 {
+            let pos = ChunkPos(center.0 + dx, center.1 + dz);
+            let g = gen.generate(pos);
+            let g1 = old.generate(pos);
+            for lz in 0..16 {
+                for lx in 0..16 {
+                    let h = g.heights[(lz * 16 + lx) as usize];
+                    for y in (h - 7)..=h {
+                        assert_ne!(block_at(&g, lx, y, lz), AIR_BLOCK_ID, "v2 cave broke shell at {lx},{y},{lz}");
+                    }
+                    for y in (MIN_Y + 9)..=(h - 9) {
+                        let a = block_at(&g, lx, y, lz);
+                        let b = block_at(&g1, lx, y, lz);
+                        if a == AIR_BLOCK_ID {
+                            cave += 1;
+                        }
+                        if (a == AIR_BLOCK_ID) != (b == AIR_BLOCK_ID) {
+                            changed += 1;
+                        }
+                    }
+                }
+            }
+        }
+    }
+    assert!(cave > 100, "expected v2 underground caves, found {cave}");
+    assert!(changed > 100, "v2 interpolation must change the v1 whole-cell pattern, changed {changed}");
+}
+
+// ---- P45 §4：64 项 biome 容器逐字节解码 ----
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct BiomeSectionInfo {
+    block_count: u16,
+    fluid_count: u16,
+    biomes: Vec<i32>, // 64 项
+}
+
+/// 按 wiki 的 4×4×4 biome paletted container 自定界解析（与编码器独立的手写解码）。
+fn parse_biome_sections(bytes: &[u8]) -> Vec<BiomeSectionInfo> {
+    let mut out = Vec::with_capacity(SECTION_COUNT);
+    let mut off = 0usize;
+    for _ in 0..SECTION_COUNT {
+        let block_count = u16::from_be_bytes([bytes[off], bytes[off + 1]]);
+        let fluid_count = u16::from_be_bytes([bytes[off + 2], bytes[off + 3]]);
+        off += 4;
+        let bpe = bytes[off] as usize;
+        off += 1;
+        if bpe == 0 {
+            read_varint_at(bytes, &mut off); // block 单值
+        } else {
+            if bpe < 15 {
+                let palette_len = read_varint_at(bytes, &mut off);
+                for _ in 0..palette_len {
+                    read_varint_at(bytes, &mut off);
+                }
+            }
+            off += SECTION_VOLUME.div_ceil(64 / bpe) * 8;
+        }
+        let biome_bpe = bytes[off] as usize;
+        off += 1;
+        let mut biomes = vec![0i32; 64];
+        if biome_bpe == 0 {
+            biomes.fill(read_varint_at(bytes, &mut off));
+        } else {
+            let (palette, direct) = if biome_bpe <= 3 {
+                let n = read_varint_at(bytes, &mut off) as usize;
+                let p: Vec<i32> = (0..n).map(|_| read_varint_at(bytes, &mut off)).collect();
+                (p, false)
+            } else {
+                assert_eq!(biome_bpe, 7, "biome indirect BPE must be <=3, direct is 7");
+                (Vec::new(), true)
+            };
+            let per_long = 64 / biome_bpe;
+            let longs = 64usize.div_ceil(per_long);
+            for li in 0..longs {
+                let word = u64::from_be_bytes(bytes[off..off + 8].try_into().unwrap());
+                off += 8;
+                for k in 0..per_long {
+                    let idx = li * per_long + k;
+                    if idx >= 64 {
+                        break;
+                    }
+                    let v = ((word >> (k * biome_bpe)) & ((1u64 << biome_bpe) - 1)) as usize;
+                    biomes[idx] = if direct { v as i32 } else { palette[v] };
+                }
+            }
+        }
+        out.push(BiomeSectionInfo { block_count, fluid_count, biomes });
+    }
+    assert_eq!(off, bytes.len(), "v2 section parser must consume the whole Data field");
+    out
+}
+
+#[test]
+fn p45_v2_biome_container_decodes_byte_for_byte() {
+    let gen = WorldGen::with_version(DEFAULT_SEED, GeneratorVersion::V2);
+    let pos = gen.spawn_chunk();
+    let g = gen.generate(pos);
+    let bytes = g.network_bytes_v2(&gen);
+    let sections = parse_biome_sections(&bytes);
+    assert_eq!(sections.len(), SECTION_COUNT);
+    let mut multi = 0usize;
+    for (i, info) in sections.iter().enumerate() {
+        let section = &g.sections[i];
+        let non_air = section.iter().filter(|&&b| b != AIR_BLOCK_ID).count();
+        let fluid = section.iter().filter(|&&b| b == WATER_BLOCK_ID).count();
+        assert_eq!(info.block_count as usize, non_air, "section {i} block_count");
+        assert_eq!(info.fluid_count as usize, fluid, "section {i} fluid_count");
+        assert_eq!(info.biomes, biome::biomes_for_section(&gen, pos, i), "section {i} biomes");
+        if info.biomes.iter().any(|&b| b != info.biomes[0]) {
+            multi += 1;
+        }
+    }
+    assert!(multi >= 5, "expected multiple non-uniform biome sections, got {multi}");
+
+    // 0x2E 包体 roundtrip（Data 字段内部是 64 项 biome 容器）。
+    let data = PlayChunkData {
+        chunk_x: pos.0,
+        chunk_z: pos.1,
+        heightmaps_nbt: g.heightmaps_bytes(),
+        section_bytes: bytes,
+        light_bytes: g.light_bytes_v2(),
+    };
+    let mut body = Vec::new();
+    data.encode_body(&mut body);
+    let (got, used) = PlayChunkData::decode_body(&body).unwrap();
+    assert_eq!(used, body.len());
+    assert_eq!(got, data);
+}
+
+// ---- P45 §5：逐列天空光 nibble 逐字节解码 ----
+
+fn light_nibble(arr: &[u8; 2048], lx: i32, y: i32, lz: i32) -> u8 {
+    let local_y = ((y - MIN_Y) & 15) as usize;
+    let idx = local_y * 256 + lz as usize * 16 + lx as usize;
+    if idx % 2 == 0 { arr[idx / 2] & 0x0f } else { arr[idx / 2] >> 4 }
+}
+
+#[test]
+fn p45_v2_light_data_decodes_byte_for_byte() {
+    let gen = WorldGen::with_version(WATER_SEED, GeneratorVersion::V2);
+    // 出生附近找一条 v2 河道作为水下光照样本。
+    let center = gen.spawn_chunk();
+    let mut target = None;
+    'outer: for dx in -12..=12 {
+        for dz in -12..=12 {
+            let pos = ChunkPos(center.0 + dx, center.1 + dz);
+            let g = gen.generate(pos);
+            for lz in 0..16 {
+                for lx in 0..16 {
+                    let h = g.heights[(lz * 16 + lx) as usize];
+                    // 排除顶层被冰封的柱（冰不透明，水下会是 0）。
+                    if h < SEA_LEVEL - 2 && block_at(&g, lx, SEA_LEVEL, lz) == WATER_BLOCK_ID {
+                        target = Some((g, lx, lz));
+                        break 'outer;
+                    }
+                }
+            }
+        }
+    }
+    let (g, water_x, water_z) = target.expect("expected a v2 water column near spawn");
+    let bytes = g.light_bytes_v2();
+    let mut off = 0usize;
+    let mut masks = [[0u8; 8]; 4];
+    for mask in &mut masks {
+        let (n, used) = mc_protocol::read_varint(&bytes[off..]).unwrap();
+        off += used;
+        assert!(n >= 0 && n as usize <= 8);
+        mask[..n as usize].copy_from_slice(&bytes[off..off + n as usize]);
+        off += n as usize;
+    }
+    assert_eq!(masks[1], [0u8; 8], "block mask empty");
+    assert_eq!(masks[2], [0u8; 8], "empty sky mask empty");
+    assert_eq!(masks[3], [0u8; 8], "empty block mask empty");
+    let (count, used) = mc_protocol::read_varint(&bytes[off..]).unwrap();
+    off += used;
+    assert!(count > 0);
+    let expected = light::compute_sky_light(&g);
+    assert_eq!(count as usize, expected.len());
+    for (section, nibble) in &expected {
+        assert!(masks[0][*section as usize / 8] & (1 << (*section as usize % 8)) != 0, "section {section} in mask");
+        let (len, used) = mc_protocol::read_varint(&bytes[off..]).unwrap();
+        off += used;
+        assert_eq!(len, 2048, "light array length VarInt");
+        assert_eq!(&bytes[off..off + 2048], nibble.as_slice(), "section {section} nibble");
+        off += 2048;
+    }
+    let (block_arrays, used) = mc_protocol::read_varint(&bytes[off..]).unwrap();
+    off += used;
+    assert_eq!(block_arrays, 0);
+    assert_eq!(off, bytes.len(), "light parser must consume all bytes");
+
+    // 天空起点逐列：水面以下 nibble 非 15，地表以上为 15，洞穴地下为 0。
+    let sea_section = ((SEA_LEVEL - MIN_Y) >> 4) as usize;
+    let sea_nibble = &expected.iter().find(|(s, _)| *s as usize == sea_section).unwrap().1;
+    assert_eq!(light_nibble(sea_nibble, water_x, SEA_LEVEL - 1, water_z), 13, "water attenuates sky light");
+    let top = expected.last().unwrap();
+    assert!(top.1.iter().all(|&b| b == 0xff), "top section fully lit");
+    assert!(expected.iter().all(|(s, _)| *s >= 7), "underground sections carry no light");
+}
+
+// ---- P45 §2/§5：seed 一致性与远坐标 ----
+
+#[test]
+fn p45_v2_is_pure_and_far_coordinates_are_deterministic() {
+    let gen = WorldGen::with_version(-987654321, GeneratorVersion::V2);
+    for pos in [ChunkPos(-1, -1), ChunkPos(-40, 33), ChunkPos(1_800_000, -900_000), gen.spawn_chunk()] {
+        let a = gen.generate(pos);
+        let b = WorldGen::with_version(-987654321, GeneratorVersion::V2).generate(pos);
+        assert_eq!(a.sections, b.sections);
+        assert_eq!(a.heights, b.heights);
+        assert_eq!(a.motion_heights, b.motion_heights);
+        assert_eq!(a.network_bytes_v2(&gen), b.network_bytes_v2(&gen));
+        assert_eq!(a.light_bytes_v2(), b.light_bytes_v2());
+        assert!(a.heights.iter().all(|h| (MIN_SURFACE_Y..=MAX_SURFACE_Y).contains(h)));
+        // 包体必须能被 0x2E 解码器完整消费。
+        let data = PlayChunkData {
+            chunk_x: pos.0,
+            chunk_z: pos.1,
+            heightmaps_nbt: a.heightmaps_bytes(),
+            section_bytes: a.network_bytes_v2(&gen),
+            light_bytes: a.light_bytes_v2(),
+        };
+        let mut body = Vec::new();
+        data.encode_body(&mut body);
+        let (got, used) = PlayChunkData::decode_body(&body).unwrap();
+        assert_eq!(used, body.len());
+        assert_eq!(got, data);
+    }
+}
+
+// ---- P45 §5/§2.5：441 块 Join 估算 ----
+
+#[test]
+fn p45_v2_441_chunk_join_budget_estimate() {
+    use rayon::prelude::*;
+    use std::time::Instant;
+    let positions: Vec<ChunkPos> = (-10..=10)
+        .flat_map(|dz| (-10..=10).map(move |dx| ChunkPos(23 + dx, 23 + dz)))
+        .collect();
+    assert_eq!(positions.len(), 441);
+    let measure = |version: GeneratorVersion, seed: i64| {
+        let gen = WorldGen::with_version(seed, version);
+        let start = Instant::now();
+        let total: usize = positions
+            .par_iter()
+            .map(|&pos| {
+                let g = gen.generate(pos);
+                let data = PlayChunkData {
+                    chunk_x: pos.0,
+                    chunk_z: pos.1,
+                    heightmaps_nbt: g.heightmaps_bytes(),
+                    section_bytes: match version {
+                        GeneratorVersion::V1 => g.network_bytes(),
+                        GeneratorVersion::V2 => g.network_bytes_v2(&gen),
+                    },
+                    light_bytes: match version {
+                        GeneratorVersion::V1 => g.light_bytes(),
+                        GeneratorVersion::V2 => g.light_bytes_v2(),
+                    },
+                };
+                let mut body = Vec::new();
+                data.encode_body(&mut body);
+                body.len()
+            })
+            .sum();
+        (start.elapsed(), total / positions.len())
+    };
+    let (v1_time, v1_avg) = measure(GeneratorVersion::V1, 42);
+    let (v2_time, v2_avg) = measure(GeneratorVersion::V2, 42);
+    println!(
+        "441 chunk generate+encode: v1={v1_time:?} ({v1_avg}B/chunk), v2={v2_time:?} ({v2_avg}B/chunk)"
+    );
+    // 真机基线 496–558ms、红线 700ms；本环境没有原版客户端，只做本地估算：
+    // ① 同时量 v1/v2 作为相对参照，避免 debug 机器绝对耗时造成 flaky；
+    // ② 同时给出单块平均生成+编码耗时（真机红色目标 ≤~12ms/块）。
+    let per_chunk_ms = v2_time.as_secs_f64() * 1000.0 / positions.len() as f64;
+    println!("v2 per-chunk generate+encode: {per_chunk_ms:.3}ms (parallel wall / 441)");
+    assert!(
+        v2_time <= v1_time * 2 + std::time::Duration::from_millis(100),
+        "v2 generate+encode too slow: v1={v1_time:?} v2={v2_time:?}"
+    );
+    assert!(v2_avg < 60 * 1024, "v2 body {v2_avg}B must stay near the 60KB budget");
 }

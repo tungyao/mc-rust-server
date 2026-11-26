@@ -15,10 +15,14 @@
 //! - 每 chunk 单一 biome（ocean/beach/forest/plains），所有 section 共用。
 //!
 //! `heights` 是地形顶（草/沙），`motion_heights` 才是 MOTION_BLOCKING（含水面/树）。
+mod biome;
+mod caves;
 mod encode;
 mod features;
+mod light;
 mod noise;
 mod ores;
+mod terrain;
 #[cfg(test)]
 mod tests;
 
@@ -185,16 +189,22 @@ impl WorldGen {
     }
 
     /// 世界坐标 (x,z) 的地表 y（草/沙方块），已包含出生点平滑保护。
+    /// v1 是永久冻结的 legacy 公式；v2 在出生保护圈外叠加侵蚀/山脊/河流。
     pub fn height_at(&self, x: i32, z: i32) -> i32 {
-        let fx = x as f64;
-        let fz = z as f64;
-        let mut h = BASE_HEIGHT;
-        for i in 0..OCTAVE_SCALES.len() {
-            h += value_noise_2d(self.seed, fx, fz, OCTAVE_SCALES[i], OCTAVE_SALTS[i])
-                * OCTAVE_AMPLITUDES[i];
+        match self.version {
+            GeneratorVersion::V1 => {
+                let fx = x as f64;
+                let fz = z as f64;
+                let mut h = BASE_HEIGHT;
+                for i in 0..OCTAVE_SCALES.len() {
+                    h += value_noise_2d(self.seed, fx, fz, OCTAVE_SCALES[i], OCTAVE_SALTS[i])
+                        * OCTAVE_AMPLITUDES[i];
+                }
+                let h = (h.round() as i32).clamp(MIN_SURFACE_Y, MAX_SURFACE_Y);
+                self.spawn_protection(x, z, h)
+            }
+            GeneratorVersion::V2 => terrain::height_at_v2(self, x, z),
         }
-        let h = (h.round() as i32).clamp(MIN_SURFACE_Y, MAX_SURFACE_Y);
-        self.spawn_protection(x, z, h)
     }
 
     /// 出生点干燥保护：半径 16 内低地按 smootherstep 抬到 66，半径 4.5 内为平台。
@@ -377,7 +387,7 @@ impl WorldGen {
                 hcache[height_cache_index(ox, oz)] = self.height_at(base_x + ox, base_z + oz);
             }
         }
-        let caves = self.cave_mask(base_x, base_z);
+        let caves = caves::CaveMask::new(self.seed, base_x, base_z);
         let biome_id = self.chunk_biome(pos);
         for lz in 0..16i32 {
             for lx in 0..16i32 {
@@ -395,7 +405,7 @@ impl WorldGen {
                         STONE_BLOCK_ID
                     };
                     if id == STONE_BLOCK_ID {
-                        if y <= h - 9 && y >= MIN_Y + 9 && cave_carved(&caves, lx, y, lz) {
+                        if y <= h - 9 && y >= MIN_Y + 9 && caves.carved(wx, lx, y, wz, lz) {
                             id = AIR_BLOCK_ID;
                         } else if let Some(ore) = ores::ore_at(self.seed, wx, y, wz) {
                             id = ore;

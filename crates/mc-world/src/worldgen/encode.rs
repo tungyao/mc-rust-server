@@ -85,4 +85,61 @@ impl GeneratedChunk {
         mc_protocol::packets::encode_sky_light_data(mask, 15, &mut out);
         out
     }
+
+    // -----------------------------------------------------------------------
+    // P45 v2 编码：v1 的两个方法一字不改；v2 走下面两个显式入口，
+    // 由 ChunkCache 按 GeneratorVersion 选择。线格式不变（0x2E）。
+    // -----------------------------------------------------------------------
+
+    /// v2 Data 字段：24 节串接，每节 block 容器与 v1 完全相同，
+    /// biome 从单值改为 64 项 paletted container（4×4×4 子格）。
+    pub fn network_bytes_v2(&self, gen: &super::WorldGen) -> Vec<u8> {
+        let mut out = Vec::with_capacity(self.sections.len() * 16);
+        let mut states = [0i32; SECTION_VOLUME];
+        let section_volume = SECTION_VOLUME as u16;
+        // 只采样 16 个水平子格一次，再向 24 个 section 复用。
+        let biome_containers = super::biome::biomes_for_chunk(gen, self.pos);
+        for (section_index, section) in self.sections.iter().enumerate() {
+            let biomes = &biome_containers[section_index];
+            let first = section[0];
+            let uniform = section.iter().all(|&b| b == first);
+            if uniform {
+                if first == AIR_BLOCK_ID {
+                    mc_protocol::packets::encode_empty_section_with_biomes(&biomes, &mut out);
+                } else {
+                    let fluid = if first == WATER_BLOCK_ID { section_volume } else { 0 };
+                    mc_protocol::packets::encode_uniform_section_single_with_biomes(
+                        first as i32,
+                        section_volume,
+                        fluid,
+                        &biomes,
+                        &mut out,
+                    );
+                }
+                continue;
+            }
+            let mut fluid_count = 0u16;
+            for (i, &b) in section.iter().enumerate() {
+                states[i] = b as i32;
+                if b == WATER_BLOCK_ID {
+                    fluid_count += 1;
+                }
+            }
+            mc_protocol::packets::encode_block_section_with_fluid_and_biomes(
+                &states,
+                fluid_count,
+                &biomes,
+                &mut out,
+            );
+        }
+        out
+    }
+
+    /// v2 LightData：按列天空光起点 + 非零 section 的 2048B nibble 数组。
+    pub fn light_bytes_v2(&self) -> Vec<u8> {
+        let sections = super::light::compute_sky_light(self);
+        let mut out = Vec::new();
+        mc_protocol::packets::encode_nonuniform_sky_light_data(&sections, &mut out);
+        out
+    }
 }
