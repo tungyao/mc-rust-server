@@ -3,3 +3,5 @@
 Cargo.lock
 logs/
 /MEMORY.lock
+admin-ui/node_modules/
+admin-ui/dist/
