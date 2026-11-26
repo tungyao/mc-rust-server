@@ -101,7 +101,9 @@ fn main() {
         .with_chunk_cache(chunk_cache)
         .with_mutable_world(Arc::clone(&mutable))
         .with_drops(Arc::clone(&drop_state))
-        .with_hub(Arc::clone(&hub));
+        .with_hub(Arc::clone(&hub))
+        // P43：生产入口开启玩家实体互见（旧入口/既有 e2e 仍走默认关闭）。
+        .with_player_visibility(true);
     info!(
         "config view_distance={} effective_view_radius={} seed={} compression_threshold={}",
         cfg.view_distance, cfg.effective_view_distance(), cfg.seed, cfg.compression_threshold

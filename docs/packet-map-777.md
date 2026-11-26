@@ -144,3 +144,23 @@ Entity metadata：index u8(8) + type VarInt(7=Slot) + Slot + 0xFF（Item 实体�
 
 entity：`minecraft:item`=72，`minecraft:experience_orb`=50，`minecraft:player`=159；
 ITEM 注册表共 1658 项，ENTITY_TYPE 共 161 项。
+
+## 8. Play 玩家实体互见（P43 新增，26.3/777）
+
+> 包 ID / EntityType 均取自 `data/777/packets.json` / `entities.json`（经 `mc-registry`
+> 生成表在编译期查得），包体字段顺序来自 minecraft.wiki 26.3/777 对应章节；
+> 没有抓包的新包（如 `player_info_update` 的 bitmask）一律不猜、不发。
+
+| 方向 | 包 | 777 ID | 线格式（本服实现） |
+|---|---|---|---|
+| S2C | Spawn Player（`add_entity`，type=`minecraft:player`=159，data=0） | `0x01` | 与 §7 Spawn Entity 完全相同的字段顺序，只换 type；不可对本地玩家发（wiki 禁止），只发给视距内其它连接 |
+| S2C | Update Entity Position（`move_entity_pos`） | `0x36` | 同 §7：VarInt id + VarInt props(bit0 on_ground，高位 step=0) + 3×Short 差量；差量超 i16 时回退 `entity_position_sync`(0x23) 绝对坐标 |
+| S2C | Update Entity Position and Rotation（`move_entity_pos_rot`） | `0x37` | VarInt id + VarInt props(bit0 on_ground，step=0) + 3×Short 差量 + yaw/pitch 两个 Angle（新角度，不是差量） |
+| S2C | Update Entity Rotation（`move_entity_rot`） | `0x39` | VarInt id + Boolean on_ground + yaw/pitch 两个 Angle |
+| S2C | Remove Entities（玩家断线/出视距） | `0x4E` | Prefixed Array VarInt（同 §7） |
+
+对外玩家 entity_id 用独立高位计数器（从 1_000_000_000 起，永不复用），客户端
+自身仍是 LoginPlay 的 1；每个接收连接维护独立的玩家 known 集，与 item/orb 的
+`DropState::known` 隔离。`Ack`(0x04) 仍只回操作者本人，绝不进 hub 队列。
+未做：`player_info_update`(0x47) 的名字/tab 列表/皮肤（bitmask 无抓包验证，不猜字节）、
+`block_destruction`(0x05) 挖掘进度动画。

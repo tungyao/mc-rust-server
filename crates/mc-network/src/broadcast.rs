@@ -15,11 +15,16 @@
 //!   判定线程）；发送失败（对端已走）只跳过，真正的清理在 `enter_play_with_options`
 //!   退出路径与 `Disconnect` 唯一删除点汇合（`unregister`），不留幽灵通道。
 //!
-//! 不同步（MVP 外，留 TODO）：挖掘动画 `Set Block Destroy Stage 0x05`；玩家实体
-//! 互相可见（已有 `PlayerConnId` 实体但无位置广播，保持不动）。
+//! 不同步（MVP 外，留 TODO）：挖掘动画 `Set Block Destroy Stage 0x05`（P43 仍未做）。
+//!
+//! P43 玩家实体互见：每个注册连接可额外登记一个“对外玩家实体”（`entity_id` 为
+//! 独立分配的高位唯一 id，自己客户端仍是 LoginPlay 的 1）。hub 同时保存
+//! `conn_id → 玩家实体快照` 与 `viewer_conn_id → 已 Spawn 给该视者的玩家 id 集`，
+//! `player_visibility` 模块据此做 Spawn / 位置 / Remove 的视距同步；开关由
+//! `PlayOptions::player_visibility` 控制，旧入口默认关闭（旧包流逐字节不变）。
 
 use mc_core::ChunkPos;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::sync::RwLock;
 use std::time::Instant;
 
@@ -62,9 +67,25 @@ pub struct OnlineEntry {
 /// 这就是计划 §6.4 的备选"admin 指令通道"：不断线猜包、不手写踢出包体。
 pub const ADMIN_KICK_PACKET_ID: i32 = -1;
 
+/// P43：一个连接对外的玩家实体快照（位置/朝向随 C2S 移动包更新）。
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct PlayerEntityState {
+    /// 对外唯一实体 id（不等于 1，也不与掉落/经验球 id 冲突）。
+    pub entity_id: i32,
+    pub uuid: u128,
+    pub pos: (f64, f64, f64),
+    pub yaw: f32,
+    pub pitch: f32,
+}
+
 /// 全服共享的广播 hub（`Arc` 进 `NetConfig`/`PlayOptions`）。
 pub struct BroadcastHub {
     conns: RwLock<HashMap<u64, HubConn>>,
+    /// P43：`owner_conn_id → 该玩家对外的实体快照`；只在开关打开时登记。
+    players: RwLock<HashMap<u64, PlayerEntityState>>,
+    /// P43：`viewer_conn_id → 已发给该视者的玩家实体 id`（独立的 known 集，
+    /// 绝不复用 `DropState::known`，后者只跟踪 item/orb，差集兜底会误删玩家）。
+    player_known: RwLock<HashMap<u64, HashSet<i32>>>,
 }
 
 impl std::fmt::Debug for BroadcastHub {
@@ -75,7 +96,11 @@ impl std::fmt::Debug for BroadcastHub {
 
 impl BroadcastHub {
     pub fn new() -> Self {
-        Self { conns: RwLock::new(HashMap::new()) }
+        Self {
+            conns: RwLock::new(HashMap::new()),
+            players: RwLock::new(HashMap::new()),
+            player_known: RwLock::new(HashMap::new()),
+        }
     }
 
     /// 当前在线连接数（测试/诊断用）。
@@ -85,6 +110,12 @@ impl BroadcastHub {
 
     pub fn contains(&self, conn_id: u64) -> bool {
         self.conns.read().unwrap_or_else(|p| p.into_inner()).contains_key(&conn_id)
+    }
+
+    /// 视者自己的位置快照与半径（玩家实体视距判定用）。
+    pub fn conn_pos(&self, conn_id: u64) -> Option<((f64, f64, f64), i32)> {
+        self.conns.read().unwrap_or_else(|p| p.into_inner())
+            .get(&conn_id).map(|c| (c.pos, c.radius))
     }
 
     /// 注册连接的写队列（Join 序列完成后、进 `play_loop` 前调用，保证接收方
@@ -151,6 +182,71 @@ impl BroadcastHub {
     /// 覆盖所有退出分支；重复注销无害）。
     pub fn unregister(&self, conn_id: u64) {
         self.conns.write().unwrap_or_else(|p| p.into_inner()).remove(&conn_id);
+        // P43：与该连接绑定的玩家实体/known 一并清理（先摘掉其它视者 known 里的
+        // 残留 id，调用方在此之前已广播 RemoveEntities，这里只做状态收尾）。
+        // 先放掉 players 写锁再拿 player_known 写锁（同 `enable_player` 的锁序，避免嵌套）。
+        let removed = self.players.write().unwrap_or_else(|p| p.into_inner()).remove(&conn_id);
+        if let Some(state) = removed {
+            for ids in self.player_known.write().unwrap_or_else(|p| p.into_inner()).values_mut() {
+                ids.remove(&state.entity_id);
+            }
+        }
+        self.player_known.write().unwrap_or_else(|p| p.into_inner()).remove(&conn_id);
+    }
+
+    // -----------------------------------------------------------------------
+    // P43 玩家实体互见：登记/快照/per-viewer known 集。
+    // -----------------------------------------------------------------------
+
+    /// 登记一个连接的对外玩家实体（Join 完成后、视距区块已下发时调用）。
+    pub fn enable_player(&self, conn_id: u64, state: PlayerEntityState) {
+        self.players.write().unwrap_or_else(|p| p.into_inner()).insert(conn_id, state);
+        self.player_known.write().unwrap_or_else(|p| p.into_inner()).entry(conn_id).or_default();
+    }
+
+    pub fn player_state(&self, conn_id: u64) -> Option<PlayerEntityState> {
+        self.players.read().unwrap_or_else(|p| p.into_inner()).get(&conn_id).copied()
+    }
+
+    /// 全部在线玩家快照（视者同步用；读锁内只做 Copy 集合，丢锁后再发包）。
+    pub fn player_states(&self) -> Vec<(u64, PlayerEntityState)> {
+        self.players.read().unwrap_or_else(|p| p.into_inner()).iter().map(|(&id, &s)| (id, s)).collect()
+    }
+
+    /// 移动包后更新本连接的对外玩家姿态（不改视距条目，避免死锁）。
+    pub fn update_player_pose(&self, conn_id: u64, pos: (f64, f64, f64), yaw: f32, pitch: f32) {
+        if let Some(s) = self.players.write().unwrap_or_else(|p| p.into_inner()).get_mut(&conn_id) {
+            s.pos = pos;
+            s.yaw = yaw;
+            s.pitch = pitch;
+        }
+    }
+
+    pub fn is_player_known(&self, viewer: u64, entity_id: i32) -> bool {
+        self.player_known.read().unwrap_or_else(|p| p.into_inner())
+            .get(&viewer).map(|s| s.contains(&entity_id)).unwrap_or(false)
+    }
+
+    /// 首次发给该视者时返回 `true`（去重：重复 Join/同 tick 补发只发一次 Spawn）。
+    pub fn mark_player_known(&self, viewer: u64, entity_id: i32) -> bool {
+        self.player_known.write().unwrap_or_else(|p| p.into_inner())
+            .entry(viewer).or_default().insert(entity_id)
+    }
+
+    pub fn unmark_player_known(&self, viewer: u64, entity_id: i32) {
+        if let Some(ids) = self.player_known.write().unwrap_or_else(|p| p.into_inner()).get_mut(&viewer) {
+            ids.remove(&entity_id);
+        }
+    }
+
+    pub fn player_known_ids(&self, viewer: u64) -> Vec<i32> {
+        self.player_known.read().unwrap_or_else(|p| p.into_inner())
+            .get(&viewer).map(|s| s.iter().copied().collect()).unwrap_or_default()
+    }
+
+    /// 全部已登记视者的 conn_id（断开广播 Remove 用）。
+    pub fn conn_ids(&self) -> Vec<u64> {
+        self.conns.read().unwrap_or_else(|p| p.into_inner()).keys().copied().collect()
     }
 
     /// 更新接收视距快照（每个移动包后调用；只改本连接条目，写锁极短）。
@@ -211,14 +307,15 @@ impl BroadcastHub {
     }
 }
 
-fn chunk_of_pos(pos: (f64, f64, f64)) -> ChunkPos {
+/// 玩家实体的视距区块判定与方块/掉落同口径（供 player_visibility 复用）。
+pub(crate) fn chunk_of_pos(pos: (f64, f64, f64)) -> ChunkPos {
     // 与 `ChunkView::chunk_of_block` 同口径（floor + div_euclid），非有限坐标钳制。
     let bx = pos.0.floor().clamp(-30_000_000.0, 30_000_000.0) as i32;
     let bz = pos.2.floor().clamp(-30_000_000.0, 30_000_000.0) as i32;
     ChunkPos(bx.div_euclid(16), bz.div_euclid(16))
 }
 
-fn chunk_in_view(center: ChunkPos, radius: i32, chunk: ChunkPos) -> bool {
+pub(crate) fn chunk_in_view(center: ChunkPos, radius: i32, chunk: ChunkPos) -> bool {
     (chunk.0 - center.0).abs() <= radius && (chunk.1 - center.1).abs() <= radius
 }
 
@@ -333,5 +430,45 @@ mod tests {
         assert_eq!(pkt.id, super::ADMIN_KICK_PACKET_ID);
         assert!(brx.try_recv().is_err(), "kick must not disturb other connections");
         assert!(!hub.kick(999), "kick of offline conn must fail");
+    }
+
+    #[test]
+    fn player_known_set_is_per_viewer_and_dedupes() {
+        let hub = BroadcastHub::new();
+        let (atx, _arx) = crossbeam_channel::unbounded();
+        let (btx, _brx) = crossbeam_channel::unbounded();
+        hub.register(1, atx, 2, (0.0, 64.0, 0.0));
+        hub.register(2, btx, 2, (4.0, 64.0, 0.0));
+        let a = PlayerEntityState { entity_id: 1_000_000_000, uuid: 11, pos: (0.0, 64.0, 0.0), yaw: 0.0, pitch: 0.0 };
+        let b = PlayerEntityState { entity_id: 1_000_000_001, uuid: 22, pos: (4.0, 64.0, 0.0), yaw: 0.0, pitch: 0.0 };
+        hub.enable_player(1, a);
+        hub.enable_player(2, b);
+        assert_eq!(hub.player_state(1), Some(a));
+        assert!(hub.mark_player_known(2, a.entity_id));
+        assert!(!hub.mark_player_known(2, a.entity_id), "second Spawn must be suppressed");
+        assert!(!hub.is_player_known(1, a.entity_id), "known sets are per viewer");
+        assert_eq!(hub.player_known_ids(2), vec![a.entity_id]);
+        hub.unmark_player_known(2, a.entity_id);
+        assert!(hub.mark_player_known(2, a.entity_id), "after Remove a re-Spawn is allowed");
+        hub.update_player_pose(1, (1.0, 65.0, 2.0), 90.0, -10.0);
+        assert_eq!(hub.player_state(1).unwrap().pos, (1.0, 65.0, 2.0));
+        assert_eq!(hub.player_state(1).unwrap().yaw, 90.0);
+    }
+
+    #[test]
+    fn unregister_clears_player_state_and_viewer_known_entries() {
+        let hub = BroadcastHub::new();
+        let (atx, _arx) = crossbeam_channel::unbounded();
+        let (btx, _brx) = crossbeam_channel::unbounded();
+        hub.register(1, atx, 2, (0.0, 64.0, 0.0));
+        hub.register(2, btx, 2, (4.0, 64.0, 0.0));
+        let a = PlayerEntityState { entity_id: 1_000_000_002, uuid: 33, pos: (0.0, 64.0, 0.0), yaw: 0.0, pitch: 0.0 };
+        hub.enable_player(1, a);
+        assert!(hub.mark_player_known(2, a.entity_id));
+        hub.unregister(1);
+        assert!(hub.player_state(1).is_none());
+        assert!(!hub.is_player_known(2, a.entity_id));
+        assert!(hub.player_known_ids(1).is_empty());
+        assert!(hub.player_states().is_empty());
     }
 }

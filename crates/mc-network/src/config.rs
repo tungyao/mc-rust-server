@@ -37,6 +37,8 @@ pub struct NetConfig {
     pub drops: Option<Arc<DropState>>,
     /// 多人广播 hub（P21）；None 时只回包给操作者本人（旧行为）。
     pub hub: Option<Arc<BroadcastHub>>,
+    /// P43 玩家实体互见开关；默认 false 保持既有 e2e 包流，生产入口显式打开。
+    pub player_visibility: bool,
 }
 
 impl Default for NetConfig {
@@ -53,6 +55,7 @@ impl Default for NetConfig {
             mutable_world: None,
             drops: None,
             hub: None,
+            player_visibility: false,
         }
     }
 }
@@ -73,6 +76,7 @@ impl NetConfig {
             mutable_world: None,
             drops: None,
             hub: None,
+            player_visibility: false,
         }
     }
 
@@ -129,6 +133,12 @@ impl NetConfig {
         self.hub = Some(hub);
         self
     }
+
+    /// P43：开启玩家实体互见（需同时 `.with_hub(...)`）。
+    pub fn with_player_visibility(mut self, enabled: bool) -> Self {
+        self.player_visibility = enabled;
+        self
+    }
 }
 
 #[cfg(test)]
@@ -144,7 +154,15 @@ mod tests {
         assert!(cfg.play_events.is_none());
         assert!(cfg.chunk_cache.is_none());
         assert!(cfg.mutable_world.is_none());
+        assert!(!cfg.player_visibility, "P43 must be opt-in to preserve legacy packet streams");
         assert_eq!(cfg.max_players, 42);
+    }
+
+    #[test]
+    fn player_visibility_passthrough() {
+        let cfg = NetConfig::default().with_player_visibility(true);
+        assert!(cfg.player_visibility);
+        assert!(!NetConfig::new(1, "x".into(), Arc::new(AtomicUsize::new(0))).player_visibility);
     }
 
     #[test]
