@@ -1,0 +1,13 @@
+{
+  "id": "p43-player-visible",
+  "title": "多人玩家实体互见（生成/位置同步/断开移除）",
+  "status": "doing",
+  "owner": "subagent-visible",
+  "priority": "p1",
+  "deps": [],
+  "branch": "",
+  "created": "2026-11-26T05:36:08+00:00",
+  "updated": "2026-11-26T05:36:08+00:00",
+  "detail": "",
+  "files": []
+}

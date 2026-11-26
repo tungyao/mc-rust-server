@@ -10,7 +10,9 @@
 > 新世界存储格式已完成**方案设计 + 原型 + 生产核心 + 增长计时持久化**
 > （`p36-world-storage` / `f24a0bb`、`p38-store-core`、`p39-timer-persist`，redb，
 > 明确不做 Anvil 兼容，**默认 `world_storage = "redb"`**，见 §5.27）；
-> `p40-survival` 合成 + 生存基础已合入（见 §5.28）；`p32-broadcast-chat` 暂缓；
+> `p40-survival` 合成 + 生存基础已合入（见 §5.28）；`p42-worldgen-research`
+> 已完成地图生成器调研（见 §5.29）；`p41-all-recipes` / `p43-player-visible` 进行中；
+> `p32-broadcast-chat` 暂缓；
 > 后台管理面板已用 Vue 3 + Naive UI 重写并**完全离线化**合入（`p34-admin-vue` / `53f1016`、
 > `p35-admin-offline` / `48e14bd`，见 §5.25）；当前无进行中的派发任务。
 
@@ -842,6 +844,22 @@ $natives = 'C:\Users\qwe\AppData\Local\Temp\mc263natives'
     等十余字段且无抓包验证，不猜字节，死亡界面留后续）；锄头/骨粉/苹果无配方。
     新增 21 项测试（含 `play_survival.rs` 5 个 e2e），合计见 §4。
 
+29. **P42 地图生成器调研（已完成，仅文档）**：`docs/worldgen-plan.md`（346 行）盘点现状
+    （3 层 value noise 缓丘、4×4×4 方块洞穴、每 chunk 单 biome、oak 单树种、静态水、
+    coal/iron 均匀矿、天空光从最低地表向上全 15 级），并给出改进方案与路线图。
+    核心约束：**不能原地改变同一 seed 的基底**——`overrides` / `state-<seed>.redb`
+    只存差异，基底一变旧编辑语义就漂移；建议生成器带版本号（`meta.generator` 已预留），
+    v1 冻结、v2 仅新 seed 启用。ChunkData 0x2E 的多 biome 需新增 64 项 biome 容器编码器，
+    非均匀光照需改 light helper；缓存的是已编码包体，基底变更必须全失效。
+    路线：**P1 低风险视觉**（矿种/高度带、地表材质过渡、多树种与草花）→
+    **P2 结构性地貌**（侵蚀/山脊/河流、细洞穴、4×4 多 biome、逐列天空光）→
+    **P3 流体与结构**（流动水、block light、单 chunk 小遗迹）。
+    性能红线：441 块无压缩 Join ≤700ms（基线 496–558ms）、包体 ≤60KB、
+    默认 seed 出生 y=73 / 3×3 干燥回归全绿；洞穴禁止逐方块 3D noise（会放大约 30×）。
+    待用户决策：v1 冻结 vs 原地升级、是否允许改 `mc-protocol` 编码 helper、
+    静态水 vs 流动水、结构范围、出生圈外是否强制水景、性能红线 700/600ms、
+    是否先抓 vanilla ChunkData 再进 P2。本轮未改任何 Rust 代码/协议，未跑 cargo。
+
 ## 6. 关键文件
 
 ```
@@ -895,6 +913,7 @@ crates/mc-server/src/
 docs/packet-map-777.md                 777 包 ID 对照表（权威；§6 挖掘/放置 9 个 ID；§7 P18 掉落/背包 10 个 ID + 物品/实体 ID 表）
 docs/registries-777.md                 注册表清单
 docs/world-storage-plan.md             P36 新世界存储格式方案（redb，不做 Anvil 兼容）
+docs/worldgen-plan.md                  P42 地图生成器调研与分阶段路线图（未改代码）
 ```
 
 ## 7. 测试命令

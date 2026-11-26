@@ -1,0 +1,15 @@
+{
+  "id": "p42-worldgen-research",
+  "title": "地图生成器完善方案研究（先调研汇报，不改代码）",
+  "status": "done",
+  "owner": "subagent-worldgen",
+  "priority": "p1",
+  "deps": [],
+  "branch": "",
+  "created": "2026-11-26T05:36:08+00:00",
+  "updated": "2026-11-26T05:43:11+00:00",
+  "detail": "交付docs/worldgen-plan.md(346行):现状缺陷/约束/算法方案/分阶段路线图/性能红线/7项待决策点;未改Rust代码;merge见main",
+  "files": [
+    "docs/worldgen-plan.md"
+  ]
+}
