@@ -3,6 +3,7 @@
 pub mod crafting;
 pub mod crops;
 pub mod drops;
+pub mod fluid;
 pub mod load;
 pub mod survival;
 pub mod mutable;
@@ -18,6 +19,9 @@ pub use crops::{
     plant_at, CropKind, CropSpec, CROPS,
 };
 pub use drops::{Drop, block_for_item, drops_for_block};
+pub use fluid::{
+    is_water, swim_state, water_level, water_source_id, water_state_id, FlowRule, SwimState,
+};
 pub use survival::{SurvivalState, food_for_item};
 pub use items::{ItemEntities, ItemEntity};
 pub use inventory::PlayerInventory;
@@ -183,6 +187,20 @@ pub const SEAGRASS_BLOCK_ID: u16 = registry_id(mc_registry::BLOCKS, "minecraft:s
 pub const TALL_SEAGRASS_BLOCK_ID: u16 = registry_id(mc_registry::BLOCKS, "minecraft:tall_seagrass") as u16;
 pub const KELP_BLOCK_ID: u16 = registry_id(mc_registry::BLOCKS, "minecraft:kelp") as u16;
 pub const LILY_PAD_BLOCK_ID: u16 = registry_id(mc_registry::BLOCKS, "minecraft:lily_pad") as u16;
+// ---------------------------------------------------------------------------
+// P46 v2：单 chunk 小遗迹与 block light 光源。全部编译期查真实 26.3 ID，
+// v1 基底不引用这些常量。
+// ---------------------------------------------------------------------------
+pub const STONE_BRICKS_BLOCK_ID: u16 = registry_id(mc_registry::BLOCKS, "minecraft:stone_bricks") as u16;
+pub const CHISELED_STONE_BRICKS_BLOCK_ID: u16 =
+    registry_id(mc_registry::BLOCKS, "minecraft:chiseled_stone_bricks") as u16;
+/// 亮度查表值来自 `data/777/full/blocks.json` 各 state 的 `luminance`。
+pub const TORCH_BLOCK_ID: u16 = registry_id(mc_registry::BLOCKS, "minecraft:torch") as u16;
+pub const SOUL_TORCH_BLOCK_ID: u16 = registry_id(mc_registry::BLOCKS, "minecraft:soul_torch") as u16;
+pub const LANTERN_BLOCK_ID: u16 = registry_id(mc_registry::BLOCKS, "minecraft:lantern") as u16;
+pub const SEA_LANTERN_BLOCK_ID: u16 = registry_id(mc_registry::BLOCKS, "minecraft:sea_lantern") as u16;
+pub const GLOWSTONE_BLOCK_ID: u16 = registry_id(mc_registry::BLOCKS, "minecraft:glowstone") as u16;
+pub const LAVA_BLOCK_ID: u16 = registry_id(mc_registry::BLOCKS, "minecraft:lava") as u16;
 /// P27 树叶 decay 判定半径（Chebyshev）：3 格内无橡木原木即失支撑。
 /// 原版是树叶 distance 属性逐格传播（7 格），这里简化为到原木的直接距离（见 HANDOFF §5）。
 pub const LEAF_DECAY_RADIUS: i32 = 3;

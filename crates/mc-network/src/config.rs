@@ -3,6 +3,7 @@ use super::broadcast::BroadcastHub;
 use super::chunk_cache::ChunkCache;
 use super::chunk_view::clamp_view_radius;
 use super::drop_state::DropState;
+use super::fluid_sync::FluidState;
 use super::play_events::PlayEvent;
 use crossbeam_channel::Sender;
 use mc_world::MutableWorld;
@@ -37,6 +38,8 @@ pub struct NetConfig {
     pub drops: Option<Arc<DropState>>,
     /// 多人广播 hub（P21）；None 时只回包给操作者本人（旧行为）。
     pub hub: Option<Arc<BroadcastHub>>,
+    /// P46 流体状态（全服唯一 50ms ticker 在 `serve` 启动，仅 V2 生效）。
+    pub fluid: Option<Arc<FluidState>>,
     /// P43 玩家实体互见开关；默认 false 保持既有 e2e 包流，生产入口显式打开。
     pub player_visibility: bool,
 }
@@ -55,6 +58,7 @@ impl Default for NetConfig {
             mutable_world: None,
             drops: None,
             hub: None,
+            fluid: None,
             player_visibility: false,
         }
     }
@@ -76,6 +80,7 @@ impl NetConfig {
             mutable_world: None,
             drops: None,
             hub: None,
+            fluid: None,
             player_visibility: false,
         }
     }
@@ -131,6 +136,12 @@ impl NetConfig {
 
     pub fn with_hub(mut self, hub: Arc<BroadcastHub>) -> Self {
         self.hub = Some(hub);
+        self
+    }
+
+    /// P46：注入流体状态（`serve` 会为 V2 世界启动全服唯一 ticker）。
+    pub fn with_fluid(mut self, fluid: Arc<FluidState>) -> Self {
+        self.fluid = Some(fluid);
         self
     }
 

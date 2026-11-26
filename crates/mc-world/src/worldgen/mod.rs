@@ -22,6 +22,7 @@ mod features;
 mod light;
 mod noise;
 mod ores;
+mod ruins;
 mod terrain;
 #[cfg(test)]
 mod tests;
@@ -426,6 +427,8 @@ impl WorldGen {
         }
         features::place_trees(self, base_x, base_z, &hcache, &mut sections, &mut motion);
         features::place_plants(self.seed, base_x, base_z, &hcache, &mut sections);
+        // P46：单 chunk 小遗迹（纯函数，仅 v2）；光源供 block light 扫描。
+        ruins::place_ruin(self, pos, &hcache, &mut sections, &mut motion);
         GeneratedChunk {
             pos,
             sections,

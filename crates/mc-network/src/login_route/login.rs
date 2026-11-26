@@ -6,6 +6,7 @@ use crate::broadcast::{BroadcastHub, QueuedPacket};
 use crate::chunk_cache::{encode_chunk_data_body, encode_chunk_data_body_mutable, ChunkCache};
 use crate::chunk_view::{clamp_view_radius, view_chunk_count, ChunkView, PLAY_VIEW_RADIUS};
 use crate::drop_state::DropState;
+use crate::fluid_sync::FluidState;
 use crate::framing::{read_packet, read_packet_framed, to_io_invalid, write_packet, write_packet_framed};
 use crate::play_events::PlayEvent;
 use crossbeam_channel::Sender;
@@ -42,6 +43,8 @@ pub struct PlayOptions {
     pub drops: Option<Arc<DropState>>,
     /// 多人广播 hub（P21）；None 时只回包给操作者本人（旧行为）。
     pub hub: Option<Arc<BroadcastHub>>,
+    /// P46 流体状态（V2 生效）；方块编辑后由 hub 排队广播/缓存失效交给全服 ticker。
+    pub fluid: Option<Arc<FluidState>>,
     /// P43 玩家实体互见开关：仅生产入口/显式 e2e 打开；默认关闭保持旧包流。
     pub player_visibility: bool,
 }
@@ -58,6 +61,7 @@ impl PlayOptions {
             mutable_world: None,
             drops: None,
             hub: None,
+            fluid: None,
             player_visibility: false,
         }
     }
@@ -94,6 +98,12 @@ impl PlayOptions {
 
     pub fn with_hub(mut self, hub: Arc<BroadcastHub>) -> Self {
         self.hub = Some(hub);
+        self
+    }
+
+    /// P46：注入流体状态（方块编辑时排队传播任务）。
+    pub fn with_fluid(mut self, fluid: Arc<FluidState>) -> Self {
+        self.fluid = Some(fluid);
         self
     }
 

@@ -48,6 +48,7 @@ pub async fn handle_connection(
                 mutable_world: config.mutable_world.clone(),
                 drops: config.drops.clone(),
                 hub: config.hub.clone(),
+                fluid: config.fluid.clone(),
                 player_visibility: config.player_visibility,
             };
             handle_login_with_options(stream, addr, &tx, opts).await?;
