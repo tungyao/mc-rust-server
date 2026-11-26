@@ -18,7 +18,19 @@ mod generated {
 }
 
 /// 26.3 方块表：`&[(blockstate_id, namespaced_name)]`，由 build.rs 从 JSON 生成。
-pub use generated::{BLOCKS, by_id as block_by_id, by_name, ENTITIES, ITEMS, PACKETS};
+pub use generated::{
+    BLOCKS, BLOCK_STATES, by_id as block_by_id, by_name, ENTITIES, ITEMS, PACKETS,
+};
+
+/// P37：按方块名 + 属性组合索引取真实 blockstate ID（区间起点 + 索引）。
+/// 索引来自 `data/777/full/blocks.json` 的状态数组顺序，运行时查询供测试/诊断；
+/// 生产代码用 `mc_world::state_index_id` 的编译期版本。
+pub fn block_state_id(name: &str, index: u16) -> Option<u32> {
+    BLOCK_STATES
+        .iter()
+        .find(|(_, n, count)| *n == name && index < *count)
+        .map(|(first, _, _)| first + u32::from(index))
+}
 
 #[derive(Debug, Clone)]
 pub struct BlockDef {
@@ -164,6 +176,15 @@ mod tests {
         }
         // 不再是 0..N 的连续假 ID：grass_block 应为 9 而不是 2。
         assert_ne!(BLOCKS.get(2).map(|(id, _)| *id), Some(9));
+    }
+
+    #[test]
+    fn p37_block_state_index_matches_26_3() {
+        assert_eq!(block_state_id("minecraft:nether_wart", 3), Some(11184));
+        assert_eq!(block_state_id("minecraft:cocoa", 11), Some(11226));
+        assert_eq!(block_state_id("minecraft:bamboo", 11), Some(18647));
+        assert_eq!(block_state_id("minecraft:pitcher_crop", 1), Some(16781));
+        assert_eq!(block_state_id("minecraft:wheat", 8), None);
     }
 
     #[test]

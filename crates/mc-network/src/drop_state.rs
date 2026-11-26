@@ -48,6 +48,20 @@ struct CropEntry {
     crop: &'static mc_world::crops::CropSpec,
 }
 
+/// P37 新植物条目：五种生长模型共用一个跟踪 map。
+/// `stage` 在 age 模型里是 age，在竖向模型里是已长高度（0=基部），
+/// 在树模型里恒 0（单次到期），在侧面模型里是 age。
+#[derive(Debug, Clone, Copy)]
+struct PlantEntry {
+    kind: mc_world::crops::PlantKind,
+    planted_tick: u64,
+    stage: u8,
+    /// 可可的 facing 索引（0..3），其它模型为 0。
+    facing: u8,
+    /// 瓜果已落过一颗（MVP：每株只结一次）。
+    fruit_done: bool,
+}
+
 /// net 线程共享的掉落/背包状态（`Arc` 进 `PlayOptions`）。
 ///
 /// 物理权威（下落/age/despawn/支撑重算）只由 [`Self::start_global_tick`] 启动的
@@ -74,6 +88,11 @@ pub struct DropState {
     saplings: Mutex<HashMap<(i32, i32, i32), u64>>,
     /// P26 树苗生长 tick 数（生产 `SAPLING_GROW_TICKS` = 7200 ≈ 6min；测试调小）。
     sapling_ticks: AtomicU64,
+    /// P37：新植物（新 age 作物/新树苗/竖向/侧面/瓜果梗）跟踪。
+    /// 与旧 `crops`/`saplings` 分表，避免改变 P22/P26/P33 的计数与摘除语义。
+    plants: Mutex<HashMap<(i32, i32, i32), PlantEntry>>,
+    /// P37：新植物每阶段 tick 的生产值（`WHEAT_TICKS_PER_STAGE`），测试可整体调小。
+    plant_ticks: AtomicU64,
     /// P27 失支撑树叶：pos → 登记时的全局 tick；到期且半径内无原木即 decay。
     /// 登记只由原木被挖触发（`schedule_leaf_decay_around`），自然树天然有支撑，
     /// 无需全世界扫描（见 HANDOFF §5）。
@@ -106,6 +125,8 @@ impl DropState {
             stage_ticks: AtomicU64::new(mc_world::WHEAT_TICKS_PER_STAGE),
             saplings: Mutex::new(HashMap::new()),
             sapling_ticks: AtomicU64::new(mc_world::SAPLING_GROW_TICKS),
+            plants: Mutex::new(HashMap::new()),
+            plant_ticks: AtomicU64::new(mc_world::WHEAT_TICKS_PER_STAGE),
             pending_leaves: Mutex::new(HashMap::new()),
             leaf_decay_ticks: AtomicU64::new(mc_world::LEAF_DECAY_TICKS),
             hub: Mutex::new(None),
@@ -227,6 +248,8 @@ impl DropState {
         drop(items);
         // P22 作物生长：同一 ticker 内推进，与掉落物理同节拍（50ms），连接侧不参与。
         self.tick_crops(world);
+        // P37 新植物生长：与旧作物/树苗同一个 50ms ticker，连接侧绝不推进。
+        self.tick_plants(world);
         // P26 树苗生长：同一 ticker 内推进，连接侧绝不碰（P18.1 R1 不重犯）。
         self.tick_saplings(world);
         // P27 树叶 decay：同一 ticker 内推进，连接侧绝不碰。
@@ -435,6 +458,331 @@ impl DropState {
         }
     }
 
+    // -----------------------------------------------------------------------
+    // P37：新植物跟踪与生长（与旧 crops/saplings 分表，旧行为不受影响）
+    // -----------------------------------------------------------------------
+
+    /// 新植物种下登记。`facing` 只对可可有意义（0..3）。
+    pub fn plant_kind(
+        &self,
+        kind: mc_world::crops::PlantKind,
+        x: i32,
+        y: i32,
+        z: i32,
+        facing: u8,
+    ) {
+        self.plants.lock().unwrap_or_else(|p| p.into_inner()).insert(
+            (x, y, z),
+            PlantEntry {
+                kind,
+                planted_tick: self.tick_count.load(Ordering::Relaxed),
+                stage: 0,
+                facing,
+                fruit_done: false,
+            },
+        );
+    }
+
+    /// 新植物挖掉/连带摘除（ticker 内的懒摘除是兜底）。
+    pub fn uproot_plant(&self, x: i32, y: i32, z: i32) {
+        self.plants.lock().unwrap_or_else(|p| p.into_inner()).remove(&(x, y, z));
+    }
+
+    /// 跟踪中的新植物数（e2e/诊断用）。
+    pub fn plant_count(&self) -> usize {
+        self.plants.lock().unwrap_or_else(|p| p.into_inner()).len()
+    }
+
+    /// 新植物当前阶段（age/高度；树恒 0）。
+    pub fn plant_stage(&self, x: i32, y: i32, z: i32) -> Option<u8> {
+        self.plants.lock().unwrap_or_else(|p| p.into_inner()).get(&(x, y, z)).map(|e| e.stage)
+    }
+
+    /// P37 测试钩子：整体调整新植物每阶段 tick（生产值同小麦 1200）。
+    pub fn set_plant_ticks(&self, n: u64) {
+        self.plant_ticks.store(n.max(1), Ordering::Relaxed);
+    }
+
+    /// 骨粉推进后同步新植物跟踪（方块已由 `decide_bonemeal` 落子）。
+    pub fn apply_bonemeal_plant(&self, world: &MutableWorld, x: i32, y: i32, z: i32, new_id: u16) {
+        use mc_world::crops::{vertical_spec_of, PlantKind};
+        let stage = match mc_world::plant_at(new_id) {
+            Some((PlantKind::Age(_), age)) => age,
+            Some((PlantKind::Side(_), age)) => age,
+            Some((PlantKind::Vertical(spec), _)) => {
+                // 竖向：从基部往上数已长段数（点击哪一段都不影响计数）。
+                let mut base_y = y;
+                while vertical_spec_of(world.get(x, base_y - 1, z)).map(|s| s.name) == Some(spec.name) {
+                    base_y -= 1;
+                }
+                let mut h = 0u8;
+                while vertical_spec_of(world.get(x, base_y + h as i32, z)).map(|s| s.name) == Some(spec.name) {
+                    h += 1;
+                }
+                h.saturating_sub(1)
+            }
+            _ => 0,
+        };
+        let mut plants = self.plants.lock().unwrap_or_else(|p| p.into_inner());
+        match plants.get_mut(&(x, y, z)) {
+            Some(e) => e.stage = e.stage.max(stage),
+            None => {
+                plants.insert(
+                    (x, y, z),
+                    PlantEntry {
+                        kind: mc_world::plant_at(new_id).map(|(k, _)| k).unwrap_or(
+                            mc_world::crops::PlantKind::Age(&mc_world::crops::NETHER_WART),
+                        ),
+                        planted_tick: self.tick_count.load(Ordering::Relaxed),
+                        stage,
+                        facing: 0,
+                        fruit_done: false,
+                    },
+                );
+            }
+        }
+    }
+
+    /// P37：重启后认领存量新植物（从重启时刻重计时，与 P22/P26 同口径）。
+    pub fn adopt_existing_plants(&self, world: &MutableWorld) {
+        use mc_world::crops::{cocoa_of, plant_at, vertical_spec_of, PlantKind};
+        let now = self.tick_count.load(Ordering::Relaxed);
+        let mut plants = self.plants.lock().unwrap_or_else(|p| p.into_inner());
+        for ((x, y, z), id) in world.plant_blocks() {
+            let Some((kind, age)) = plant_at(id) else { continue };
+            // 竖向只跟踪基部，并把已长高度写进 stage。
+            if let PlantKind::Vertical(spec) = kind {
+                if vertical_spec_of(world.get(x, y - 1, z)).map(|s| s.name) == Some(spec.name) {
+                    continue;
+                }
+                let mut h = 0u8;
+                while h < spec.max_height - 1
+                    && vertical_spec_of(world.get(x, y + h as i32 + 1, z)).map(|s| s.name) == Some(spec.name)
+                {
+                    h += 1;
+                }
+                plants.entry((x, y, z)).or_insert(PlantEntry {
+                    kind,
+                    planted_tick: now,
+                    stage: h,
+                    facing: 0,
+                    fruit_done: false,
+                });
+                continue;
+            }
+            let facing = cocoa_of(id).map(|(_, _, f)| f).unwrap_or(0);
+            plants.entry((x, y, z)).or_insert(PlantEntry {
+                kind,
+                planted_tick: now,
+                stage: age,
+                facing,
+                fruit_done: false,
+            });
+        }
+    }
+
+    /// P37：按物种规格立即长树（骨粉/ticker 共用），土壤与占位口径同 P26。
+    pub fn grow_tree_kind_now(
+        &self,
+        world: &MutableWorld,
+        x: i32,
+        y: i32,
+        z: i32,
+        spec: &'static mc_world::crops::TreeSpec,
+    ) -> bool {
+        if world.get(x, y, z) != spec.sapling_id {
+            self.uproot_plant(x, y, z);
+            return false;
+        }
+        if !mc_world::is_crop_soil(world.get(x, y - 1, z)) {
+            self.uproot_plant(x, y, z);
+            return false;
+        }
+        let mut placed = Vec::new();
+        for (pos, id) in mc_world::crops::sapling_tree_blocks(spec, x, y, z) {
+            if pos == (x, y, z) || world.get(pos.0, pos.1, pos.2) == mc_world::AIR_BLOCK_ID {
+                world.set(pos.0, pos.1, pos.2, id);
+                placed.push((pos, id));
+            }
+        }
+        let mut chunks = std::collections::HashSet::new();
+        for ((bx, _, bz), _) in &placed {
+            chunks.insert(mc_world::chunk_of_block(*bx, *bz));
+        }
+        let hub = self.hub.lock().unwrap_or_else(|p| p.into_inner()).clone();
+        let cache = self.cache.lock().unwrap_or_else(|p| p.into_inner()).clone();
+        if let Some(cache) = &cache {
+            for c in chunks {
+                cache.invalidate(c);
+            }
+        }
+        if let Some(hub) = &hub {
+            for ((bx, by, bz), id) in &placed {
+                self.emit_block_update(&hub, *bx, *by, *bz, *id);
+            }
+        }
+        self.uproot_plant(x, y, z);
+        true
+    }
+
+    fn emit_block_update(&self, hub: &std::sync::Arc<BroadcastHub>, x: i32, y: i32, z: i32, id: u16) {
+        let mut body = Vec::new();
+        mc_protocol::packets::BlockUpdate { x, y, z, block_id: id as i32 }.encode_body(&mut body);
+        hub.broadcast(
+            u64::MAX,
+            mc_world::chunk_of_block(x, z),
+            mc_protocol::packets::PLAY_BLOCK_UPDATE_S2C_ID,
+            &body,
+        );
+    }
+
+    /// 新植物单格成长的缓存失效 + hub 广播。
+    fn commit_plant_block(&self, x: i32, y: i32, z: i32, id: u16) {
+        if let Some(cache) = self.cache.lock().unwrap_or_else(|p| p.into_inner()).clone() {
+            cache.invalidate(mc_world::chunk_of_block(x, z));
+        }
+        if let Some(hub) = self.hub.lock().unwrap_or_else(|p| p.into_inner()).clone() {
+            self.emit_block_update(&hub, x, y, z, id);
+        }
+    }
+
+    /// P37 生长间隔：生产用各自规格；测试钩子一旦调离生产值则全体统一生效。
+    /// 耕地加速只对原本适用的 age 作物开启（瓜梗/南瓜梗/火把花/猪笼草）。
+    fn plant_interval(&self, spec_ticks: u64, farmland_boost: bool, soil: u16) -> u64 {
+        let global = self.plant_ticks.load(Ordering::Relaxed);
+        let base = if global == mc_world::WHEAT_TICKS_PER_STAGE { spec_ticks } else { global }.max(1);
+        if farmland_boost && soil == mc_world::FARMLAND_BLOCK_ID {
+            (base / 2).max(1)
+        } else {
+            base
+        }
+    }
+
+    /// 全服唯一 50ms ticker 内推进全部新植物；连接侧绝不调用。
+    fn tick_plants(&self, world: &MutableWorld) {
+        use mc_world::crops::{
+            age_for_elapsed, age_stage_id, cocoa_state, fruit_neighbors, pitcher_states,
+            vertical_spec_of, PlantKind,
+        };
+        let now = self.tick_count.load(Ordering::Relaxed);
+        let entries: Vec<((i32, i32, i32), PlantEntry)> = self
+            .plants
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
+            .iter()
+            .map(|(pos, e)| (*pos, *e))
+            .collect();
+        for ((x, y, z), e) in entries {
+            match e.kind {
+                PlantKind::Age(spec) => {
+                    let old_id = if spec.name == "pitcher_crop" {
+                        pitcher_states(e.stage).0
+                    } else {
+                        age_stage_id(spec, e.stage)
+                    };
+                    if world.get(x, y, z) != old_id {
+                        self.uproot_plant(x, y, z);
+                        continue;
+                    }
+                    let interval = self.plant_interval(
+                        spec.ticks_per_stage,
+                        spec.farmland_boost,
+                        world.get(x, y - 1, z),
+                    );
+                    let want = age_for_elapsed(now - e.planted_tick, interval, spec.max_age);
+                    if want > e.stage {
+                        let new_id = age_stage_id(spec, want);
+                        world.set(x, y, z, new_id);
+                        self.commit_plant_block(x, y, z, new_id);
+                        if spec.name == "pitcher_crop" {
+                            let (_, upper) = pitcher_states(want);
+                            if world.get(x, y + 1, z) == mc_world::AIR_BLOCK_ID {
+                                world.set(x, y + 1, z, upper);
+                                self.commit_plant_block(x, y + 1, z, upper);
+                            }
+                        }
+                        let mut grown = e;
+                        grown.stage = want;
+                        if let Some(slot) = self.plants.lock().unwrap_or_else(|p| p.into_inner()).get_mut(&(x, y, z)) {
+                            *slot = grown;
+                        }
+                    }
+                    // 瓜果：成熟后在邻格落整块瓜（每株仅一次）。
+                    if !e.fruit_done && want >= spec.max_age {
+                        if let Some(fruit) = spec.fruit {
+                            if let Some((fx, fy, fz)) = fruit_neighbors(x, y, z)
+                                .into_iter()
+                                .find(|p| mc_world::is_replaceable(world.get(p.0, p.1, p.2)))
+                            {
+                                world.set(fx, fy, fz, fruit.block_id);
+                                self.commit_plant_block(fx, fy, fz, fruit.block_id);
+                                if let Some(slot) =
+                                    self.plants.lock().unwrap_or_else(|p| p.into_inner()).get_mut(&(x, y, z))
+                                {
+                                    slot.fruit_done = true;
+                                }
+                            }
+                        }
+                    }
+                }
+                PlantKind::Tree(spec) => {
+                    let interval = self.plant_interval(spec.grow_ticks, false, world.get(x, y - 1, z));
+                    if now.saturating_sub(e.planted_tick) >= interval {
+                        self.grow_tree_kind_now(world, x, y, z, spec);
+                    } else if world.get(x, y, z) != spec.sapling_id {
+                        self.uproot_plant(x, y, z);
+                    }
+                }
+                PlantKind::Vertical(spec) => {
+                    if vertical_spec_of(world.get(x, y, z)).map(|s| s.name) != Some(spec.name) {
+                        self.uproot_plant(x, y, z);
+                        continue;
+                    }
+                    if e.stage >= spec.max_height - 1 {
+                        continue;
+                    }
+                    let interval = self.plant_interval(spec.ticks_per_stage, false, world.get(x, y - 1, z));
+                    if now.saturating_sub(e.planted_tick) < interval {
+                        continue;
+                    }
+                    // stage=0 表示只有基部，新一段落在 y+1；stage=1 落在 y+2。
+                    let (nx, ny, nz) = (x, y + e.stage as i32 + 1, z);
+                    if world.get(nx, ny, nz) != mc_world::AIR_BLOCK_ID {
+                        continue;
+                    }
+                    let new_id = (spec.state_fn)(e.stage);
+                    world.set(nx, ny, nz, new_id);
+                    self.commit_plant_block(nx, ny, nz, new_id);
+                    if let Some(slot) = self.plants.lock().unwrap_or_else(|p| p.into_inner()).get_mut(&(x, y, z)) {
+                        slot.stage += 1;
+                        slot.planted_tick = now;
+                    }
+                }
+                PlantKind::Side(spec) => {
+                    if world.get(x, y, z) != cocoa_state(e.stage, e.facing) {
+                        self.uproot_plant(x, y, z);
+                        continue;
+                    }
+                    let (sx, sy, sz) = mc_world::crops::cocoa_support_pos(x, y, z, e.facing);
+                    if world.get(sx, sy, sz) != spec.support_id {
+                        self.uproot_plant(x, y, z);
+                        continue;
+                    }
+                    let interval = self.plant_interval(spec.ticks_per_stage, false, world.get(sx, sy, sz));
+                    let want = age_for_elapsed(now - e.planted_tick, interval, spec.max_age);
+                    if want > e.stage {
+                        let new_id = cocoa_state(want, e.facing);
+                        world.set(x, y, z, new_id);
+                        self.commit_plant_block(x, y, z, new_id);
+                        if let Some(slot) = self.plants.lock().unwrap_or_else(|p| p.into_inner()).get_mut(&(x, y, z)) {
+                            slot.stage = want;
+                        }
+                    }
+                }
+            }
+        }
+    }
+
     /// P26：种下树苗登记（UseItemOn 种植路径调用，落子成功后）。
     pub fn plant_sapling(&self, x: i32, y: i32, z: i32) {
         self.saplings
@@ -563,7 +911,10 @@ impl DropState {
             for dy in -r..=r {
                 for dz in -r..=r {
                     let p = (x + dx, y + dy, z + dz);
-                    if world.get(p.0, p.1, p.2) == mc_world::OAK_LEAVES_BLOCK_ID {
+                    let id = world.get(p.0, p.1, p.2);
+                    if id == mc_world::OAK_LEAVES_BLOCK_ID
+                        || mc_world::crops::tree_spec_for_leaves(id).is_some()
+                    {
                         pending.entry(p).or_insert(now);
                     }
                 }
@@ -577,7 +928,10 @@ impl DropState {
         for dx in -r..=r {
             for dy in -r..=r {
                 for dz in -r..=r {
-                    if world.get(x + dx, y + dy, z + dz) == mc_world::OAK_LOG_BLOCK_ID {
+                    let id = world.get(x + dx, y + dy, z + dz);
+                    if id == mc_world::OAK_LOG_BLOCK_ID
+                        || mc_world::crops::tree_spec_for_log(id).is_some()
+                    {
                         return true;
                     }
                 }
@@ -608,7 +962,10 @@ impl DropState {
         let hub = self.hub.lock().unwrap_or_else(|p| p.into_inner()).clone();
         let cache = self.cache.lock().unwrap_or_else(|p| p.into_inner()).clone();
         for (x, y, z) in due {
-            if world.get(x, y, z) != mc_world::OAK_LEAVES_BLOCK_ID {
+            let leaf = world.get(x, y, z);
+            let is_leaf = leaf == mc_world::OAK_LEAVES_BLOCK_ID
+                || mc_world::crops::tree_spec_for_leaves(leaf).is_some();
+            if !is_leaf {
                 self.pending_leaves.lock().unwrap_or_else(|p| p.into_inner()).remove(&(x, y, z));
                 continue;
             }
@@ -617,7 +974,13 @@ impl DropState {
                 continue;
             }
             world.set(x, y, z, mc_world::AIR_BLOCK_ID);
-            for d in mc_world::drops::leaf_decay_drops(x, y, z, world.seed()) {
+            // 橡树沿用 P27 苹果口径；新树种按各自树叶掉落（对应树苗/木棍）。
+            let decay = if leaf == mc_world::OAK_LEAVES_BLOCK_ID {
+                mc_world::drops::leaf_decay_drops(x, y, z, world.seed())
+            } else {
+                mc_world::drops_for_block(leaf, x, y, z, world.seed())
+            };
+            for d in decay {
                 let rest = world.drop_rest_y(x, z, y) as f64;
                 let mut items = self.items.lock().unwrap_or_else(|p| p.into_inner());
                 let _ = items.spawn(
@@ -1226,5 +1589,134 @@ mod tests {
                 "decay must spawn {d:?}"
             );
         }
+    }
+
+    // ---- P37：五种生长模型的单测代表（新 map + 全服唯一 ticker）----
+
+    #[test]
+    fn p37_nether_wart_grows_on_soul_sand_and_ignores_farmland_boost() {
+        use mc_world::crops::{age_stage_id, NETHER_WART, SOUL_SAND_BLOCK_ID, PlantKind};
+        let world = MutableWorld::new(41);
+        let st = DropState::new(std::env::temp_dir(), 41);
+        st.set_plant_ticks(2);
+        world.set(0, 100, 0, SOUL_SAND_BLOCK_ID);
+        world.set(0, 101, 0, NETHER_WART.base_id);
+        st.plant_kind(PlantKind::Age(&NETHER_WART), 0, 101, 0, 0);
+        assert_eq!(st.plant_count(), 1);
+        st.physics_tick(&world);
+        st.physics_tick(&world);
+        assert_eq!(world.get(0, 101, 0), age_stage_id(&NETHER_WART, 1));
+        // 换成耕地也不加速（该作物 farmland_boost=false）。
+        world.set(0, 100, 0, mc_world::FARMLAND_BLOCK_ID);
+        for _ in 0..2 {
+            st.physics_tick(&world);
+        }
+        assert_eq!(world.get(0, 101, 0), age_stage_id(&NETHER_WART, 2));
+        for _ in 0..6 {
+            st.physics_tick(&world);
+        }
+        assert_eq!(world.get(0, 101, 0), age_stage_id(&NETHER_WART, 3));
+    }
+
+    #[test]
+    fn p37_other_sapling_grows_with_own_log_and_leaves() {
+        use mc_world::{crops::{BIRCH, PlantKind}, WorldGen};
+        let world = MutableWorld::new(42);
+        let st = DropState::new(std::env::temp_dir(), 42);
+        st.set_plant_ticks(3);
+        let s = WorldGen::new(42).spawn_pos();
+        let (x, y, z) = (s.0, s.1, s.2);
+        world.set(x, y - 1, z, mc_world::DIRT_BLOCK_ID);
+        world.set(x, y, z, BIRCH.sapling_id);
+        st.plant_kind(PlantKind::Tree(&BIRCH), x, y, z, 0);
+        for _ in 0..2 {
+            st.physics_tick(&world);
+        }
+        assert_eq!(world.get(x, y, z), BIRCH.sapling_id);
+        st.physics_tick(&world);
+        assert_eq!(world.get(x, y, z), BIRCH.log_id, "birch must use birch_log");
+        assert_eq!(world.get(x, y + 3, z), BIRCH.log_id);
+        assert_eq!(world.get(x + 1, y + 1, z), BIRCH.leaves_id, "birch leaves not oak");
+        assert_eq!(st.plant_count(), 0);
+    }
+
+    #[test]
+    fn p37_vertical_cane_stacks_up_to_max_height() {
+        use mc_world::crops::{PlantKind, SUGAR_CANE};
+        let world = MutableWorld::new(43);
+        let st = DropState::new(std::env::temp_dir(), 43);
+        st.set_plant_ticks(2);
+        world.set(0, 100, 0, mc_world::SAND_BLOCK_ID);
+        world.set(0, 101, 0, SUGAR_CANE.base_id);
+        st.plant_kind(PlantKind::Vertical(&SUGAR_CANE), 0, 101, 0, 0);
+        for _ in 0..2 {
+            st.physics_tick(&world);
+        }
+        assert_eq!(world.get(0, 102, 0), SUGAR_CANE.base_id, "one segment per interval");
+        assert_eq!(st.plant_stage(0, 101, 0), Some(1));
+        for _ in 0..2 {
+            st.physics_tick(&world);
+        }
+        assert_eq!(world.get(0, 103, 0), SUGAR_CANE.base_id);
+        assert_eq!(st.plant_stage(0, 101, 0), Some(2), "max height 3 = stage 2");
+        for _ in 0..4 {
+            st.physics_tick(&world);
+        }
+        assert_eq!(world.get(0, 104, 0), mc_world::AIR_BLOCK_ID, "must stop at 3 segments");
+    }
+
+    #[test]
+    fn p37_berry_bush_and_cocoa_advance_their_own_ages() {
+        use mc_world::crops::{cocoa_state, PlantKind, COCOA, SWEET_BERRY_BUSH};
+        let world = MutableWorld::new(44);
+        let st = DropState::new(std::env::temp_dir(), 44);
+        st.set_plant_ticks(2);
+        // 甜浆果丛（普通土）。
+        world.set(0, 100, 0, mc_world::DIRT_BLOCK_ID);
+        world.set(0, 101, 0, SWEET_BERRY_BUSH.base_id);
+        st.plant_kind(PlantKind::Age(&SWEET_BERRY_BUSH), 0, 101, 0, 0);
+        // 可可贴在 jungle_log 北面（支撑在 z+1）。
+        world.set(4, 101, 1, COCOA.support_id);
+        world.set(4, 101, 0, cocoa_state(0, 0));
+        st.plant_kind(PlantKind::Side(&COCOA), 4, 101, 0, 0);
+        assert_eq!(st.plant_count(), 2);
+        for _ in 0..2 {
+            st.physics_tick(&world);
+        }
+        assert_eq!(world.get(0, 101, 0), mc_world::crops::age_stage_id(&SWEET_BERRY_BUSH, 1));
+        assert_eq!(world.get(4, 101, 0), cocoa_state(1, 0));
+        // 支撑被挖：可可跟踪摘除、不再生长。
+        world.set(4, 101, 1, mc_world::AIR_BLOCK_ID);
+        for _ in 0..4 {
+            st.physics_tick(&world);
+        }
+        assert_eq!(world.get(4, 101, 0), cocoa_state(1, 0));
+        assert_eq!(st.plant_stage(4, 101, 0), None);
+    }
+
+    #[test]
+    fn p37_melon_stem_matures_and_places_real_fruit_block() {
+        use mc_world::crops::{age_stage_id, FruitSpec, MELON_STEM, PlantKind};
+        let world = MutableWorld::new(45);
+        let st = DropState::new(std::env::temp_dir(), 45);
+        st.set_plant_ticks(2);
+        world.set(0, 100, 0, mc_world::FARMLAND_BLOCK_ID);
+        world.set(0, 101, 0, MELON_STEM.base_id);
+        st.plant_kind(PlantKind::Age(&MELON_STEM), 0, 101, 0, 0);
+        // 耕地加速：间隔 1 拍/阶段 → 7 拍成熟。
+        for _ in 0..7 {
+            st.physics_tick(&world);
+        }
+        assert_eq!(world.get(0, 101, 0), age_stage_id(&MELON_STEM, 7));
+        let fruit: FruitSpec = MELON_STEM.fruit.unwrap();
+        assert_eq!(fruit.block_id, 10067, "melon blockstate from data/777");
+        assert_eq!(world.get(1, 101, 0), fruit.block_id, "ripe stem must place a melon next door");
+        assert!(!mc_world::drops_for_block(fruit.block_id, 1, 101, 0, 45).is_empty());
+        // 只结一次：邻格改回空气后不再补瓜（MVP 与原版差异）。
+        world.set(1, 101, 0, mc_world::AIR_BLOCK_ID);
+        for _ in 0..4 {
+            st.physics_tick(&world);
+        }
+        assert_eq!(world.get(1, 101, 0), mc_world::AIR_BLOCK_ID);
     }
 }

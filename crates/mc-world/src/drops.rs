@@ -61,6 +61,23 @@ pub const ITEM_POISONOUS_POTATO: i32 =
 pub const ITEM_BEETROOT: i32 = crate::registry_id(mc_registry::ITEMS, "minecraft:beetroot") as i32;
 pub const ITEM_BEETROOT_SEEDS: i32 =
     crate::registry_id(mc_registry::ITEMS, "minecraft:beetroot_seeds") as i32;
+/// P37 新作物种子/产物，全部编译期从 `data/777/items.json` 生成表查得。
+pub const ITEM_NETHER_WART: i32 = crate::registry_id(mc_registry::ITEMS, "minecraft:nether_wart") as i32;
+pub const ITEM_MELON_SEEDS: i32 = crate::registry_id(mc_registry::ITEMS, "minecraft:melon_seeds") as i32;
+pub const ITEM_PUMPKIN_SEEDS: i32 = crate::registry_id(mc_registry::ITEMS, "minecraft:pumpkin_seeds") as i32;
+pub const ITEM_MELON_SLICE: i32 = crate::registry_id(mc_registry::ITEMS, "minecraft:melon_slice") as i32;
+pub const ITEM_PUMPKIN: i32 = crate::registry_id(mc_registry::ITEMS, "minecraft:pumpkin") as i32;
+pub const ITEM_SWEET_BERRIES: i32 = crate::registry_id(mc_registry::ITEMS, "minecraft:sweet_berries") as i32;
+pub const ITEM_TORCHFLOWER_SEEDS: i32 =
+    crate::registry_id(mc_registry::ITEMS, "minecraft:torchflower_seeds") as i32;
+pub const ITEM_TORCHFLOWER: i32 = crate::registry_id(mc_registry::ITEMS, "minecraft:torchflower") as i32;
+pub const ITEM_PITCHER_POD: i32 = crate::registry_id(mc_registry::ITEMS, "minecraft:pitcher_pod") as i32;
+pub const ITEM_PITCHER_PLANT: i32 =
+    crate::registry_id(mc_registry::ITEMS, "minecraft:pitcher_plant") as i32;
+pub const ITEM_COCOA_BEANS: i32 = crate::registry_id(mc_registry::ITEMS, "minecraft:cocoa_beans") as i32;
+pub const ITEM_SUGAR_CANE: i32 = crate::registry_id(mc_registry::ITEMS, "minecraft:sugar_cane") as i32;
+pub const ITEM_BAMBOO: i32 = crate::registry_id(mc_registry::ITEMS, "minecraft:bamboo") as i32;
+pub const ITEM_CACTUS: i32 = crate::registry_id(mc_registry::ITEMS, "minecraft:cactus") as i32;
 /// P27 锄头全系（`data/777/items.json`，获得途径同骨粉：管理面板领取，无合成/掉落；
 /// 手持任意一种对草/泥土右键均可耕地，无耐久消耗，见 HANDOFF §5）。
 pub const ITEM_WOODEN_HOE: i32 = crate::registry_id(mc_registry::ITEMS, "minecraft:wooden_hoe") as i32;
@@ -141,7 +158,7 @@ pub struct Drop {
 }
 
 /// 确定性 64 位 hash（splitmix64，world seed 与坐标混合，无全局随机状态）。
-fn hash_pos(seed: i64, x: i32, y: i32, z: i32) -> u64 {
+pub(crate) fn hash_pos(seed: i64, x: i32, y: i32, z: i32) -> u64 {
     let mut h = seed as u64 ^ 0x9e3779b97f4a7c15;
     h = h.wrapping_add(x as u64).wrapping_mul(0xbf58476d1ce4e5b9);
     h = h.wrapping_add(y as u64).wrapping_mul(0x94d049bb133111eb);
@@ -152,65 +169,6 @@ fn hash_pos(seed: i64, x: i32, y: i32, z: i32) -> u64 {
     h = h.wrapping_mul(0x94d049bb133111eb);
     h ^= h >> 29;
     h
-}
-
-/// P22/P33 通用作物掉落：小麦保持旧口径；新作物按 `CropKind` 分臂。
-/// 所有概率分支都走 `hash_pos`（独立盐），确定性且与位置绑定，无随机状态。
-fn crop_block_drops(
-    crop: &crate::crops::CropSpec,
-    age: u8,
-    x: i32,
-    y: i32,
-    z: i32,
-    seed: i64,
-) -> Vec<Drop> {
-    let ripe = age >= crop.max_age;
-    match crop.kind {
-        crate::crops::CropKind::Wheat => {
-            if ripe {
-                let extra = (hash_pos(seed, x, y, z) % 2) as i32;
-                vec![
-                    Drop { item_id: ITEM_WHEAT, count: 1 },
-                    Drop { item_id: ITEM_WHEAT_SEEDS, count: 1 + extra },
-                ]
-            } else {
-                vec![Drop { item_id: ITEM_WHEAT_SEEDS, count: 1 }]
-            }
-        }
-        crate::crops::CropKind::Carrot => {
-            // 成熟：carrot 1~2 + 1/4 机会再返 1（独立 hash，不扰动主掉落）；未熟只掉本身。
-            let mut count = 1 + (hash_pos(seed, x, y, z) % 2) as i32;
-            if hash_pos(seed ^ 0x63617272, x, y, z) % 4 == 0 {
-                count += 1;
-            }
-            vec![Drop {
-                item_id: ITEM_CARROT,
-                count: if ripe { count } else { 1 },
-            }]
-        }
-        crate::crops::CropKind::Potato => {
-            let mut out = vec![Drop {
-                item_id: ITEM_POTATO,
-                count: if ripe { 1 + (hash_pos(seed, x, y, z) % 2) as i32 } else { 1 },
-            }];
-            // 毒马铃薯仅成熟时小概率（1/100），ID 来自 data/777/items.json。
-            if ripe && hash_pos(seed ^ 0x706f6973, x, y, z) % 100 == 0 {
-                out.push(Drop { item_id: ITEM_POISONOUS_POTATO, count: 1 });
-            }
-            out
-        }
-        crate::crops::CropKind::Beetroot => {
-            if ripe {
-                vec![
-                    Drop { item_id: ITEM_BEETROOT, count: 1 },
-                    Drop { item_id: ITEM_BEETROOT_SEEDS, count: 1 + (hash_pos(seed, x, y, z) % 2) as i32 },
-                ]
-            } else {
-                // 种子本身就是 beetroot_seeds，未熟挖掉可继续再种。
-                vec![Drop { item_id: ITEM_BEETROOT_SEEDS, count: 1 }]
-            }
-        }
-    }
 }
 
 /// 方块破坏掉落（创造/生存徒手口径；工具等级与精准采集留 TODO）。
@@ -248,13 +206,9 @@ pub fn drops_for_block(block_id: u16, x: i32, y: i32, z: i32, seed: i64) -> Vec<
         FARMLAND_BLOCK_ID => vec![Drop { item_id: ITEM_DIRT, count: 1 }],
         // P23 树苗：挖掉种下的树苗原样返还（与小麦未熟口径一致；长成树/树叶 decay 留后续）。
         OAK_SAPLING_BLOCK_ID => vec![Drop { item_id: ITEM_OAK_SAPLING, count: 1 }],
-        // P22 小麦 + P33 新作物：统一按通用作物表分掉落臂。小麦的成熟/未熟输出
-        // 与旧版完全相同（见 crops::CropKind::Wheat 臂）；其它作物见文件头表。
-        id if crate::crop_age_of(id).is_some() => {
-            let (crop, age) = crate::crop_age_of(id).unwrap_or((&crate::crops::WHEAT, 0));
-            crop_block_drops(crop, age, x, y, z, seed)
-        }
-        _ => Vec::new(),
+        // P22/P33/P37：作物掉落规则集中在 `crops::drops`（薄 shim）；
+        // 未命中任何作物/新方块才返回空，旧表各臂的优先级不变。
+        id => crate::crops::crop_block_drops(id, x, y, z, seed).unwrap_or_default(),
     }
 }
 

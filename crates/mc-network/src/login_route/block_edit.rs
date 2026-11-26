@@ -41,7 +41,7 @@ pub(crate) fn eye_of(pos: (f64, f64, f64)) -> (f64, f64, f64) {
     (pos.0, pos.1 + mc_world::EYE_HEIGHT, pos.2)
 }
 
-fn eye_block_dist(eye: (f64, f64, f64), x: i32, y: i32, z: i32) -> f64 {
+pub(crate) fn eye_block_dist(eye: (f64, f64, f64), x: i32, y: i32, z: i32) -> f64 {
     let dx = eye.0 - (x as f64 + 0.5);
     let dy = eye.1 - (y as f64 + 0.5);
     let dz = eye.2 - (z as f64 + 0.5);
@@ -49,12 +49,12 @@ fn eye_block_dist(eye: (f64, f64, f64), x: i32, y: i32, z: i32) -> f64 {
 }
 
 /// 目标 chunk 是否在玩家视距内（切比雪夫）。
-fn in_view(center: mc_core::ChunkPos, radius: i32, x: i32, z: i32) -> bool {
+pub(crate) fn in_view(center: mc_core::ChunkPos, radius: i32, x: i32, z: i32) -> bool {
     let c = mc_world::chunk_of_block(x, z);
     (c.0 - center.0).abs() <= radius && (c.1 - center.1).abs() <= radius
 }
 
-fn rollback(world: &MutableWorld, x: i32, y: i32, z: i32) -> BlockChange {
+pub(crate) fn rollback(world: &MutableWorld, x: i32, y: i32, z: i32) -> BlockChange {
     let cur = world.get(x, y, z);
     BlockChange { x, y, z, old_id: cur, new_id: cur }
 }
@@ -207,47 +207,15 @@ pub fn decide_plant(
     act: &packets::UseItemOn,
     plant_id: u16,
 ) -> Option<BlockEditOutcome> {
-    let world = world?;
-    // 只要顶面：face=1(+Y)；其它 face（含非法）只 ack，不改世界。
-    if act.face != 1 {
-        return Some(BlockEditOutcome { sequence: act.sequence, changes: Vec::new(), drops: Vec::new() });
-    }
-    let (tx, ty, tz) = (act.x, act.y + 1, act.z);
-    if !(mc_world::MIN_Y..=mc_world::WORLD_TOP_Y).contains(&act.y)
-        || !(mc_world::MIN_Y..=mc_world::WORLD_TOP_Y).contains(&ty)
-        || !in_view(center, radius, tx, tz)
-        || eye_block_dist(eye, act.x, act.y, act.z) > mc_world::MAX_REACH
-    {
-        return Some(BlockEditOutcome {
-            sequence: act.sequence,
-            changes: vec![rollback(world, tx, ty, tz)],
-            drops: Vec::new(),
-        });
-    }
-    // 被点必须是土壤：草方块/泥土（P22）+ 耕地（P27，种在耕地上加速生长）。
-    let clicked = world.get(act.x, act.y, act.z);
-    if !mc_world::is_crop_soil(clicked) {
-        return Some(BlockEditOutcome {
-            sequence: act.sequence,
-            changes: vec![rollback(world, tx, ty, tz)],
-            drops: Vec::new(),
-        });
-    }
-    // 目标必须是空气格（水面/被占都不种）。
-    let cur = world.get(tx, ty, tz);
-    if cur != mc_world::AIR_BLOCK_ID {
-        return Some(BlockEditOutcome {
-            sequence: act.sequence,
-            changes: vec![BlockChange { x: tx, y: ty, z: tz, old_id: cur, new_id: cur }],
-            drops: Vec::new(),
-        });
-    }
-    let old = world.set(tx, ty, tz, plant_id);
-    Some(BlockEditOutcome {
-        sequence: act.sequence,
-        changes: vec![BlockChange { x: tx, y: ty, z: tz, old_id: old, new_id: plant_id }],
-        drops: Vec::new(),
-    })
+    super::crops::decide_plant_top(
+        world,
+        eye,
+        center,
+        radius,
+        act,
+        plant_id,
+        mc_world::crops::Soil::Crop,
+    )
 }
 
 /// P27 耕地判定（手持任意锄头对草方块/泥土**顶面**右键）：
@@ -304,6 +272,14 @@ pub fn decide_till(
 pub enum BonemealAction {
     Wheat(BlockEditOutcome),
     GrowTree { x: i32, y: i32, z: i32, sequence: i32 },
+    /// P37：其它树种/红树繁殖体立刻长树（材质按各自真实 ID）。
+    GrowTreeKind {
+        x: i32,
+        y: i32,
+        z: i32,
+        sequence: i32,
+        spec: &'static mc_world::crops::TreeSpec,
+    },
     Noop { sequence: i32, resend: BlockChange },
 }
 
@@ -327,33 +303,22 @@ pub fn decide_bonemeal(
     {
         return None;
     }
-    let clicked = world.get(x, y, z);
-    if clicked == mc_world::OAK_SAPLING_BLOCK_ID {
-        return Some(BonemealAction::GrowTree { x, y, z, sequence: act.sequence });
-    }
-    if let Some((crop, age)) = mc_world::crop_age_of(clicked) {
-        if age >= crop.max_age {
+    match super::crops::decide_bonemeal_crop(world, (x, y, z), act.sequence)? {
+        super::crops::BonemealDecision::Advance(outcome) => Some(BonemealAction::Wheat(outcome)),
+        super::crops::BonemealDecision::GrowOak => {
+            Some(BonemealAction::GrowTree { x, y, z, sequence: act.sequence })
+        }
+        super::crops::BonemealDecision::GrowSpecies(spec) => {
+            Some(BonemealAction::GrowTreeKind { x, y, z, sequence: act.sequence, spec })
+        }
+        super::crops::BonemealDecision::Noop => {
             let cur = world.get(x, y, z);
-            return Some(BonemealAction::Noop {
+            Some(BonemealAction::Noop {
                 sequence: act.sequence,
                 resend: BlockChange { x, y, z, old_id: cur, new_id: cur },
-            });
+            })
         }
-        let adv = mc_world::drops::bonemeal_advance(world.seed(), x, y, z);
-        let new_age = age.saturating_add(adv).min(crop.max_age);
-        let new_id = mc_world::crop_stage_id(crop, new_age);
-        let old = world.set(x, y, z, new_id);
-        return Some(BonemealAction::Wheat(BlockEditOutcome {
-            sequence: act.sequence,
-            changes: vec![BlockChange { x, y, z, old_id: old, new_id }],
-            drops: Vec::new(),
-        }));
     }
-    let cur = world.get(x, y, z);
-    Some(BonemealAction::Noop {
-        sequence: act.sequence,
-        resend: BlockChange { x, y, z, old_id: cur, new_id: cur },
-    })
 }
 
 /// 落子后动作：缓存失效 → 发 BlockUpdate → 发 Ack → 投递 BlockEdit 事件。

@@ -76,6 +76,8 @@ pub async fn serve(listener: TcpListener, tx: Sender<NewConnection>, config: Net
         drops.adopt_existing_crops(world);
         // P26：存量树苗同口径重计时认领。
         drops.adopt_existing_saplings(world);
+        // P37：存量新植物（新作物/新树苗/竖向/可可）同口径重计时认领。
+        drops.adopt_existing_plants(world);
         if drops.start_global_tick(Arc::clone(world)) {
             info!("global drop physics ticker started ({}ms)", drop_state::DROP_TICK_MS);
         } else {

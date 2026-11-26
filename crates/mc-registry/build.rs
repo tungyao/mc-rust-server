@@ -59,12 +59,14 @@ fn main() {
     );
 
     let blocks_path = version_dir.join("blocks.json");
+    let full_blocks_path = version_dir.join("full").join("blocks.json");
     let items_path = version_dir.join("items.json");
     let entities_path = version_dir.join("entities.json");
     let packets_path = version_dir.join("packets.json");
     let properties_path = version_dir.join("properties.json");
     for p in [
         &blocks_path,
+        &full_blocks_path,
         &items_path,
         &entities_path,
         &packets_path,
@@ -74,6 +76,7 @@ fn main() {
     }
 
     let blocks = read_blocks(&blocks_path);
+    let block_states = read_full_blocks(&full_blocks_path);
     let items = read_id_map(&items_path, "items");
     let entities = read_id_map(&entities_path, "entities");
     let packets = read_packets(&packets_path);
@@ -87,10 +90,11 @@ fn main() {
     );
 
     validate_expected_ids(&blocks, &items, &packets);
+    validate_block_states(&block_states, &blocks);
 
     let dest = PathBuf::from(env::var("OUT_DIR").expect("OUT_DIR"))
         .join("generated.rs");
-    fs::write(&dest, render(&blocks, &items, &entities, &packets))
+    fs::write(&dest, render(&blocks, &block_states, &items, &entities, &packets))
         .expect("write $OUT_DIR/generated.rs");
 }
 
@@ -145,6 +149,93 @@ fn read_blocks(path: &Path) -> Vec<(u32, String)> {
     }
     sort_and_check(&mut out, "blocks");
     out
+}
+
+/// P37：`full/blocks.json` 的每个方块全部 blockstate（按 id 升序连续排列）。
+/// 生成 `(first_state_id, namespaced_name, state_count)`，供按属性索引解析阶段 ID
+/// （如 cocoa 的 age/facing、bamboo 的 age/leaves/stage），不再手写数字。
+fn read_full_blocks(path: &Path) -> Vec<(u32, String, u16)> {
+    let v = read_json(path);
+    let arr = v
+        .get("blocks")
+        .and_then(Value::as_array)
+        .unwrap_or_else(|| panic!("{}: missing `blocks` array", path.display()));
+    let mut out = Vec::with_capacity(arr.len());
+    for b in arr {
+        let name = b
+            .get("name")
+            .and_then(Value::as_str)
+            .unwrap_or_else(|| panic!("{}: block missing `name`", path.display()));
+        let states = b
+            .get("states")
+            .and_then(Value::as_array)
+            .unwrap_or_else(|| panic!("{}: {name} missing `states`", path.display()));
+        assert!(!states.is_empty(), "{}: {name} has no states", path.display());
+        let first = as_u32(
+            states[0].get("id"),
+            &format!("{}: {name}.states[0].id", path.display()),
+        );
+        let count = u16::try_from(states.len()).expect("blockstate count fits u16");
+        for (i, state) in states.iter().enumerate() {
+            assert_eq!(
+                as_u32(state.get("id"), &format!("{}: {name}.states[{i}].id", path.display())),
+                first + i as u32,
+                "{}: {name} blockstates must be contiguous",
+                path.display()
+            );
+        }
+        out.push((first, namespaced(name), count));
+    }
+    out.sort_by(|a, b| a.1.cmp(&b.1));
+    let mut seen = HashMap::new();
+    for (_, name, _) in &out {
+        assert!(seen.insert(name.as_str(), true).is_none(), "duplicate full block {name}");
+    }
+    out
+}
+
+/// 防 codegen 漂移：默认 state 必须落在该方块的状态区间内；P37 依赖的阶段
+/// 索引（age=N 偏移）也要与已知 JSON 实测值一致，漂移直接编译失败。
+fn validate_block_states(states: &[(u32, String, u16)], blocks: &[(u32, String)]) {
+    for (first, name, count) in states {
+        let default = blocks
+            .iter()
+            .find(|(_, n)| n == name)
+            .unwrap_or_else(|| panic!("full block {name} missing from blocks.json"))
+            .0;
+        assert!(
+            (*first..*first + u32::from(*count)).contains(&default),
+            "default state {default} outside {name} range {first}..={}",
+            *first + u32::from(*count) - 1
+        );
+    }
+    let at = |name: &str, index: u32| -> u32 {
+        let (first, _, count) = states
+            .iter()
+            .find(|(_, n, _)| n == name)
+            .unwrap_or_else(|| panic!("missing full block {name}"));
+        assert!(index < u32::from(*count), "{name} state index {index} out of range");
+        first + index
+    };
+    for (name, index, expected) in [
+        ("minecraft:wheat", 7, 6874),
+        ("minecraft:carrots", 7, 12409),
+        ("minecraft:potatoes", 7, 12417),
+        ("minecraft:beetroots", 3, 16795),
+        ("minecraft:nether_wart", 3, 11184),
+        ("minecraft:melon_stem", 7, 10091),
+        ("minecraft:pumpkin_stem", 7, 10083),
+        ("minecraft:sweet_berry_bush", 3, 24301),
+        ("minecraft:torchflower_crop", 1, 16779),
+        ("minecraft:pitcher_crop", 9, 16789),
+        ("minecraft:cocoa", 11, 11226),
+        ("minecraft:sugar_cane", 15, 8632),
+        ("minecraft:cactus", 15, 8614),
+        ("minecraft:bamboo", 11, 18647),
+        ("minecraft:mangrove_propagule", 0, 46),
+    ] {
+        assert_eq!(at(name, index), expected, "state index drift: {name}[{index}]");
+    }
 }
 
 fn read_id_map(path: &Path, kind: &str) -> Vec<(u32, String)> {
@@ -322,6 +413,7 @@ fn render_table(out: &mut String, decl: &str, entries: &[(u32, String)]) {
 
 fn render(
     blocks: &[(u32, String)],
+    block_states: &[(u32, String, u16)],
     items: &[(u32, String)],
     entities: &[(u32, String)],
     packets: &[(String, String, i32)],
@@ -332,6 +424,11 @@ fn render(
     out.push_str("// blockstate IDs come from `default_state_id` in blocks.json.\n\n");
 
     render_table(&mut out, "pub static BLOCKS: &[(u32, &str)]", blocks);
+    out.push_str("pub static BLOCK_STATES: &[(u32, &str, u16)] = &[\n");
+    for (first, name, count) in block_states {
+        out.push_str(&format!("    ({first}, {}, {count}),\n", rust_string(name)));
+    }
+    out.push_str("];\n\n");
     render_table(&mut out, "pub static ITEMS: &[(u32, &str)]", items);
     render_table(&mut out, "pub static ENTITIES: &[(u32, &str)]", entities);
 
