@@ -42,6 +42,8 @@ pub struct PlayOptions {
     pub drops: Option<Arc<DropState>>,
     /// 多人广播 hub（P21）；None 时只回包给操作者本人（旧行为）。
     pub hub: Option<Arc<BroadcastHub>>,
+    /// P43 玩家实体互见开关：仅生产入口/显式 e2e 打开；默认关闭保持旧包流。
+    pub player_visibility: bool,
 }
 
 impl PlayOptions {
@@ -56,6 +58,7 @@ impl PlayOptions {
             mutable_world: None,
             drops: None,
             hub: None,
+            player_visibility: false,
         }
     }
 
@@ -91,6 +94,12 @@ impl PlayOptions {
 
     pub fn with_hub(mut self, hub: Arc<BroadcastHub>) -> Self {
         self.hub = Some(hub);
+        self
+    }
+
+    /// P43：打开玩家实体互见（需同时带 `hub` 才真正发包）。
+    pub fn with_player_visibility(mut self, enabled: bool) -> Self {
+        self.player_visibility = enabled;
         self
     }
 }
@@ -323,6 +332,11 @@ pub async fn enter_play_with_options(
     }
     // P21 广播通道与 Disconnect 同点清理：覆盖所有退出路径，不留幽灵通道。
     if let Some(hub) = &opts.hub {
+        // P43：先把本玩家从视者视野移除（RemoveEntities + unmark），再注销通道；
+        // 顺序反了会拿不到对外实体 id、留下幽灵玩家实体。
+        if opts.player_visibility {
+            crate::player_visibility::broadcast_leave(hub, conn_id);
+        }
         hub.unregister(conn_id);
     }
     // 正常 EOF / 读错误 / 写失败 / KeepAlive 超时 / Join 序列失败全部走这里，
@@ -399,6 +413,21 @@ async fn enter_play_inner(
             profile.username.clone(),
             addr.to_string(),
         );
+        if opts.player_visibility {
+            // P43：对外实体 id 与客户端自身 id=1 严格分离；自己永远不 Spawn。
+            let state = crate::PlayerEntityState {
+                entity_id: crate::player_visibility::next_player_entity_id(),
+                uuid: profile.uuid.as_u128(),
+                pos: (spawn.0 as f64 + 0.5, spawn.1 as f64, spawn.2 as f64 + 0.5),
+                yaw: 0.0,
+                pitch: 0.0,
+            };
+            hub.enable_player(opts.conn_id, state);
+            // 刚进服：给视距内旧连接发自己的 Spawn，并让自己看到视距内旧玩家；
+            // per-viewer known 集保证双方都只发一次（cycle 兜底见 play_loop 节拍）。
+            crate::player_visibility::spawn_to_viewers(hub, opts.conn_id, &state);
+            crate::player_visibility::sync_viewer(hub, opts.conn_id);
+        }
         rx
     });
     play_loop(stream, addr, profile, opts, keepalive_id, view, &world, cache, mutable, outbox).await

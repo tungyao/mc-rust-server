@@ -121,6 +121,12 @@ async fn play_loop(
                         break;
                     }
                 }
+                // P43：视距进出补发/移除（每 50ms 节拍，位置已被 hub 更新）。
+                if opts.player_visibility {
+                    if let Some(hub) = &opts.hub {
+                        crate::player_visibility::sync_viewer(hub, opts.conn_id);
+                    }
+                }
                 if let Err(e) = drain_outbox(stream, opts, &outbox).await {
                     debug!("play uuid={} outbox drain failed ({e}), closing", profile.uuid);
                     break;
@@ -230,6 +236,15 @@ async fn play_loop(
                         // P21：广播集用接收方 last_pos，跨区块后自然跟随。
                         if let Some(hub) = &opts.hub {
                             hub.update_pos(opts.conn_id, last_pos);
+                        }
+                        // P43：玩家实体位置/朝向只发给已 Spawn 过自己的视者；
+                        // Ack 不在 hub 队列里，仍只回操作者本人。
+                        if opts.player_visibility {
+                            if let Some(hub) = &opts.hub {
+                                crate::player_visibility::broadcast_movement(
+                                    hub, opts.conn_id, m, on_ground,
+                                );
+                            }
                         }
                         emit_play_event(
                             &opts.events,
@@ -986,6 +1001,12 @@ async fn play_loop(
                 }
             }
             last_drop_tick = Instant::now();
+        }
+        // P43：包流不断时也按同节拍同步玩家实体视距（读超时分支是兜底）。
+        if opts.player_visibility {
+            if let Some(hub) = &opts.hub {
+                crate::player_visibility::sync_viewer(hub, opts.conn_id);
+            }
         }
         // P21：同节拍排空广播队列（其它玩家的编辑/掉落），再回读循环。
         if let Err(e) = drain_outbox(stream, opts, &outbox).await {

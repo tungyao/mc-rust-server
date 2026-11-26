@@ -34,6 +34,10 @@ pub const PLAY_REMOVE_ENTITIES_S2C_ID: i32 = super::packet_id("clientbound.play"
 pub const PLAY_ENTITY_POSITION_SYNC_S2C_ID: i32 = super::packet_id("clientbound.play", "entity_position_sync");
 /// S2C Update Entity Position：`move_entity_pos`（线性差量 step=0）。
 pub const PLAY_UPDATE_ENTITY_POS_S2C_ID: i32 = super::packet_id("clientbound.play", "move_entity_pos");
+/// S2C Update Entity Position and Rotation：`move_entity_pos_rot`（差量 + 角度，step=0）。
+pub const PLAY_UPDATE_ENTITY_POS_ROT_S2C_ID: i32 = super::packet_id("clientbound.play", "move_entity_pos_rot");
+/// S2C Update Entity Rotation：`move_entity_rot`（角度）。
+pub const PLAY_UPDATE_ENTITY_ROT_S2C_ID: i32 = super::packet_id("clientbound.play", "move_entity_rot");
 /// S2C Pickup Item：`take_item_entity`（拾取动画，不删实体不加背包，需另发 Remove+背包）。
 pub const PLAY_PICKUP_ITEM_S2C_ID: i32 = super::packet_id("clientbound.play", "take_item_entity");
 /// S2C Set Container Content：`container_set_content`（window 0=玩家背包）。
@@ -63,6 +67,11 @@ pub const ITEM_ENTITY_TYPE_ID: i32 = super::entity_id("minecraft:item");
 /// P31 `minecraft:experience_orb` 在 EntityType 注册表中的位置，编译期从 `mc-registry`
 /// 由 data/777/entities.json 生成的 ENTITIES 表派生（26.3 实测值 50）。
 pub const EXPERIENCE_ORB_ENTITY_TYPE_ID: i32 = super::entity_id("minecraft:experience_orb");
+
+/// P43 `minecraft:player` 在 EntityType 注册表中的位置（data/777/entities.json = 159）。
+/// 注意：`add_entity` 的本地玩家实体不能被客户端自己 Spawn（wiki Spawn Entity），
+/// 本服只对**其它连接**发这个 type 的 Spawn，自己仍用 LoginPlay 的 entity_id=1。
+pub const PLAYER_ENTITY_TYPE_ID: i32 = super::entity_id("minecraft:player");
 
 /// 玩家背包窗口 ID（window 0）。
 pub const PLAYER_INVENTORY_WINDOW_ID: i32 = 0;
@@ -378,6 +387,91 @@ pub fn encode_spawn_experience_orb_packet(v: &SpawnExperienceOrb, out: &mut Vec<
 }
 
 // ---------------------------------------------------------------------------
+// P43 玩家实体生成：复用 `add_entity` 已验证包体，type=159、data=0。
+// 来源：minecraft.wiki 26.3/777 §Spawn Entity（字段顺序与 item/orb 完全一致，
+// 只有 Type 不同）+ §Object data（player 不在需要 Data 的实体列表里，故 data=0）。
+// ---------------------------------------------------------------------------
+
+/// 玩家实体生成（S2C `add_entity`，`minecraft:player`=159，data=0）。
+///
+/// 只发给视距内**其它**连接；客户端自己的实体由 LoginPlay 隐式创建（wiki 明确
+/// 不可对本地玩家发此包）。entity_id 是服务端分配的对外唯一 id，不是 1。
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct SpawnPlayerEntity {
+    pub entity_id: i32,
+    pub uuid: u128,
+    pub x: f64,
+    pub y: f64,
+    pub z: f64,
+    pub vel: LpVec3,
+    pub pitch: u8,
+    pub yaw: u8,
+    pub head_yaw: u8,
+}
+
+impl SpawnPlayerEntity {
+    pub fn encode_body(&self, out: &mut Vec<u8>) {
+        write_varint(self.entity_id, out);
+        write_uuid(self.uuid, out);
+        write_varint(PLAYER_ENTITY_TYPE_ID, out);
+        write_f64_be(self.x, out);
+        write_f64_be(self.y, out);
+        write_f64_be(self.z, out);
+        self.vel.encode_body(out);
+        out.push(self.pitch);
+        out.push(self.yaw);
+        out.push(self.head_yaw);
+        write_varint(0, out);
+    }
+
+    pub fn decode_body(buf: &[u8]) -> Result<(Self, usize), ProtocolError> {
+        let mut off = 0;
+        let (entity_id, n) = read_varint(&buf[off..])?;
+        off += n;
+        let (uuid, n) = read_uuid(&buf[off..])?;
+        off += n;
+        let (typ, n) = read_varint(&buf[off..])?;
+        off += n;
+        if typ != PLAYER_ENTITY_TYPE_ID {
+            return Err(ProtocolError::UnexpectedEof);
+        }
+        let (x, n) = read_f64_be(&buf[off..])?;
+        off += n;
+        let (y, n) = read_f64_be(&buf[off..])?;
+        off += n;
+        let (z, n) = read_f64_be(&buf[off..])?;
+        off += n;
+        let (vel, n) = LpVec3::decode_body(&buf[off..])?;
+        off += n;
+        if buf.len() < off + 3 {
+            return Err(ProtocolError::UnexpectedEof);
+        }
+        let (pitch, yaw, head_yaw) = (buf[off], buf[off + 1], buf[off + 2]);
+        off += 3;
+        let (data, n) = read_varint(&buf[off..])?;
+        off += n;
+        if data != 0 {
+            return Err(ProtocolError::UnexpectedEof);
+        }
+        Ok((Self { entity_id, uuid, x, y, z, vel, pitch, yaw, head_yaw }, off))
+    }
+}
+
+pub fn encode_spawn_player_packet(v: &SpawnPlayerEntity, out: &mut Vec<u8>) {
+    let mut body = Vec::new();
+    v.encode_body(&mut body);
+    encode_packet(PLAY_SPAWN_ENTITY_S2C_ID, &body, out);
+}
+
+/// 角度（度）→ Angle（1/256 圈，单字节）。minecraft.wiki Data types#Angle。
+pub fn angle_byte(degrees: f32) -> u8 {
+    if !degrees.is_finite() {
+        return 0;
+    }
+    ((degrees.rem_euclid(360.0) / 360.0) * 256.0).round() as u8
+}
+
+// ---------------------------------------------------------------------------
 // Set Entity Data：entity_id + [index 8 u8, type 7 varint, Slot] + 0xFF。
 // ---------------------------------------------------------------------------
 
@@ -629,6 +723,107 @@ pub fn encode_update_entity_pos_packet(v: &UpdateEntityPos, out: &mut Vec<u8>) {
     let mut body = Vec::new();
     v.encode_body(&mut body);
     encode_packet(PLAY_UPDATE_ENTITY_POS_S2C_ID, &body, out);
+}
+
+// ---------------------------------------------------------------------------
+// P43 Update Entity Position and Rotation（move_entity_pos_rot 55/0x37）：
+// entity_id VarInt + properties VarInt(bit0 on_ground，高位 step=0) +
+// 3×Short 差量 + yaw/pitch Angle（新角度，不是差量）。
+// Update Entity Rotation（move_entity_rot 57/0x39）：
+// entity_id VarInt + on_ground Boolean + yaw/pitch Angle。
+// 来源：minecraft.wiki 26.3/777 §Update Entity Position and Rotation /
+// §Update Entity Rotation（与已实现的 0x36 同一 Properties/差量口径）。
+// ---------------------------------------------------------------------------
+
+/// 实体位置+朝向差量（S2C `move_entity_pos_rot`，step=0）。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct UpdateEntityPosRot {
+    pub entity_id: i32,
+    pub on_ground: bool,
+    pub dx: i16,
+    pub dy: i16,
+    pub dz: i16,
+    pub yaw: u8,
+    pub pitch: u8,
+}
+
+impl UpdateEntityPosRot {
+    pub fn encode_body(&self, out: &mut Vec<u8>) {
+        write_varint(self.entity_id, out);
+        write_varint(if self.on_ground { 1 } else { 0 }, out);
+        write_short_be(self.dx, out);
+        write_short_be(self.dy, out);
+        write_short_be(self.dz, out);
+        out.push(self.yaw);
+        out.push(self.pitch);
+    }
+
+    pub fn decode_body(buf: &[u8]) -> Result<(Self, usize), ProtocolError> {
+        let mut off = 0;
+        let (entity_id, n) = read_varint(&buf[off..])?;
+        off += n;
+        let (props, n) = read_varint(&buf[off..])?;
+        off += n;
+        if props >> 1 != 0 {
+            return Err(ProtocolError::UnexpectedEof);
+        }
+        let (dx, n) = read_short_be(&buf[off..])?;
+        off += n;
+        let (dy, n) = read_short_be(&buf[off..])?;
+        off += n;
+        let (dz, n) = read_short_be(&buf[off..])?;
+        off += n;
+        if buf.len() < off + 2 {
+            return Err(ProtocolError::UnexpectedEof);
+        }
+        let (yaw, pitch) = (buf[off], buf[off + 1]);
+        off += 2;
+        Ok((Self { entity_id, on_ground: props & 1 != 0, dx, dy, dz, yaw, pitch }, off))
+    }
+}
+
+pub fn encode_update_entity_pos_rot_packet(v: &UpdateEntityPosRot, out: &mut Vec<u8>) {
+    let mut body = Vec::new();
+    v.encode_body(&mut body);
+    encode_packet(PLAY_UPDATE_ENTITY_POS_ROT_S2C_ID, &body, out);
+}
+
+/// 实体朝向（S2C `move_entity_rot`）：绝对角度 + on_ground。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct UpdateEntityRot {
+    pub entity_id: i32,
+    pub on_ground: bool,
+    pub yaw: u8,
+    pub pitch: u8,
+}
+
+impl UpdateEntityRot {
+    pub fn encode_body(&self, out: &mut Vec<u8>) {
+        write_varint(self.entity_id, out);
+        write_bool(self.on_ground, out);
+        out.push(self.yaw);
+        out.push(self.pitch);
+    }
+
+    pub fn decode_body(buf: &[u8]) -> Result<(Self, usize), ProtocolError> {
+        let mut off = 0;
+        let (entity_id, n) = read_varint(&buf[off..])?;
+        off += n;
+        let (on_ground, n) = read_bool(&buf[off..])?;
+        off += n;
+        if buf.len() < off + 2 {
+            return Err(ProtocolError::UnexpectedEof);
+        }
+        let (yaw, pitch) = (buf[off], buf[off + 1]);
+        off += 2;
+        Ok((Self { entity_id, on_ground, yaw, pitch }, off))
+    }
+}
+
+pub fn encode_update_entity_rot_packet(v: &UpdateEntityRot, out: &mut Vec<u8>) {
+    let mut body = Vec::new();
+    v.encode_body(&mut body);
+    encode_packet(PLAY_UPDATE_ENTITY_ROT_S2C_ID, &body, out);
 }
 
 // ---------------------------------------------------------------------------
@@ -950,6 +1145,85 @@ mod tests {
     }
 
     /// P31：经验球 Spawn/Data 与 SetExperience 的包体往返（保守复用已验证布局）。
+    /// P43：新包 ID 与实体类型全部来自 data/777 生成表，不手写猜测。
+    #[test]
+    fn p43_player_packet_ids_and_type_from_registry() {
+        assert_eq!(PLAY_UPDATE_ENTITY_POS_S2C_ID, 54);
+        assert_eq!(PLAY_UPDATE_ENTITY_POS_ROT_S2C_ID, 55);
+        assert_eq!(PLAY_UPDATE_ENTITY_ROT_S2C_ID, 57);
+        assert_eq!(PLAYER_ENTITY_TYPE_ID, 159);
+        assert_eq!(mc_registry::entity_id("minecraft:player"), Some(159));
+        assert_eq!(mc_registry::packet_id_in("clientbound.play", "move_entity_pos_rot"), Some(55));
+        assert_eq!(mc_registry::packet_id_in("clientbound.play", "move_entity_rot"), Some(57));
+    }
+
+    #[test]
+    fn p43_player_spawn_rot_and_angle_roundtrip() {
+        let p = SpawnPlayerEntity {
+            entity_id: 1_000_000_000,
+            uuid: 0x0102030405060708090a0b0c0d0e0f10,
+            x: 369.5,
+            y: 73.0,
+            z: 381.5,
+            vel: LpVec3::zero(),
+            pitch: 0,
+            yaw: 64,
+            head_yaw: 64,
+        };
+        let mut body = Vec::new();
+        p.encode_body(&mut body);
+        let (got, used) = SpawnPlayerEntity::decode_body(&body).unwrap();
+        assert_eq!(used, body.len());
+        assert_eq!(got, p);
+        // 不能被 item/orb 解码器误收（type 校验不同）。
+        assert!(SpawnItemEntity::decode_body(&body).is_err());
+        assert!(SpawnExperienceOrb::decode_body(&body).is_err());
+        let mut pkt = Vec::new();
+        encode_spawn_player_packet(&p, &mut pkt);
+        let (_, n) = read_varint(&pkt).unwrap();
+        let (id, _) = decode_packet_id(&pkt[n..]).unwrap();
+        assert_eq!(id, PLAY_SPAWN_ENTITY_S2C_ID);
+
+        let pr = UpdateEntityPosRot {
+            entity_id: p.entity_id,
+            on_ground: true,
+            dx: 4096,
+            dy: -1,
+            dz: 0,
+            yaw: 64,
+            pitch: 128,
+        };
+        let mut body = Vec::new();
+        pr.encode_body(&mut body);
+        let (got, used) = UpdateEntityPosRot::decode_body(&body).unwrap();
+        assert_eq!(used, body.len());
+        assert_eq!(got, pr);
+        let mut pkt = Vec::new();
+        encode_update_entity_pos_rot_packet(&pr, &mut pkt);
+        let (_, n) = read_varint(&pkt).unwrap();
+        let (id, _) = decode_packet_id(&pkt[n..]).unwrap();
+        assert_eq!(id, PLAY_UPDATE_ENTITY_POS_ROT_S2C_ID);
+
+        let r = UpdateEntityRot { entity_id: p.entity_id, on_ground: false, yaw: 192, pitch: 32 };
+        let mut body = Vec::new();
+        r.encode_body(&mut body);
+        let (got, used) = UpdateEntityRot::decode_body(&body).unwrap();
+        assert_eq!(used, body.len());
+        assert_eq!(got, r);
+        let mut pkt = Vec::new();
+        encode_update_entity_rot_packet(&r, &mut pkt);
+        let (_, n) = read_varint(&pkt).unwrap();
+        let (id, _) = decode_packet_id(&pkt[n..]).unwrap();
+        assert_eq!(id, PLAY_UPDATE_ENTITY_ROT_S2C_ID);
+
+        assert_eq!(angle_byte(0.0), 0);
+        assert_eq!(angle_byte(90.0), 64);
+        assert_eq!(angle_byte(180.0), 128);
+        assert_eq!(angle_byte(270.0), 192);
+        assert_eq!(angle_byte(360.0), 0);
+        assert_eq!(angle_byte(-90.0), 192);
+    }
+
     #[test]
     fn p31_xp_packets_roundtrip() {
         let v = SpawnExperienceOrb {

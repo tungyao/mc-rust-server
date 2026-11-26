@@ -9,10 +9,11 @@ pub mod framing;
 pub mod handshake_route;
 pub mod login_route;
 pub mod play_events;
+pub mod player_visibility;
 pub mod status_route;
 mod timer_spec;
 
-pub use broadcast::{OnlineEntry, ADMIN_KICK_PACKET_ID, BroadcastHub, QueuedPacket};
+pub use broadcast::{OnlineEntry, PlayerEntityState, ADMIN_KICK_PACKET_ID, BroadcastHub, QueuedPacket};
 pub use chunk_cache::{
     encode_chunk_data_body, encode_chunk_data_body_mutable, ChunkCache, ChunkCacheStats,
     DEFAULT_CHUNK_CACHE_CAPACITY,
@@ -29,6 +30,7 @@ pub use login_route::{
     notify_login_success, PlayOptions,
 };
 pub use play_events::PlayEvent;
+pub use player_visibility::{next_player_entity_id, FIRST_PLAYER_ENTITY_ID};
 
 use crossbeam_channel::Sender;
 use std::sync::Arc;
