@@ -517,6 +517,54 @@ pub fn encode_nonuniform_sky_light_data(sections: &[(u32, [u8; 2048])], out: &mu
     write_varint(0, out); // block light 数组数
 }
 
+/// P46 v2：天空光 + block light 合并进 LightData（线格式不变，见 wiki `Data_types#Light_Data`）。
+/// `sky`/`block` 每项为 `(section_index, 2048B nibble数组)`，nibble 索引
+/// `y*256 + z*16 + x`，偶索引低位/奇索引高位。布局与
+/// [`encode_nonuniform_sky_light_data`] 相同，只是 block mask/数组不再恒空：
+/// sky mask BitSet + block mask BitSet + empty sky + empty block + sky 数组 + block 数组。
+/// 空输入仍走 [`encode_empty_light_data`]（6B），与旧版逐字节一致。
+/// 真机 vanilla 包体对照待补（本环境无原版客户端）。
+pub fn encode_light_data(
+    sky: &[(u32, [u8; 2048])],
+    block: &[(u32, [u8; 2048])],
+    out: &mut Vec<u8>,
+) {
+    if sky.is_empty() && block.is_empty() {
+        encode_empty_light_data(out);
+        return;
+    }
+    write_light_mask(sky, out);
+    write_light_mask(block, out);
+    write_varint(0, out); // empty sky mask：发送的数组覆盖全部非零节
+    write_varint(0, out); // empty block mask
+    write_varint(sky.len() as i32, out);
+    for (_, nibble) in sky {
+        write_varint(2048, out);
+        out.extend_from_slice(nibble);
+    }
+    write_varint(block.len() as i32, out);
+    for (_, nibble) in block {
+        write_varint(2048, out);
+        out.extend_from_slice(nibble);
+    }
+}
+
+/// 一节列表 → BitSet（VarInt 字节数 + 小端 bit 字节；仅发 <64 的 section）。
+fn write_light_mask(sections: &[(u32, [u8; 2048])], out: &mut Vec<u8>) {
+    let mut mask = 0u64;
+    for &(section, _) in sections {
+        if section < 64 {
+            mask |= 1u64 << section;
+        }
+    }
+    let mut bits = mask.to_le_bytes().to_vec();
+    while bits.last() == Some(&0) {
+        bits.pop();
+    }
+    write_varint(bits.len() as i32, out);
+    out.extend_from_slice(&bits);
+}
+
 /// 读一个BitSet并跳过（返回消费字节数）：26.3 是 VarInt 字节数 + 小端 bit 字节
 /// （`FriendlyByteBuf.writeByteArray(BitSet.toByteArray())`），不是 long 数组。
 fn skip_bitset(buf: &[u8]) -> Result<usize, ProtocolError> {
@@ -993,6 +1041,51 @@ mod tests {
         // 空 section 列表退回 6B 空光照。
         let mut e = Vec::new();
         encode_nonuniform_sky_light_data(&[], &mut e);
+        assert_eq!(e, vec![0, 0, 0, 0, 0, 0]);
+    }
+
+    /// P46：sky + block 合并 LightData 的逐字节回归（布局按 wiki 26.3 已验证口径，
+    /// 本环境无原版客户端，需真机复验）。
+    #[test]
+    fn encode_light_data_combines_sky_and_block_masks_byte_for_byte() {
+        let sky = vec![(0u32, [0x11u8; 2048]), (3, [0x22; 2048])];
+        let block = vec![(1u32, [0x33u8; 2048])];
+        let mut b = Vec::new();
+        super::encode_light_data(&sky, &block, &mut b);
+        let mut expected = Vec::new();
+        write_varint(1, &mut expected);
+        expected.push(0b1001); // sky mask sections 0+3
+        write_varint(1, &mut expected);
+        expected.push(0b0010); // block mask section 1
+        write_varint(0, &mut expected); // empty sky
+        write_varint(0, &mut expected); // empty block
+        write_varint(2, &mut expected);
+        for arr in [&[0x11u8; 2048][..], &[0x22u8; 2048][..]] {
+            write_varint(2048, &mut expected);
+            expected.extend_from_slice(arr);
+        }
+        write_varint(1, &mut expected);
+        write_varint(2048, &mut expected);
+        expected.extend_from_slice(&[0x33; 2048]);
+        assert_eq!(b, expected, "combined LightData must match hand-built 26.3 layout");
+
+        // PlayChunkData 的 decode_body 能完整消费两种数组。
+        let v = PlayChunkData {
+            chunk_x: 7,
+            chunk_z: -9,
+            heightmaps_nbt: empty_heightmaps_bytes(),
+            section_bytes: Vec::new(),
+            light_bytes: b.clone(),
+        };
+        let mut body = Vec::new();
+        v.encode_body(&mut body);
+        let (got, used) = PlayChunkData::decode_body(&body).unwrap();
+        assert_eq!(used, body.len());
+        assert_eq!(got.light_bytes, b);
+
+        // 空输入与旧版空光照逐字节一致（v1 路径不变）。
+        let mut e = Vec::new();
+        super::encode_light_data(&[], &[], &mut e);
         assert_eq!(e, vec![0, 0, 0, 0, 0, 0]);
     }
 

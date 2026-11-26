@@ -137,9 +137,12 @@ impl GeneratedChunk {
 
     /// v2 LightData：按列天空光起点 + 非零 section 的 2048B nibble 数组。
     pub fn light_bytes_v2(&self) -> Vec<u8> {
-        let sections = super::light::compute_sky_light(self);
+        let sky = super::light::compute_sky_light(self);
+        let block = super::light::compute_block_light(self);
         let mut out = Vec::new();
-        mc_protocol::packets::encode_nonuniform_sky_light_data(&sections, &mut out);
+        // P46：block light 与 P45 天空光合并在同一份 LightData；无光源时 block 为空，
+        // 字节与 P45 完全相同。v1 仍走 light_bytes()（encode_sky_light_data）。
+        mc_protocol::packets::encode_light_data(&sky, &block, &mut out);
         out
     }
 }

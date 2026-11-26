@@ -220,7 +220,48 @@ async fn play_loop(
                             fall_peak_y = last_pos.1;
                         }
                         was_on_ground = on_ground;
+                        // P46 v2 游泳：服务端不做每连接水中物理，只做水中判定、坠落豁免
+                        // 与最小位置合法性（脚不得没入支撑方块）。原版游泳手感仍需真机复验。
+                        let mut in_water = false;
+                        if let Some(w) = mutable {
+                            if w.generator_version() == mc_world::GeneratorVersion::V2 {
+                                let swim =
+                                    mc_world::swim_state(|x, y, z| w.get(x, y, z), last_pos.0, last_pos.1, last_pos.2);
+                                if swim.in_water {
+                                    in_water = true;
+                                    if last_pos.1 < swim.min_feet_y {
+                                        last_pos.1 = swim.min_feet_y;
+                                        fall_peak_y = last_pos.1;
+                                        // 修正只回操作者本人，绝不走广播 hub。
+                                        let mut pkt = Vec::new();
+                                        packets::encode_teleport_entity_packet(
+                                            &packets::TeleportEntitySync {
+                                                entity_id: 1,
+                                                x: last_pos.0,
+                                                y: last_pos.1,
+                                                z: last_pos.2,
+                                                yaw: last_look.0,
+                                                pitch: last_look.1,
+                                                on_ground,
+                                            },
+                                            &mut pkt,
+                                        );
+                                        write_packet_any(
+                                            stream,
+                                            packets::PLAY_ENTITY_POSITION_SYNC_S2C_ID,
+                                            &pkt,
+                                            threshold,
+                                        )
+                                        .await?;
+                                    }
+                                }
+                            }
+                        }
                         // P40：只在连接侧判定并同步，真正伤害按全局 ticker/权威状态推进。
+                        // P46：水中不结算坠落伤害（浮力 MVP 口径）。
+                        if in_water {
+                            fall_blocks = None;
+                        }
                         if let Some(blocks) = fall_blocks {
                             if blocks > mc_world::survival::FALL_SAFE_BLOCKS {
                                 if let Some(ds) = &opts.drops {

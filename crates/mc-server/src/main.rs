@@ -120,6 +120,8 @@ fn main() {
     ));
     // P25 管理面板：与游戏线程共享的 hub（在线映射唯一来源，计划 §5.2 推荐方案）。
     let hub = Arc::new(mc_network::BroadcastHub::new());
+    // P46 流体：状态由 serve 挂载全服唯一 ticker（仅 V2 世界真正传播）。
+    let fluid = Arc::new(mc_network::FluidState::new());
     let net_config = mc_network::NetConfig::new(cfg.max_players, cfg.motd.clone(), Arc::clone(&online.0))
         .with_view_distance(cfg.view_distance)
         .with_seed(cfg.seed)
@@ -129,6 +131,7 @@ fn main() {
         .with_mutable_world(Arc::clone(&mutable))
         .with_drops(Arc::clone(&drop_state))
         .with_hub(Arc::clone(&hub))
+        .with_fluid(Arc::clone(&fluid))
         // P43：生产入口开启玩家实体互见（旧入口/既有 e2e 仍走默认关闭）。
         .with_player_visibility(true);
     info!(

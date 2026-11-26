@@ -5,6 +5,7 @@ pub mod chunk_cache;
 pub mod chunk_view;
 pub mod config;
 pub mod drop_state;
+pub mod fluid_sync;
 pub mod framing;
 pub mod handshake_route;
 pub mod login_route;
@@ -24,6 +25,7 @@ pub use chunk_view::{
 };
 pub use config::{NetConfig, STATUS_MAX_PLAYERS, STATUS_MOTD};
 pub use drop_state::{DropState, FIRST_DROP_ENTITY_ID, PLAYER_ENTITY_ID, STARTER_STONE_COUNT};
+pub use fluid_sync::{FluidState, FLUID_TICK_MS, MAX_TASKS_PER_TICK, MAX_WRITES_PER_TICK};
 pub use framing::{MAX_PACKET_LEN, READ_TIMEOUT};
 pub use login_route::{
     enter_play, enter_play_with_events, enter_play_with_options, handle_login_with_options,
@@ -85,6 +87,17 @@ pub async fn serve(listener: TcpListener, tx: Sender<NewConnection>, config: Net
             info!("global drop physics ticker started ({}ms)", drop_state::DROP_TICK_MS);
         } else {
             debug!("global drop physics ticker already running");
+        }
+    }
+    // P46 流体：全服唯一 50ms ticker，仅 V2 世界启动（V1 逐字节冻结）。
+    // 与掉落 ticker 一样只启动一次，不随连接数增加；缺 fluid/hub 时仍不启动。
+    if let (Some(fluid), Some(world)) = (&config.fluid, &config.mutable_world) {
+        if fluid.start_global_tick(
+            Arc::clone(world),
+            config.chunk_cache.clone(),
+            config.hub.clone(),
+        ) {
+            info!("global fluid ticker started ({}ms, v2 only)", fluid_sync::FLUID_TICK_MS);
         }
     }
     loop {

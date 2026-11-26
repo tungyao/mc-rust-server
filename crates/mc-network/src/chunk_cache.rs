@@ -394,6 +394,50 @@ mod tests {
         assert!(cache.contains(pos));
     }
 
+    /// P46：v2 包体的 LightData 合并了 block light；v1 仍不发 block 数组。
+    #[test]
+    fn v2_chunk_body_carries_block_light_while_v1_light_stays_empty() {
+        use mc_protocol::read_varint;
+        // 前两个 BitSet 分别是 sky mask / block mask（VarInt 字节数 + 小端 bit 字节）。
+        let masks_of = |light: &[u8]| -> (u64, u64) {
+            let mut off = 0;
+            let mut out = [0u64; 2];
+            for slot in out.iter_mut().take(2) {
+                let (nbytes, n) = read_varint(&light[off..]).unwrap();
+                off += n;
+                for (bi, b) in light[off..off + nbytes as usize].iter().enumerate() {
+                    *slot |= (*b as u64) << (bi * 8);
+                }
+                off += nbytes as usize;
+            }
+            (out[0], out[1])
+        };
+        let gen = WorldGen::with_version(42, GeneratorVersion::V2);
+        let mut found = false;
+        for cx in -8..8 {
+            for cz in -8..8 {
+                let pos = position(cx, cz);
+                let chunk = gen.generate(pos);
+                if !chunk.sections.iter().any(|s| s.iter().any(|&id| id == mc_world::LANTERN_BLOCK_ID)) {
+                    continue;
+                }
+                found = true;
+                let v2 = encode_chunk_data_body(&gen, pos);
+                let (packet, _) = packets::PlayChunkData::decode_body(&v2).unwrap();
+                let (sky, block) = masks_of(&packet.light_bytes);
+                assert_ne!(block, 0, "ruin lantern must emit block light");
+                assert_ne!(sky, 0, "sky light still present");
+                let v1 = encode_chunk_data_body(&WorldGen::new(42), pos);
+                let (v1_packet, _) = packets::PlayChunkData::decode_body(&v1).unwrap();
+                let (_, v1_block) = masks_of(&v1_packet.light_bytes);
+                assert_eq!(v1_block, 0, "v1 block light must stay empty");
+                break;
+            }
+            if found { break; }
+        }
+        assert!(found, "seed 42 should have at least one ruin in the sampled chunks");
+    }
+
     #[test]
     fn new_with_version_generates_v2_bodies_and_stays_deterministic() {
         let cache = ChunkCache::new_with_version(42, 8, GeneratorVersion::V2);

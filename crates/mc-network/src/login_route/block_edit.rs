@@ -336,6 +336,11 @@ pub(crate) async fn apply_block_outcome(
         if let Some(cache) = cache {
             cache.invalidate(mc_world::chunk_of_block(c.x, c.z));
         }
+        // P46：挖/放改变水体邻接关系时，给全服唯一流体 ticker 排队（V2 才真正传播）。
+        // Ack 仍只回本连接，流体广播走 ticker 的 hub.broadcast（except=0）。
+        if let Some(fluid) = &opts.fluid {
+            fluid.on_block_change(c.x, c.y, c.z, c.old_id, c.new_id);
+        }
         if c.new_id != c.old_id {
             info!(
                 "play block edit uuid={} name={} conn_id={} pos=({},{},{}) {}->{} seq={}",
