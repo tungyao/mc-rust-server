@@ -191,13 +191,13 @@ pub fn decide_place(
     })
 }
 
-/// P22 种植判定（手持 `wheat_seeds` 对土壤**顶面**右键）；
+/// P22/P33 种植判定（手持小麦种子/胡萝卜/马铃薯/甜菜种子对土壤**顶面**右键）；
 /// P23 起树苗（`oak_sapling`）复用同一路径（`plant_id` 区分）；
 /// P27 起土壤含耕地（种在耕地上加速生长，见 `DropState::tick_crops`）：
 /// 要求：face=顶面(+Y)，被点是土壤（草/泥土/耕地），目标（被点上方 1 格）是空气、
 /// y/视距/距离合法；否则回滚重发目标现状（非法 face 只 ack）。
-/// 成功时目标落 `plant_id`（小麦传 `WHEAT_CROP_BASE_ID`，树苗传 `OAK_SAPLING_BLOCK_ID`）。
-/// 判定内已落子，调用方负责：缓存失效 + 发 BlockUpdate/Ack + 生长登记（仅小麦）+
+/// 成功时目标落 `plant_id`（小麦/新作物传各自 `CropSpec::base_id`，树苗传
+/// `OAK_SAPLING_BLOCK_ID`）。判定内已落子，调用方负责：缓存失效 + 发 BlockUpdate/Ack + 生长登记（作物，树苗另走单次长树）+
 /// 扣手持 + 投递事件（复用 `apply_block_outcome`，走 P21 广播）。
 pub fn decide_plant(
     world: Option<&MutableWorld>,
@@ -294,11 +294,12 @@ pub fn decide_till(
     })
 }
 
-/// P27 骨粉作用目标（`decide_bonemeal` 的判定结果）：
-/// - `Wheat`：小麦已推进 1~2 阶段（世界内已落子，调用方同步生长跟踪 + 扣 1 骨粉）；
+/// P27/P33 骨粉作用目标（`decide_bonemeal` 的判定结果）：
+/// - `Wheat`：**任意作物**（含小麦）已推进 1~2 阶段（世界内已落子，调用方同步
+///   生长跟踪 + 扣 1 骨粉）；变体名保留 `Wheat` 以兼容 P27 旧测试/调用方；
 /// - `GrowTree`：树苗立即长成小橡树（调用方走 `DropState::grow_sapling_now` 落多格 +
 ///   扣 1 骨粉；土壤不行则该函数返回 false，调用方按 `Noop` 处理）；
-/// - `Noop`：成熟小麦/非作物（resend 供回滚重发，不扣骨粉）。
+/// - `Noop`：成熟作物/非作物（resend 供回滚重发，不扣骨粉）。
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum BonemealAction {
     Wheat(BlockEditOutcome),
@@ -306,10 +307,11 @@ pub enum BonemealAction {
     Noop { sequence: i32, resend: BlockChange },
 }
 
-/// P27 骨粉判定（手持骨粉右键**小麦/树苗本身**，任意 face）：
-/// 小麦未熟 → 按 `bonemeal_advance`（确定性 1~2）推进并钳制到成熟，世界内落子；
-/// 小麦已熟 → `Noop`（原版不消耗）；树苗 → `GrowTree`（土壤检查在生长函数里做）；
-/// 点其它方块 → `Noop`；y/视距/距离非法 → `None`（调用方只 ack，不断线）。
+/// P27/P33 骨粉判定（手持骨粉右键**作物/树苗本身**，任意 face）：
+/// 作物未熟（含小麦/胡萝卜/马铃薯/甜菜）→ 按 `bonemeal_advance`（确定性 1~2）
+/// 推进并钳制到该作物的 `max_age`，世界内落子；已熟 → `Noop`（原版不消耗）；
+/// 树苗 → `GrowTree`（土壤检查在生长函数里做）；点其它方块 → `Noop`；
+/// y/视距/距离非法 → `None`（调用方只 ack，不断线）。
 pub fn decide_bonemeal(
     world: Option<&MutableWorld>,
     eye: (f64, f64, f64),
@@ -329,8 +331,8 @@ pub fn decide_bonemeal(
     if clicked == mc_world::OAK_SAPLING_BLOCK_ID {
         return Some(BonemealAction::GrowTree { x, y, z, sequence: act.sequence });
     }
-    if let Some(age) = mc_world::wheat_age(clicked) {
-        if age >= mc_world::WHEAT_MAX_AGE {
+    if let Some((crop, age)) = mc_world::crop_age_of(clicked) {
+        if age >= crop.max_age {
             let cur = world.get(x, y, z);
             return Some(BonemealAction::Noop {
                 sequence: act.sequence,
@@ -338,8 +340,8 @@ pub fn decide_bonemeal(
             });
         }
         let adv = mc_world::drops::bonemeal_advance(world.seed(), x, y, z);
-        let new_age = age.saturating_add(adv).min(mc_world::WHEAT_MAX_AGE);
-        let new_id = mc_world::wheat_stage_id(new_age);
+        let new_age = age.saturating_add(adv).min(crop.max_age);
+        let new_id = mc_world::crop_stage_id(crop, new_age);
         let old = world.set(x, y, z, new_id);
         return Some(BonemealAction::Wheat(BlockEditOutcome {
             sequence: act.sequence,
@@ -848,6 +850,104 @@ mod tests {
             decide_plant(None, eye, center, 2, &base(1), mc_world::WHEAT_CROP_BASE_ID).is_none(),
             "missing world must be ignored"
         );
+    }
+
+    #[test]
+    fn p33_plant_new_crops_reuses_wheat_soil_top_path() {
+        use mc_world::crops::{BEETROOT, CARROT, POTATO};
+        let (world, feet, center) = dig_fixture();
+        let (x, y, z) = grass_top();
+        let eye = eye_of(feet);
+        for crop in [&CARROT, &POTATO, &BEETROOT] {
+            world.set(x, y + 1, z, mc_world::AIR_BLOCK_ID);
+            let act = packets::UseItemOn {
+                hand: 0,
+                x,
+                y,
+                z,
+                face: 1,
+                cursor_x: 0.5,
+                cursor_y: 1.0,
+                cursor_z: 0.5,
+                inside_block: false,
+                world_border_hit: false,
+                sequence: 70,
+            };
+            let out = decide_plant(Some(&world), eye, center, 2, &act, crop.base_id).unwrap();
+            assert_eq!(
+                out.changes,
+                vec![BlockChange { x, y: y + 1, z, old_id: 0, new_id: crop.base_id }],
+                "{} must plant through the same top-face path as wheat",
+                crop.name
+            );
+            assert_eq!(world.get(x, y + 1, z), crop.base_id);
+        }
+        // 非顶面/非土壤拒绝口径与小麦完全相同。
+        let side = packets::UseItemOn {
+            hand: 0,
+            x,
+            y,
+            z,
+            face: 0,
+            cursor_x: 0.5,
+            cursor_y: 0.5,
+            cursor_z: 0.5,
+            inside_block: false,
+            world_border_hit: false,
+            sequence: 71,
+        };
+        world.set(x, y + 1, z, mc_world::AIR_BLOCK_ID);
+        assert!(decide_plant(Some(&world), eye, center, 2, &side, CARROT.base_id)
+            .unwrap()
+            .changes
+            .is_empty());
+    }
+
+    #[test]
+    fn p33_bonemeal_advances_new_crops_and_clamps_to_own_max_age() {
+        use mc_world::crops::{crop_stage_id, BEETROOT, CARROT};
+        let (world, feet, center) = dig_fixture();
+        let (x, y, z) = grass_top();
+        let eye = eye_of(feet);
+        let act = packets::UseItemOn {
+            hand: 0,
+            x,
+            y: y + 1,
+            z,
+            face: 1,
+            cursor_x: 0.5,
+            cursor_y: 0.5,
+            cursor_z: 0.5,
+            inside_block: false,
+            world_border_hit: false,
+            sequence: 72,
+        };
+        // 胡萝卜 age=5：按与小麦相同的 1~2 推进。
+        world.set(x, y + 1, z, crop_stage_id(&CARROT, 5));
+        let want = (5 + mc_world::drops::bonemeal_advance(world.seed(), x, y + 1, z)).min(7);
+        match decide_bonemeal(Some(&world), eye, center, 2, &act).unwrap() {
+            BonemealAction::Wheat(out) => {
+                assert_eq!(out.changes[0].old_id, crop_stage_id(&CARROT, 5));
+                assert_eq!(out.changes[0].new_id, crop_stage_id(&CARROT, want));
+            }
+            other => panic!("unripe carrot must advance, got {other:?}"),
+        }
+        // 甜菜 age=2：钳制到自己 max_age=3（不是小麦的 7）。
+        world.set(x, y + 1, z, crop_stage_id(&BEETROOT, 2));
+        match decide_bonemeal(Some(&world), eye, center, 2, &act).unwrap() {
+            BonemealAction::Wheat(out) => {
+                assert_eq!(out.changes[0].new_id, crop_stage_id(&BEETROOT, 3));
+            }
+            other => panic!("beetroot must clamp at 3, got {other:?}"),
+        }
+        // 已熟甜菜：Noop，不扣骨粉。
+        world.set(x, y + 1, z, crop_stage_id(&BEETROOT, 3));
+        match decide_bonemeal(Some(&world), eye, center, 2, &act).unwrap() {
+            BonemealAction::Noop { resend, .. } => {
+                assert_eq!(resend.new_id, crop_stage_id(&BEETROOT, 3));
+            }
+            other => panic!("mature beetroot must noop, got {other:?}"),
+        }
     }
 
     #[test]

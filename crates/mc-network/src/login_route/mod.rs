@@ -226,8 +226,9 @@ async fn play_loop(
                             &act,
                         ) {
                             if let Some(world) = mutable {
-                                // P27：土壤被挖连带拔掉上方作物（原版 pop 口径：上方小麦/树苗
-                                // 一起掉并摘除跟踪，避免作物悬空）；原木被挖登记周围
+                                // P27/P33：土壤被挖连带拔掉上方作物（原版 pop 口径：上方
+                                // 小麦/胡萝卜/马铃薯/甜菜/树苗一起掉并摘除跟踪，避免作物悬空）；
+                                // 原木被挖登记周围
                                 // 树叶 decay 观察。必须在 apply/spawn 之前改 outcome，
                                 // 广播与掉落才能一次下发。
                                 if let Some(ds) = &opts.drops {
@@ -237,7 +238,7 @@ async fn play_loop(
                                             && mc_world::is_crop_soil(c.old_id)
                                         {
                                             let above = world.get(c.x, c.y + 1, c.z);
-                                            if mc_world::wheat_age(above).is_some() {
+                                            if mc_world::crop_age_of(above).is_some() {
                                                 let old = world.set(
                                                     c.x,
                                                     c.y + 1,
@@ -313,7 +314,7 @@ async fn play_loop(
                                     // P26：挖苗/挖土同理（所在土被挖则其上方树苗取消生长）。
                                     for c in &outcome.changes {
                                         if c.new_id == mc_world::AIR_BLOCK_ID
-                                            && mc_world::wheat_age(c.old_id).is_some()
+                                            && mc_world::crop_age_of(c.old_id).is_some()
                                         {
                                             ds.uproot_crop(c.x, c.y, c.z);
                                         }
@@ -376,7 +377,7 @@ async fn play_loop(
                                         BonemealAction::Wheat(outcome) => {
                                             let advanced = outcome.changes.iter().any(|c| {
                                                 c.new_id != c.old_id
-                                                    && mc_world::wheat_age(c.new_id).is_some()
+                                                    && mc_world::crop_age_of(c.new_id).is_some()
                                             });
                                             if let Err(e) = apply_block_outcome(
                                                 stream, addr, profile, opts, cache, &outcome,
@@ -389,11 +390,11 @@ async fn play_loop(
                                             if advanced {
                                                 if let Some(ds) = &opts.drops {
                                                     if let Some(c) = outcome.changes.first() {
-                                                        if let Some(age) =
-                                                            mc_world::wheat_age(c.new_id)
+                                                        if let Some((crop, age)) =
+                                                            mc_world::crop_age_of(c.new_id)
                                                         {
-                                                            ds.apply_bonemeal_crop(
-                                                                c.x, c.y, c.z, age,
+                                                            ds.apply_bonemeal_crop_spec(
+                                                                crop, c.x, c.y, c.z, age,
                                                             );
                                                         }
                                                     }
@@ -503,19 +504,18 @@ async fn play_loop(
                             }
                             continue;
                         }
-                        // P22/P23：手持小麦种子或树苗对土壤顶面右键 → 种下（专属路径，不走方块映射）。
-                        // 树苗复用小麦的种植判定（仅 plant_id 不同），但不登记生长。
+                        // P22/P23/P33：手持作物种子（小麦/胡萝卜/马铃薯/甜菜）或树苗对土壤
+                        // 顶面右键 → 种下（专属路径，不走方块映射）。树苗复用同一判定
+                        // （仅 plant_id 不同），但不登记生长；其它种子由通用作物表映射。
                         let held_plant: Option<u16> = opts
                             .drops
                             .as_ref()
                             .and_then(|ds| ds.with_inventory(opts.conn_id, |inv| inv.held()).flatten())
                             .and_then(|(item_id, _)| {
-                                if item_id == mc_world::drops::ITEM_WHEAT_SEEDS {
-                                    Some(mc_world::WHEAT_CROP_BASE_ID)
-                                } else if item_id == mc_world::drops::ITEM_OAK_SAPLING {
+                                if item_id == mc_world::drops::ITEM_OAK_SAPLING {
                                     Some(mc_world::OAK_SAPLING_BLOCK_ID)
                                 } else {
-                                    None
+                                    mc_world::crop_base_for_seed(item_id)
                                 }
                             });
                         if let Some(plant_id) = held_plant {
@@ -541,15 +541,17 @@ async fn play_loop(
                                     }
                                     if planted {
                                         if let Some(ds) = &opts.drops {
-                                            // 小麦登记多阶段生长；树苗登记单次长树（P26）。
-                                            if plant_id == mc_world::WHEAT_CROP_BASE_ID {
-                                                if let Some(c) = outcome.changes.first() {
-                                                    ds.plant_crop(c.x, c.y, c.z);
-                                                }
-                                            } else if plant_id == mc_world::OAK_SAPLING_BLOCK_ID {
+                                            // 所有作物登记多阶段生长（按各自 CropSpec）；
+                                            // 树苗登记单次长树（P26）。
+                                            if plant_id == mc_world::OAK_SAPLING_BLOCK_ID {
                                                 if let Some(c) = outcome.changes.first() {
                                                     ds.plant_sapling(c.x, c.y, c.z);
                                                 }
+                                            } else if let Some(c) = outcome.changes.first() {
+                                                let crop = mc_world::crop_age_of(plant_id)
+                                                    .map(|(crop, _)| crop)
+                                                    .unwrap_or(&mc_world::crops::WHEAT);
+                                                ds.plant_crop_spec(crop, c.x, c.y, c.z);
                                             }
                                             let consumed = ds.with_inventory(opts.conn_id, |inv| {
                                                 inv.consume_held()

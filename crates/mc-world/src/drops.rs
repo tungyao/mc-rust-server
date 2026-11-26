@@ -17,6 +17,9 @@
 //! | iron_ore(134) | raw_iron(1017)×1 |
 //! | wheat age<7 | wheat_seeds(1065)×1 |
 //! | wheat age=7 | wheat(1066)×1 + wheat_seeds(1065)×1~2 |
+//! | carrots age<7 / age=7 | carrot(1378)×1 / carrot×1~2 + 1/4 机会再+1 |
+//! | potatoes age<7 / age=7 | potato(1379)×1 / potato×1~2 + 1/100 poisonous_potato(1381)×1 |
+//! | beetroots age<3 / age=3 | beetroot_seeds(1439)×1 / beetroot(1438)×1 + beetroot_seeds×1~2 |
 //! | farmland(6875, P27) | dirt(55)×1 |
 //! | oak_leaves decay(P27, 非挖掘) | 同上 + 1/200 apple(1007)×1 |
 //!
@@ -26,7 +29,6 @@ use crate::{
     COAL_ORE_BLOCK_ID, COBBLESTONE_BLOCK_ID, DIRT_BLOCK_ID, FARMLAND_BLOCK_ID, GRASS_BLOCK_ID,
     IRON_ORE_BLOCK_ID,
     OAK_LEAVES_BLOCK_ID, OAK_LOG_BLOCK_ID, OAK_SAPLING_BLOCK_ID, SAND_BLOCK_ID, STONE_BLOCK_ID,
-    WHEAT_MAX_AGE,
 };
 
 /// `minecraft:item` 注册表 ID，编译期从 `mc_registry::ITEMS`（由 `build.rs` 从
@@ -50,6 +52,15 @@ pub const ITEM_BONE_MEAL: i32 = crate::registry_id(mc_registry::ITEMS, "minecraf
 /// P27 苹果：`data/777/items.json` 的 `apple.id=1007`（仅树叶 decay 小概率掉落；
 /// 无饥饿/进食系统，吃苹果不做，见 HANDOFF §5）。
 pub const ITEM_APPLE: i32 = crate::registry_id(mc_registry::ITEMS, "minecraft:apple") as i32;
+/// P33 胡萝卜/马铃薯/毒马铃薯/甜菜/甜菜种子：`data/777/items.json` 实测 ID，
+/// 编译期从 `mc_registry::ITEMS` 查表（1378/1379/1381/1438/1439）。
+pub const ITEM_CARROT: i32 = crate::registry_id(mc_registry::ITEMS, "minecraft:carrot") as i32;
+pub const ITEM_POTATO: i32 = crate::registry_id(mc_registry::ITEMS, "minecraft:potato") as i32;
+pub const ITEM_POISONOUS_POTATO: i32 =
+    crate::registry_id(mc_registry::ITEMS, "minecraft:poisonous_potato") as i32;
+pub const ITEM_BEETROOT: i32 = crate::registry_id(mc_registry::ITEMS, "minecraft:beetroot") as i32;
+pub const ITEM_BEETROOT_SEEDS: i32 =
+    crate::registry_id(mc_registry::ITEMS, "minecraft:beetroot_seeds") as i32;
 /// P27 锄头全系（`data/777/items.json`，获得途径同骨粉：管理面板领取，无合成/掉落；
 /// 手持任意一种对草/泥土右键均可耕地，无耐久消耗，见 HANDOFF §5）。
 pub const ITEM_WOODEN_HOE: i32 = crate::registry_id(mc_registry::ITEMS, "minecraft:wooden_hoe") as i32;
@@ -143,8 +154,67 @@ fn hash_pos(seed: i64, x: i32, y: i32, z: i32) -> u64 {
     h
 }
 
+/// P22/P33 通用作物掉落：小麦保持旧口径；新作物按 `CropKind` 分臂。
+/// 所有概率分支都走 `hash_pos`（独立盐），确定性且与位置绑定，无随机状态。
+fn crop_block_drops(
+    crop: &crate::crops::CropSpec,
+    age: u8,
+    x: i32,
+    y: i32,
+    z: i32,
+    seed: i64,
+) -> Vec<Drop> {
+    let ripe = age >= crop.max_age;
+    match crop.kind {
+        crate::crops::CropKind::Wheat => {
+            if ripe {
+                let extra = (hash_pos(seed, x, y, z) % 2) as i32;
+                vec![
+                    Drop { item_id: ITEM_WHEAT, count: 1 },
+                    Drop { item_id: ITEM_WHEAT_SEEDS, count: 1 + extra },
+                ]
+            } else {
+                vec![Drop { item_id: ITEM_WHEAT_SEEDS, count: 1 }]
+            }
+        }
+        crate::crops::CropKind::Carrot => {
+            // 成熟：carrot 1~2 + 1/4 机会再返 1（独立 hash，不扰动主掉落）；未熟只掉本身。
+            let mut count = 1 + (hash_pos(seed, x, y, z) % 2) as i32;
+            if hash_pos(seed ^ 0x63617272, x, y, z) % 4 == 0 {
+                count += 1;
+            }
+            vec![Drop {
+                item_id: ITEM_CARROT,
+                count: if ripe { count } else { 1 },
+            }]
+        }
+        crate::crops::CropKind::Potato => {
+            let mut out = vec![Drop {
+                item_id: ITEM_POTATO,
+                count: if ripe { 1 + (hash_pos(seed, x, y, z) % 2) as i32 } else { 1 },
+            }];
+            // 毒马铃薯仅成熟时小概率（1/100），ID 来自 data/777/items.json。
+            if ripe && hash_pos(seed ^ 0x706f6973, x, y, z) % 100 == 0 {
+                out.push(Drop { item_id: ITEM_POISONOUS_POTATO, count: 1 });
+            }
+            out
+        }
+        crate::crops::CropKind::Beetroot => {
+            if ripe {
+                vec![
+                    Drop { item_id: ITEM_BEETROOT, count: 1 },
+                    Drop { item_id: ITEM_BEETROOT_SEEDS, count: 1 + (hash_pos(seed, x, y, z) % 2) as i32 },
+                ]
+            } else {
+                // 种子本身就是 beetroot_seeds，未熟挖掉可继续再种。
+                vec![Drop { item_id: ITEM_BEETROOT_SEEDS, count: 1 }]
+            }
+        }
+    }
+}
+
 /// 方块破坏掉落（创造/生存徒手口径；工具等级与精准采集留 TODO）。
-/// `seed` 只用于树叶概率分支，其它掉落与 seed 无关。
+/// `seed` 只用于概率分支，其它掉落与 seed 无关。
 pub fn drops_for_block(block_id: u16, x: i32, y: i32, z: i32, seed: i64) -> Vec<Drop> {
     match block_id {
         // 草方块：恒掉泥土；另按树叶同口径 hash 1/8 掉种子（无高草，用草方块做唯一种子来源）。
@@ -178,19 +248,11 @@ pub fn drops_for_block(block_id: u16, x: i32, y: i32, z: i32, seed: i64) -> Vec<
         FARMLAND_BLOCK_ID => vec![Drop { item_id: ITEM_DIRT, count: 1 }],
         // P23 树苗：挖掉种下的树苗原样返还（与小麦未熟口径一致；长成树/树叶 decay 留后续）。
         OAK_SAPLING_BLOCK_ID => vec![Drop { item_id: ITEM_OAK_SAPLING, count: 1 }],
-        // P22 小麦：成熟（age=7）掉小麦×1 + 种子 1~2（hash 最低位决定，无随机状态）；
-        // 未熟只掉种子×1。耕地/精准采集等差异见 HANDOFF §5。
-        id if crate::wheat_age(id).is_some() => {
-            let age = crate::wheat_age(id).unwrap_or(0);
-            if age >= WHEAT_MAX_AGE {
-                let extra = (hash_pos(seed, x, y, z) % 2) as i32;
-                vec![
-                    Drop { item_id: ITEM_WHEAT, count: 1 },
-                    Drop { item_id: ITEM_WHEAT_SEEDS, count: 1 + extra },
-                ]
-            } else {
-                vec![Drop { item_id: ITEM_WHEAT_SEEDS, count: 1 }]
-            }
+        // P22 小麦 + P33 新作物：统一按通用作物表分掉落臂。小麦的成熟/未熟输出
+        // 与旧版完全相同（见 crops::CropKind::Wheat 臂）；其它作物见文件头表。
+        id if crate::crop_age_of(id).is_some() => {
+            let (crop, age) = crate::crop_age_of(id).unwrap_or((&crate::crops::WHEAT, 0));
+            crop_block_drops(crop, age, x, y, z, seed)
         }
         _ => Vec::new(),
     }
@@ -351,6 +413,71 @@ mod tests {
         // 种子不是可放置方块（种植走 P22 专属路径，不走 block_for_item）。
         assert_eq!(block_for_item(ITEM_WHEAT_SEEDS), None);
         assert_eq!(block_for_item(ITEM_WHEAT), None);
+    }
+
+    #[test]
+    fn p33_new_crop_drops_mature_and_unripe() {
+        use crate::crops::{crop_stage_id, BEETROOT, CARROT, POTATO};
+        let seed = 123456789i64;
+        // 胡萝卜：未熟恒掉本身 1；成熟 carrot 1~3（1~2 + 1/4 返还）。
+        for age in 0..CARROT.max_age {
+            assert_eq!(
+                drops_for_block(crop_stage_id(&CARROT, age), 1, 70, 1, seed),
+                vec![Drop { item_id: ITEM_CARROT, count: 1 }]
+            );
+        }
+        let mut carrot_counts = std::collections::HashSet::new();
+        for x in 0..64 {
+            let d = drops_for_block(crop_stage_id(&CARROT, CARROT.max_age), x, 70, 1, seed);
+            assert_eq!(d.len(), 1);
+            assert_eq!(d[0].item_id, ITEM_CARROT);
+            assert!((1..=3).contains(&d[0].count));
+            carrot_counts.insert(d[0].count);
+            assert_eq!(d, drops_for_block(crop_stage_id(&CARROT, 7), x, 70, 1, seed));
+        }
+        assert!(carrot_counts.contains(&1) && carrot_counts.contains(&3), "{carrot_counts:?}");
+
+        // 马铃薯：未熟掉本身；成熟 potato 1~2 + 1/100 毒马铃薯（真实 ID）。
+        for age in 0..POTATO.max_age {
+            assert_eq!(
+                drops_for_block(crop_stage_id(&POTATO, age), 2, 70, 2, seed),
+                vec![Drop { item_id: ITEM_POTATO, count: 1 }]
+            );
+        }
+        let mut saw_poison = false;
+        let mut saw_plain = false;
+        for x in 0..2000 {
+            let d = drops_for_block(crop_stage_id(&POTATO, 7), x, 70, 2, seed);
+            assert_eq!(d[0].item_id, ITEM_POTATO);
+            assert!((1..=2).contains(&d[0].count));
+            if d.len() == 2 {
+                assert_eq!(d[1], Drop { item_id: ITEM_POISONOUS_POTATO, count: 1 });
+                saw_poison = true;
+            } else {
+                saw_plain = true;
+            }
+        }
+        assert!(saw_poison && saw_plain, "poison potato must be rare but reachable");
+
+        // 甜菜：未熟掉 beetroot_seeds；成熟 beetroot×1 + seeds 1~2（可再种）。
+        for age in 0..BEETROOT.max_age {
+            assert_eq!(
+                drops_for_block(crop_stage_id(&BEETROOT, age), 3, 70, 3, seed),
+                vec![Drop { item_id: ITEM_BEETROOT_SEEDS, count: 1 }]
+            );
+        }
+        let mut seed_counts = std::collections::HashSet::new();
+        for x in 0..64 {
+            let d = drops_for_block(crop_stage_id(&BEETROOT, 3), x, 70, 3, seed);
+            assert_eq!(d[0], Drop { item_id: ITEM_BEETROOT, count: 1 });
+            assert_eq!(d[1].item_id, ITEM_BEETROOT_SEEDS);
+            seed_counts.insert(d[1].count);
+        }
+        assert!(seed_counts.contains(&1) && seed_counts.contains(&2), "{seed_counts:?}");
+        // 种子仍走专属种植路径，不进可放置方块表（小麦旧行为不变）。
+        for seed_item in [ITEM_WHEAT_SEEDS, ITEM_CARROT, ITEM_POTATO, ITEM_BEETROOT_SEEDS] {
+            assert_eq!(block_for_item(seed_item), None);
+        }
     }
 
     #[test]
