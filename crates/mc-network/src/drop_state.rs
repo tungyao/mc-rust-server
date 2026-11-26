@@ -37,13 +37,15 @@ pub const PLAYER_ENTITY_ID: i32 = 1;
 /// 新背包开局石头数量（ hotbar 槽 36），保证“放置扣 1”可验证；后续按生存模式替换。
 pub const STARTER_STONE_COUNT: i32 = mc_world::inventory::STARTER_COUNT;
 
-/// P22 作物条目：种下时的全局 tick + 上次已广播的 age。
+/// P22/P33 作物条目：种下时的全局 tick + 上次已广播的 age + 作物规格。
 /// 生长只由全服唯一 ticker 推进（P18.1 R1：连接侧绝不 tick），阶段变更经
 /// `MutableWorld::set` 落子并走 hub 广播 fan-out；挖掉后由挖掘路径显式摘除。
 #[derive(Debug, Clone, Copy)]
 struct CropEntry {
     planted_tick: u64,
     stage: u8,
+    /// P33：按作物自己的 base/max_age 计算阶段与落子（小麦仍是同一张表的一项）。
+    crop: &'static mc_world::crops::CropSpec,
 }
 
 /// net 线程共享的掉落/背包状态（`Arc` 进 `PlayOptions`）。
@@ -250,23 +252,36 @@ impl DropState {
     /// 否则普通速度（耕地被挖/被换后自动回落，无需 retime；只前进不回退）。
     fn tick_crops(&self, world: &MutableWorld) {
         let now = self.tick_count.load(Ordering::Relaxed);
-        let base = self.stage_ticks.load(Ordering::Relaxed).max(1);
-        let due: Vec<((i32, i32, i32), u8, u8)> = {
+        let global = self.stage_ticks.load(Ordering::Relaxed).max(1);
+        let due: Vec<(
+            (i32, i32, i32),
+            u8,
+            u8,
+            &'static mc_world::crops::CropSpec,
+        )> = {
             let crops = self.crops.lock().unwrap_or_else(|p| p.into_inner());
             crops
                 .iter()
                 .map(|(pos, e)| {
                     let soil = world.get(pos.0, pos.1 - 1, pos.2);
+                    // 生产用各自表的每阶段 tick（当前四种均为 1200，与小麦一致）；
+                    // set_stage_ticks 一旦调小则对全体作物生效（测试钩子，旧语义不变）。
+                    let base = if global == mc_world::WHEAT_TICKS_PER_STAGE {
+                        e.crop.ticks_per_stage
+                    } else {
+                        global
+                    }
+                    .max(1);
                     let interval = if soil == mc_world::FARMLAND_BLOCK_ID {
                         (base / 2).max(1)
                     } else {
                         base
                     };
                     let want = ((now.saturating_sub(e.planted_tick)) / interval)
-                        .min(mc_world::WHEAT_MAX_AGE as u64) as u8;
-                    (*pos, e.stage, want)
+                        .min(e.crop.max_age as u64) as u8;
+                    (*pos, e.stage, want, e.crop)
                 })
-                .filter(|(_, old, want)| want != old)
+                .filter(|(_, old, want, _)| want != old)
                 .collect()
         };
         if due.is_empty() {
@@ -274,8 +289,8 @@ impl DropState {
         }
         let hub = self.hub.lock().unwrap_or_else(|p| p.into_inner()).clone();
         let cache = self.cache.lock().unwrap_or_else(|p| p.into_inner()).clone();
-        for ((x, y, z), old_stage, want) in due {
-            let expected_old = mc_world::wheat_stage_id(old_stage);
+        for ((x, y, z), old_stage, want, crop) in due {
+            let expected_old = mc_world::crop_stage_id(crop, old_stage);
             if world.get(x, y, z) != expected_old {
                 // 已被挖掉或改掉：摘除跟踪，不广播（挖掘路径的 BlockUpdate 已发出）。
                 self.crops.lock().unwrap_or_else(|p| p.into_inner()).remove(&(x, y, z));
@@ -284,7 +299,7 @@ impl DropState {
             if want <= old_stage {
                 continue;
             }
-            let new_id = mc_world::wheat_stage_id(want);
+            let new_id = mc_world::crop_stage_id(crop, want);
             world.set(x, y, z, new_id);
             if let Some(cache) = &cache {
                 cache.invalidate(mc_world::chunk_of_block(x, z));
@@ -308,10 +323,22 @@ impl DropState {
     }
 
     /// P22：种下登记（UseItemOn 种植路径调用，落子成功后）。
+    /// 旧签名按小麦登记（旧调用方/单测行为不变）；P33 新作物走 [`Self::plant_crop_spec`]。
     pub fn plant_crop(&self, x: i32, y: i32, z: i32) {
+        self.plant_crop_spec(&mc_world::crops::WHEAT, x, y, z);
+    }
+
+    /// P33：按作物规格登记（种植路由已从种子映射到 `crop`，不再假定小麦）。
+    pub fn plant_crop_spec(
+        &self,
+        crop: &'static mc_world::crops::CropSpec,
+        x: i32,
+        y: i32,
+        z: i32,
+    ) {
         self.crops.lock().unwrap_or_else(|p| p.into_inner()).insert(
             (x, y, z),
-            CropEntry { planted_tick: self.tick_count.load(Ordering::Relaxed), stage: 0 },
+            CropEntry { planted_tick: self.tick_count.load(Ordering::Relaxed), stage: 0, crop },
         );
     }
 
@@ -323,14 +350,31 @@ impl DropState {
     /// P27：骨粉推进后同步跟踪（方块已由 `decide_bonemeal` 落子）：
     /// 已跟踪 → stage 更新为催熟后值（ticker 后续从此继续，不跳变）；
     /// 未跟踪（重启后未认领等边缘）→ 按现状补登记，避免此后生长停滞。
+    /// 旧签名按小麦同步（旧调用方/单测行为不变）；P33 走 [`Self::apply_bonemeal_crop_spec`]。
     pub fn apply_bonemeal_crop(&self, x: i32, y: i32, z: i32, new_stage: u8) {
+        self.apply_bonemeal_crop_spec(&mc_world::crops::WHEAT, x, y, z, new_stage);
+    }
+
+    /// P33：按作物规格同步骨粉催熟后的阶段。
+    pub fn apply_bonemeal_crop_spec(
+        &self,
+        crop: &'static mc_world::crops::CropSpec,
+        x: i32,
+        y: i32,
+        z: i32,
+        new_stage: u8,
+    ) {
         let mut crops = self.crops.lock().unwrap_or_else(|p| p.into_inner());
         match crops.get_mut(&(x, y, z)) {
             Some(e) => e.stage = new_stage,
             None => {
                 crops.insert(
                     (x, y, z),
-                    CropEntry { planted_tick: self.tick_count.load(Ordering::Relaxed), stage: new_stage },
+                    CropEntry {
+                        planted_tick: self.tick_count.load(Ordering::Relaxed),
+                        stage: new_stage,
+                        crop,
+                    },
                 );
             }
         }
@@ -346,8 +390,9 @@ impl DropState {
         self.crops.lock().unwrap_or_else(|p| p.into_inner()).len()
     }
 
-    /// P22 测试钩子：覆盖每阶段 tick 数（生产值 `WHEAT_TICKS_PER_STAGE` = 1200，
+    /// P22/P33 测试钩子：覆盖每阶段 tick 数（生产值 `WHEAT_TICKS_PER_STAGE` = 1200，
     /// 即 60s；e2e/单测用小值加速，验证真实 ticker 路径而非伪造时钟）。
+    /// 一旦调离生产值，对**所有**作物统一生效（四种作物生产值相同）。
     pub fn set_stage_ticks(&self, n: u64) {
         self.stage_ticks.store(n.max(1), Ordering::Relaxed);
     }
@@ -362,16 +407,16 @@ impl DropState {
         *self.cache.lock().unwrap_or_else(|p| p.into_inner()) = Some(cache);
     }
 
-    /// P22：重启后把存量小麦重新纳入生长（stage 按存盘 age，planted 按现在，
-    /// 即从重启时刻起重新计时满阶段；与 Anvil 的差距见 HANDOFF §5）。
+    /// P22/P33：重启后把存量作物（含小麦）重新纳入生长（stage 按存盘 age，
+    /// planted 按现在，即从重启时刻起重新计时满阶段；与 Anvil 的差距见 HANDOFF §5）。
     pub fn adopt_existing_crops(&self, world: &MutableWorld) {
         let now = self.tick_count.load(Ordering::Relaxed);
         let mut crops = self.crops.lock().unwrap_or_else(|p| p.into_inner());
-        for ((x, y, z), id) in world.wheat_blocks() {
-            if let Some(age) = mc_world::wheat_age(id) {
+        for ((x, y, z), id) in world.crop_blocks() {
+            if let Some((crop, age)) = mc_world::crop_age_of(id) {
                 crops
                     .entry((x, y, z))
-                    .or_insert(CropEntry { planted_tick: now, stage: age });
+                    .or_insert(CropEntry { planted_tick: now, stage: age, crop });
             }
         }
     }
@@ -810,6 +855,63 @@ mod tests {
         st.uproot_crop(0, 71, 0);
         assert_eq!(st.crop_count(), 0);
         assert!(!st.retime_crop(0, 71, 0, 0), "unknown crop must not be retimed");
+    }
+
+    #[test]
+    fn p33_new_crops_grow_by_own_max_age_and_farmland_doubles_speed() {
+        use mc_world::crops::{crop_stage_id, BEETROOT, CARROT};
+        use mc_world::MutableWorld;
+        let world = MutableWorld::new(31);
+        let st = DropState::new(std::env::temp_dir(), 31);
+        st.set_stage_ticks(2);
+        // 胡萝卜在泥土上：普通速度；甜菜在耕地上：间隔减半，但最多只到自己的 age=3。
+        world.set(0, 70, 0, mc_world::DIRT_BLOCK_ID);
+        world.set(0, 71, 0, CARROT.base_id);
+        st.plant_crop_spec(&CARROT, 0, 71, 0);
+        world.set(4, 70, 0, mc_world::FARMLAND_BLOCK_ID);
+        world.set(4, 71, 0, BEETROOT.base_id);
+        st.plant_crop_spec(&BEETROOT, 4, 71, 0);
+        assert_eq!(st.crop_count(), 2);
+        st.physics_tick(&world);
+        assert_eq!(world.get(0, 71, 0), CARROT.base_id, "carrot needs two ticks per stage");
+        assert_eq!(world.get(4, 71, 0), crop_stage_id(&BEETROOT, 1), "farmland halves interval");
+        for _ in 0..15 {
+            st.physics_tick(&world);
+        }
+        assert_eq!(world.get(0, 71, 0), crop_stage_id(&CARROT, 7), "carrot matures at age 7");
+        assert_eq!(world.get(4, 71, 0), crop_stage_id(&BEETROOT, 3), "beetroot clamps at age 3");
+        // 挖掉后跟踪摘除（与小麦同链路）。
+        world.set(0, 71, 0, mc_world::AIR_BLOCK_ID);
+        st.uproot_crop(0, 71, 0);
+        world.set(4, 71, 0, mc_world::AIR_BLOCK_ID);
+        st.uproot_crop(4, 71, 0);
+        assert_eq!(st.crop_count(), 0);
+    }
+
+    #[test]
+    fn p33_adopt_and_bonemeal_sync_for_new_crops() {
+        use mc_world::crops::{crop_stage_id, BEETROOT, CARROT};
+        use mc_world::MutableWorld;
+        let world = MutableWorld::new(32);
+        let st = DropState::new(std::env::temp_dir(), 32);
+        st.set_stage_ticks(4);
+        world.set(0, 70, 0, mc_world::DIRT_BLOCK_ID);
+        world.set(0, 71, 0, crop_stage_id(&CARROT, 5));
+        world.set(4, 70, 0, mc_world::DIRT_BLOCK_ID);
+        world.set(4, 71, 0, crop_stage_id(&BEETROOT, 2));
+        st.adopt_existing_crops(&world);
+        assert_eq!(st.crop_count(), 2);
+        assert_eq!(st.crop_stage(0, 71, 0), Some(5));
+        assert_eq!(st.crop_stage(4, 71, 0), Some(2));
+        // 骨粉把胡萝卜推到 6（模拟 decide_bonemeal 已落子），跟踪同步不跳变。
+        world.set(0, 71, 0, crop_stage_id(&CARROT, 6));
+        st.apply_bonemeal_crop_spec(&CARROT, 0, 71, 0, 6);
+        assert_eq!(st.crop_stage(0, 71, 0), Some(6));
+        for _ in 0..3 {
+            st.physics_tick(&world);
+        }
+        assert_eq!(st.crop_stage(0, 71, 0), Some(6));
+        assert_eq!(world.get(0, 71, 0), crop_stage_id(&CARROT, 6));
     }
 
     #[test]

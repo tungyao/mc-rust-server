@@ -1,5 +1,6 @@
 //! mc-world: Chunk 存储 + 生成 + 存档，不依赖网络
 //! 对标 FerrumC world + SteelMC parity 思路
+pub mod crops;
 pub mod drops;
 pub mod load;
 pub mod mutable;
@@ -9,6 +10,7 @@ pub mod items;
 pub mod inventory;
 pub mod xp;
 
+pub use crops::{CropKind, CropSpec, CROPS, crop_age, crop_age_of, crop_base_for_seed, crop_for_seed, crop_stage_id};
 pub use drops::{Drop, block_for_item, drops_for_block};
 pub use items::{ItemEntities, ItemEntity};
 pub use inventory::PlayerInventory;
@@ -117,6 +119,7 @@ pub const LEAF_DECAY_TICKS: u64 = 100;
 /// `wheat.default_state_id=6867`；`data/777/full/blocks.json` 的 wheat `states`
 /// 数组按 age 升序排列 `id: 6867..=6874`，故 age N 的 blockstate = base + N。
 /// P27 起可在耕地（`FARMLAND_BLOCK_ID`）上种植并加速生长（`is_crop_soil`）。
+/// P33 起小麦是 [`crops::CROPS`] 的一员；常量/函数与旧版逐字节等价，供旧路径使用。
 pub const WHEAT_CROP_BASE_ID: u16 = registry_id(mc_registry::BLOCKS, "minecraft:wheat") as u16;
 /// 小麦最大 age（7 阶段成熟；states 数组共 8 项）。
 pub const WHEAT_MAX_AGE: u8 = 7;
@@ -129,14 +132,15 @@ pub const SAPLING_GROW_TICKS: u64 = 7200;
 pub const SAPLING_TRUNK_H: i32 = 4;
 
 /// 小麦 age → blockstate ID（age > 7 按 7 钳制）。
+/// P33：委托通用作物表（`crops::WHEAT`），旧调用方行为不变。
 pub fn wheat_stage_id(age: u8) -> u16 {
-    WHEAT_CROP_BASE_ID + age.min(WHEAT_MAX_AGE) as u16
+    crops::crop_stage_id(&crops::WHEAT, age)
 }
 
 /// blockstate ID → 小麦 age（非小麦返回 None）。
+/// P33：委托通用作物表（`crops::WHEAT`），旧调用方行为不变。
 pub fn wheat_age(id: u16) -> Option<u8> {
-    let age = id.wrapping_sub(WHEAT_CROP_BASE_ID);
-    if age <= WHEAT_MAX_AGE as u16 { Some(age as u8) } else { None }
+    crops::crop_age(&crops::WHEAT, id)
 }
 
 /// 可种土壤：草方块/泥土（P22）+ 耕地（P27，`decide_plant` 与树苗生长的土壤检查共用；
