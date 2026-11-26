@@ -4,10 +4,11 @@
 //! 玩家背包/XP、成长计时与一条逻辑编辑日志。磁盘真相源是单个 redb 文件
 //! `world/state-<seed>.redb`（每 seed 一个库，延续 P17/P18 的 seed 隔离习惯）。
 //!
-//! 本模块**不接入生产路径**：`main.rs` / `persist.rs` / `drop_state.rs` 与协议行为不变，
-//! `MutableWorld::save_to_dir` / `PlayerInventory::save_to_dir` 仍是生产存档格式。
-//! 这里只验证"打开 → 写/读方块编辑 → 写/读背包+XP → 重放编辑 → 迁移旧档 → 重开仍在"
-//! 的最小闭环。生产落地与迁移分阶段见 `docs/world-storage-plan.md`。
+//! P36.2 起本模块接入生产路径：`main.rs` 启动时打开/迁移本库，`MutableWorld` 把编辑
+//! 暂存为 [`BlockEdit`]，`persist.rs` 的 60s/断线/退出触发点用一个写事务把
+//! `blocks` + `journal` 落盘；玩家背包/XP 由 `DropState` 经 [`WorldStore::save_player`]
+//! 写同一库。协议发包与权威判定逻辑不变，旧格式可通过配置开关回退。
+//! 生产落地与迁移分阶段见 `docs/world-storage-plan.md`。
 //!
 //! 关键取舍：
 //! - 选 `redb`（纯 Rust、MVCC、ACID、零拷贝读）而非自造 Anvil / LSM / 列式压缩格式；
@@ -135,6 +136,82 @@ pub struct TimerRecord {
     pub stage: u8,
     /// 作物规格 ID（未来按 `CropSpec` 查表；原型直接存编号）。
     pub spec: u8,
+}
+
+/// 一条待刷盘的方块编辑（内存热层 → redb 的桥）。
+///
+/// `old`/`new` 采用 override 口径：`u16::MAX` = 没有 override（回落到确定性基底）。
+/// `new == u16::MAX` 表示设回基底值，刷盘时记 `BlockClear`；否则记 `BlockSet`。
+/// `actor` 是 conn_id（系统/ticker/未标注的调用方为 0），`tick` 是全局物理 tick。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct BlockEdit {
+    pub x: i32,
+    pub y: i32,
+    pub z: i32,
+    pub old: u16,
+    pub new: u16,
+    pub actor: u64,
+    pub tick: u64,
+}
+
+/// 一次性迁移报告（写 `world/migration-<seed>.json`，失败只影响诊断）。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct MigrationReport {
+    pub seed: i64,
+    /// 本次启动是否真的执行了迁移（以 redb 库新建为唯一判据）。
+    pub ran: bool,
+    /// 迁入的 P17W 方块条数。
+    pub blocks: usize,
+    /// 迁入的 P18I 玩家用户名。
+    pub players: Vec<String>,
+    /// 已改名为 `.bak` 的旧文件数。
+    pub renamed: usize,
+    /// redb 已存在但旧文件仍在（按设计忽略，供调用方 warn）。
+    pub legacy_ignored: usize,
+    /// Unix 秒；仅诊断用，不引 chrono。
+    pub timestamp: u64,
+}
+
+impl MigrationReport {
+    fn skipped(seed: i64, legacy_ignored: usize) -> Self {
+        Self {
+            seed,
+            ran: false,
+            blocks: 0,
+            players: Vec::new(),
+            renamed: 0,
+            legacy_ignored,
+            timestamp: now_secs(),
+        }
+    }
+
+    /// 手写极简 JSON：mc-world 不依赖 serde_json，字段全是标量/字符串数组。
+    fn to_json(&self) -> String {
+        // 用户名是 Minecraft 名（ASCII）；过滤掉会破坏 JSON 的字符即可，不引 serde_json。
+        let players = self
+            .players
+            .iter()
+            .map(|p| {
+                let safe: String = p
+                    .chars()
+                    .filter(|c| c.is_ascii_alphanumeric() || matches!(c, '_' | '-' | '.'))
+                    .collect();
+                format!("\"{safe}\"")
+            })
+            .collect::<Vec<_>>()
+            .join(",");
+        format!(
+            "{{\"seed\":{},\"ran\":{},\"blocks\":{},\"players\":[{}],\"renamed\":{},\"legacy_ignored\":{},\"timestamp\":{}}}",
+            self.seed, self.ran, self.blocks, players, self.renamed, self.legacy_ignored, self.timestamp
+        )
+    }
+}
+
+fn now_secs() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0)
 }
 
 // ---------------------------------------------------------------------------
@@ -435,6 +512,95 @@ impl WorldStore {
         })
     }
 
+    /// P36.2 生产入口：打开（必要时先迁移）并保存迁移报告。
+    ///
+    /// 幂等判据只有一条：`state-<seed>.redb` 在打开前是否存在。新建库时扫
+    /// `overrides-<seed>.dat` 与 `player-*-<seed>.dat`，按文档事务迁入，写
+    /// `migration-<seed>.json`，旧文件改名 `.bak` 保留（不删除）。任一步失败会
+    /// 回滚新建的库文件，下次启动重试；已存在库时只报告遗留旧档数量，不读取。
+    pub fn open_with_migration(dir: &Path, seed: i64) -> Result<(Self, MigrationReport), StoreError> {
+        let path = Self::store_path(dir, seed);
+        let existed = path.exists();
+        let store = Self::open(dir, seed)?;
+        if existed {
+            let ignored = legacy_files(dir, seed).len();
+            return Ok((store, MigrationReport::skipped(seed, ignored)));
+        }
+        let result = (|| {
+            let mut report = MigrationReport {
+                seed,
+                ran: true,
+                blocks: 0,
+                players: Vec::new(),
+                renamed: 0,
+                legacy_ignored: 0,
+                timestamp: now_secs(),
+            };
+            let mut to_rename = Vec::new();
+            // 方块档：一个事务内写全部 blocks + journal(BlockSet)。
+            let p17 = crate::mutable::MutableWorld::save_path(dir, seed);
+            if p17.exists() {
+                report.blocks = store.migrate_legacy_p17(dir, seed)?;
+                to_rename.push(p17);
+            }
+            // 背包档：扫描真实文件名（用户名键），v1/v2 由 load_from_dir 兼容。
+            for (tag, p18) in legacy_players(dir, seed) {
+                if store.migrate_legacy_p18(dir, &tag, seed)? {
+                    report.players.push(tag);
+                    to_rename.push(p18);
+                }
+            }
+            // 全部数据事务成功后才改名旧档；改名失败则回滚改名 + 删除新库，下次重试。
+            let mut done = Vec::new();
+            for path in &to_rename {
+                if rename_backup(path).is_ok() {
+                    done.push(path);
+                }
+            }
+            if done.len() != to_rename.len() {
+                for path in &done {
+                    let _ = std::fs::rename(backup_path(path), path);
+                }
+                return Err(StoreError::Io(std::io::Error::new(
+                    std::io::ErrorKind::Other,
+                    "renaming legacy saves to .bak failed",
+                )));
+            }
+            report.renamed = done.len();
+            // 报告写失败只影响诊断，不影响数据。
+            let report_path = dir.join(format!("migration-{seed}.json"));
+            if let Some(parent) = report_path.parent() {
+                std::fs::create_dir_all(parent)?;
+            }
+            let _ = std::fs::write(report_path, report.to_json());
+            Ok(report)
+        })();
+        match result {
+            Ok(report) => Ok((store, report)),
+            Err(e) => {
+                // 迁移失败：删掉刚建的库，保留全部旧档，下次启动重跑（幂等）。
+                drop(store);
+                let _ = std::fs::remove_file(&path);
+                Err(e)
+            }
+        }
+    }
+
+    /// 一个写事务内提交一批方块编辑：`blocks` 物化视图 + `journal(old→new, actor, tick)`。
+    /// 调用方（内存热层）只在成功后清 dirty，失败可原样重试。
+    pub fn flush_blocks(&self, edits: &[BlockEdit]) -> Result<usize, StoreError> {
+        if edits.is_empty() {
+            return Ok(0);
+        }
+        self.with_write(|tx, seq| {
+            for e in edits {
+                let op = if e.new == u16::MAX { Op::BlockClear } else { Op::BlockSet };
+                Self::put_block(tx, seq, e.x, e.y, e.z, e.new, op, e.tick, e.actor)?;
+            }
+            Ok(edits.len())
+        })
+    }
+
     /// 统一写入口：所有修改都在一个 redb 写事务内完成，日志序号同事务递增。
     fn with_write<R>(
         &self,
@@ -697,6 +863,53 @@ fn append_journal(tx: &WriteTransaction, seq: &mut u64, rec: &JournalRecord) -> 
     Ok(())
 }
 
+/// `path` → `path.bak`（旧档改名保留，回退时改回原名即可）。
+fn backup_path(path: &Path) -> PathBuf {
+    let mut name = path.as_os_str().to_os_string();
+    name.push(".bak");
+    PathBuf::from(name)
+}
+
+fn rename_backup(path: &Path) -> std::io::Result<()> {
+    let bak = backup_path(path);
+    if bak.exists() {
+        let _ = std::fs::remove_file(&bak);
+    }
+    std::fs::rename(path, bak)
+}
+
+/// 扫描 `player-<user>-<seed>.dat`（只认当前 seed；用户名可能含 '-'，取中间全部）。
+fn legacy_players(dir: &Path, seed: i64) -> Vec<(String, PathBuf)> {
+    let prefix = "player-";
+    let suffix = format!("-{seed}.dat");
+    let mut out = Vec::new();
+    if let Ok(rd) = std::fs::read_dir(dir) {
+        for entry in rd.flatten() {
+            let name = entry.file_name().to_string_lossy().into_owned();
+            if let Some(rest) = name.strip_prefix(prefix) {
+                if let Some(tag) = rest.strip_suffix(&suffix) {
+                    if !tag.is_empty() {
+                        out.push((tag.to_string(), entry.path()));
+                    }
+                }
+            }
+        }
+    }
+    out.sort_by(|a, b| a.0.cmp(&b.0));
+    out
+}
+
+/// 启动时发现库已存在但旧文件仍在：只计数供调用方 warn，绝不读取/覆盖。
+fn legacy_files(dir: &Path, seed: i64) -> Vec<PathBuf> {
+    let mut out = Vec::new();
+    let p17 = crate::mutable::MutableWorld::save_path(dir, seed);
+    if p17.exists() {
+        out.push(p17);
+    }
+    out.extend(legacy_players(dir, seed).into_iter().map(|(_, p)| p));
+    out
+}
+
 /// 解析旧 `overrides-<seed>.dat`（P17W v1）：魔数/版本/seed/条数 + 14B 条目。
 /// seed 必须与目标库一致，防止把别的世界迁进来。
 fn parse_p17(path: &Path, seed: i64) -> Result<Vec<((i32, i32, i32), u16)>, StoreError> {
@@ -946,6 +1159,129 @@ mod tests {
         assert_eq!(recs.len(), 10_000);
         assert_eq!(s.blocks().unwrap().len(), 10_000);
         eprintln!("p36 bulk: 10000 edits committed in {written:?}, replay in {replayed:?}");
+        cleanup(&dir);
+    }
+
+    /// P36.2 生产闭环：内存编辑 + 背包/XP → flush → 重开仍在，journal 带 old→new/actor/tick。
+    #[test]
+    fn production_flush_survives_reopen_with_actor_and_tick() {
+        use std::sync::Arc;
+        let dir = tmp("prod");
+        let seed = 5150;
+        let (x, y, z) = {
+            let s = crate::WorldGen::new(seed).spawn_pos();
+            (s.0, s.1 - 1, s.2)
+        };
+        {
+            let store = Arc::new(WorldStore::open(&dir, seed).unwrap());
+            let world = crate::MutableWorld::with_store(seed, Arc::clone(&store)).unwrap();
+            let mut inv = PlayerInventory::new();
+            inv.set_slot(36, Some((55, 3)));
+            inv.set_total_xp(11);
+            inv.set_selected(2);
+            // 挖：基底草 → 空气（override 记录 air）；放：空气 → 石头（y=100 基底为空气）。
+            assert_ne!(world.get(x, y, z), AIR_BLOCK_ID);
+            world.set_with_context(x, y, z, AIR_BLOCK_ID, 7, 31);
+            world.set_with_context(10, 100, 10, STONE_BLOCK_ID, 8, 32);
+            assert_eq!(world.dirty_len(), 2);
+            store.save_player("alice", &inv).unwrap();
+            assert_eq!(world.flush_to_store(99).unwrap(), 2, "one transaction for both edits");
+            assert_eq!(world.dirty_len(), 0);
+            assert_eq!(world.override_count(), 2);
+            assert!(world.take_edits().is_empty());
+        }
+        let reopened = Arc::new(WorldStore::open(&dir, seed).unwrap());
+        let world = crate::MutableWorld::with_store(seed, Arc::clone(&reopened)).unwrap();
+        assert_eq!(world.get(x, y, z), AIR_BLOCK_ID);
+        assert_eq!(world.get(10, 100, 10), STONE_BLOCK_ID);
+        assert_eq!(world.dirty_len(), 0);
+        let back = reopened.load_player("alice").unwrap().unwrap();
+        assert_eq!(back.selected(), 2);
+        assert_eq!(back.get(36), Some((55, 3)));
+        assert_eq!(back.total_xp(), 11);
+        let records: Vec<_> = reopened
+            .replay()
+            .unwrap()
+            .into_iter()
+            .filter(|r| r.op != Op::PlayerSave)
+            .collect();
+        assert_eq!(records.len(), 2);
+        assert_eq!(records[0].pos, (x, y, z));
+        assert_eq!(records[0].old, u16::MAX, "no override before digging");
+        assert_eq!(records[0].new, AIR_BLOCK_ID);
+        assert_eq!((records[0].actor, records[0].tick), (7, 31));
+        assert_eq!(records[1].pos, (10, 100, 10));
+        assert_eq!(records[1].new, STONE_BLOCK_ID);
+        assert_eq!((records[1].actor, records[1].tick), (8, 32));
+        assert_eq!(reopened.replay_blocks().unwrap(), reopened.blocks().unwrap().into_iter().collect());
+        cleanup(&dir);
+    }
+
+    /// 一次性迁移的编排：真实旧档 → redb → 旧档改名 .bak → 报告 → 重开不再重跑。
+    #[test]
+    fn open_with_migration_renames_legacy_files_and_is_idempotent() {
+        use std::sync::Arc;
+        let dir = tmp("mig-prod");
+        let seed = 777;
+        let legacy = crate::MutableWorld::new(seed);
+        assert_eq!(legacy.set(10, 100, 10, STONE_BLOCK_ID), AIR_BLOCK_ID);
+        assert_eq!(legacy.set(11, 100, 11, DIRT_BLOCK_ID), AIR_BLOCK_ID);
+        assert_eq!(legacy.save_to_dir(&dir).unwrap(), 2);
+        let mut inv = PlayerInventory::new();
+        inv.set_total_xp(17);
+        inv.set_slot(36, Some((1, 42)));
+        inv.save_to_dir(&dir, "carol", seed).unwrap();
+
+        let (store, report) = WorldStore::open_with_migration(&dir, seed).unwrap();
+        assert!(report.ran);
+        assert_eq!(report.seed, seed);
+        assert_eq!(report.blocks, 2);
+        assert_eq!(report.players, vec!["carol".to_string()]);
+        assert_eq!(report.renamed, 2);
+        assert_eq!(report.legacy_ignored, 0);
+        assert!(!crate::mutable::MutableWorld::save_path(&dir, seed).exists());
+        assert!(backup_path(&crate::mutable::MutableWorld::save_path(&dir, seed)).exists());
+        let p18 = PlayerInventory::save_path(&dir, "carol", seed);
+        assert!(!p18.exists());
+        assert!(backup_path(&p18).exists());
+        let manifest = std::fs::read_to_string(dir.join(format!("migration-{seed}.json"))).unwrap();
+        assert!(manifest.contains("\"blocks\":2") && manifest.contains("carol"));
+        assert_eq!(store.load_player("carol").unwrap().unwrap().total_xp(), 17);
+        assert_eq!(store.journal_len().unwrap(), 3, "2 BlockSet + 1 PlayerSave");
+        drop(store);
+
+        // 第二次打开：库已存在，迁移不重跑，journal 条数不变。
+        let (again, report2) = WorldStore::open_with_migration(&dir, seed).unwrap();
+        assert!(!report2.ran);
+        assert_eq!(again.journal_len().unwrap(), 3);
+        let world = crate::MutableWorld::with_store(seed, Arc::new(again)).unwrap();
+        assert_eq!(world.get(10, 100, 10), STONE_BLOCK_ID);
+        assert_eq!(world.get(11, 100, 11), DIRT_BLOCK_ID);
+        cleanup(&dir);
+    }
+
+    /// 库已存在时遗留的旧档只 warn 不读取；seed 不匹配的玩家文件不扫进来。
+    #[test]
+    fn existing_store_ignores_legacy_files_and_wrong_seed() {
+        let dir = tmp("ignore-legacy");
+        let seed = 88;
+        {
+            let s = WorldStore::open(&dir, seed).unwrap();
+            s.set_block(1, 100, 1, STONE_BLOCK_ID).unwrap();
+        }
+        let legacy = crate::MutableWorld::new(seed);
+        legacy.set(2, 100, 2, DIRT_BLOCK_ID);
+        legacy.save_to_dir(&dir).unwrap();
+        let mut inv = PlayerInventory::new();
+        inv.set_total_xp(42);
+        inv.save_to_dir(&dir, "dave", seed).unwrap();
+        inv.save_to_dir(&dir, "other-seed", 999).unwrap();
+        let (s, report) = WorldStore::open_with_migration(&dir, seed).unwrap();
+        assert!(!report.ran);
+        assert_eq!(report.legacy_ignored, 2, "only current-seed files count");
+        assert!(s.block(2, 100, 2).unwrap().is_none());
+        assert!(s.load_player("dave").unwrap().is_none());
+        assert!(crate::mutable::MutableWorld::save_path(&dir, seed).exists(), "legacy file untouched");
         cleanup(&dir);
     }
 }

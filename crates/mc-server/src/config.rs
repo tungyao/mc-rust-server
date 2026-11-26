@@ -17,6 +17,68 @@ pub const DEFAULT_WORLD_DIR: &str = "world";
 /// 除非前置反向代理做鉴权）。
 pub const DEFAULT_ADMIN_BIND: &str = "127.0.0.1:25566";
 
+/// 世界存储后端：`redb` = 新格式（`world/state-<seed>.redb`），`legacy` = 旧稀疏档。
+/// 注意：这是独立的 toml 键，不塞进 `ServerConfig`——后者有旧测试用穷举结构体字面量，
+/// 加字段会破坏"365 测试一字不改"的硬约束。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum WorldStorage {
+    Redb,
+    Legacy,
+}
+
+impl Default for WorldStorage {
+    fn default() -> Self {
+        Self::Redb
+    }
+}
+
+impl std::str::FromStr for WorldStorage {
+    type Err = String;
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        match s.trim().to_ascii_lowercase().as_str() {
+            "redb" => Ok(Self::Redb),
+            "legacy" => Ok(Self::Legacy),
+            other => Err(format!("unknown world_storage {other:?} (expected redb|legacy)")),
+        }
+    }
+}
+
+/// 旧 `server.toml` 缺 `world_storage` 键时补一行 `world_storage = "redb"`（默认新格式）。
+/// 写失败只影响诊断：读取仍按默认 redb 进行。
+fn ensure_world_storage_key(path: &Path) {
+    let Ok(text) = std::fs::read_to_string(path) else { return };
+    if text.contains("world_storage") {
+        return;
+    }
+    let mut updated = text;
+    if !updated.ends_with('\n') {
+        updated.push('\n');
+    }
+    updated.push_str("\n# P38 world storage backend: \"redb\" (default) or \"legacy\"\nworld_storage = \"redb\"\n");
+    let _ = std::fs::write(path, updated);
+}
+
+/// 读取存储后端开关（缺键按默认 redb 补齐到文件）。非法值警告后回退默认。
+pub fn load_world_storage(path: impl AsRef<Path>) -> WorldStorage {
+    let path = path.as_ref();
+    let Ok(text) = std::fs::read_to_string(path) else { return WorldStorage::default() };
+    ensure_world_storage_key(path);
+    let value = match toml::from_str::<toml::Value>(&text) {
+        Ok(v) => v.get("world_storage").and_then(|x| x.as_str()).map(str::to_string),
+        Err(_) => None,
+    };
+    match value {
+        Some(v) => match v.parse::<WorldStorage>() {
+            Ok(mode) => mode,
+            Err(e) => {
+                eprintln!("warn: {}: {e}, defaulting to redb", path.display());
+                WorldStorage::default()
+            }
+        },
+        None => WorldStorage::default(),
+    }
+}
+
 #[derive(Debug, Clone, Resource, Serialize, Deserialize)]
 #[serde(default)]
 pub struct ServerConfig {
@@ -66,6 +128,12 @@ impl ServerConfig {
     /// 缺文件则写一份默认 server.toml 再返回默认；解析失败返回 Err，由 main 回退默认+warn。
     pub fn load_or_create(path: impl AsRef<Path>) -> Result<Self, ConfigError> {
         let path = path.as_ref();
+        let cfg = Self::load_or_create_inner(path)?;
+        ensure_world_storage_key(path);
+        Ok(cfg)
+    }
+
+    fn load_or_create_inner(path: &Path) -> Result<Self, ConfigError> {
         match std::fs::read_to_string(path) {
             Ok(text) => toml::from_str(&text).map_err(|e| ConfigError::Parse {
                 path: path.display().to_string(),
@@ -180,6 +248,27 @@ mod tests {
         let p = tmp_toml();
         std::fs::write(&p, "bind = [unclosed\n").unwrap();
         assert!(ServerConfig::load_or_create(&p).is_err());
+        let _ = std::fs::remove_file(&p);
+    }
+
+    /// P38 开关：缺键按默认 redb 补齐到旧 toml，两种模式都能解析，非法值回退默认。
+    #[test]
+    fn world_storage_switch_reads_both_modes_and_fills_missing_key() {
+        let p = tmp_toml();
+        std::fs::write(&p, "bind = \"127.0.0.1:25565\"\nseed = 42\n").unwrap();
+        assert_eq!(load_world_storage(&p), WorldStorage::Redb);
+        let filled = std::fs::read_to_string(&p).unwrap();
+        assert!(filled.contains("world_storage = \"redb\""), "old toml must gain the key");
+        // 缺键的旧 toml 仍能被 ServerConfig 解析（旧测试口径不变）。
+        assert_eq!(ServerConfig::load_or_create(&p).unwrap().seed, 42);
+        assert_eq!(load_world_storage(&p), WorldStorage::Redb);
+
+        std::fs::write(&p, "seed = 42\nworld_storage = \"legacy\"\n").unwrap();
+        assert_eq!(load_world_storage(&p), WorldStorage::Legacy);
+        std::fs::write(&p, "seed = 42\nworld_storage = \"redb\"\n").unwrap();
+        assert_eq!(load_world_storage(&p), WorldStorage::Redb);
+        std::fs::write(&p, "seed = 42\nworld_storage = \"nonsense\"\n").unwrap();
+        assert_eq!(load_world_storage(&p), WorldStorage::Redb, "unknown value falls back to default");
         let _ = std::fs::remove_file(&p);
     }
 }

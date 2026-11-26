@@ -14,6 +14,7 @@
 //!   因离线模式 uuid 每次随机，见 `mc_world::inventory` 文档）。
 //! - `known`：conn_id → 该连接已见实体（视距过滤：离开视距发 Remove，进入补发）。
 
+use mc_world::store::WorldStore;
 use mc_world::{ItemEntities, MutableWorld, PlayerInventory, XpOrbEntities};
 use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
@@ -91,10 +92,20 @@ pub struct DropState {
     stop_flag: Mutex<Option<Arc<AtomicBool>>>,
     save_dir: PathBuf,
     seed: i64,
+    /// P36.2：redb 模式共享存储（`new()` 仍为 None，旧路径逐字节不变）。
+    store: Option<Arc<WorldStore>>,
+    /// conn_id → 用户名（redb 的 players 表键；load/unload 时维护）。
+    player_tags: Mutex<HashMap<u64, String>>,
 }
 
 impl DropState {
+    /// 旧稀疏档模式（测试/显式 legacy 配置）。生产 redb 模式请用 `with_store`。
     pub fn new(save_dir: PathBuf, seed: i64) -> Self {
+        Self::with_store(save_dir, seed, None)
+    }
+
+    /// redb / legacy 双模式构造；背包读写只改这两个入口，发包与判定逻辑不变。
+    pub fn with_store(save_dir: PathBuf, seed: i64, store: Option<Arc<WorldStore>>) -> Self {
         Self {
             items: Mutex::new(ItemEntities::new()),
             orbs: Mutex::new(XpOrbEntities::new()),
@@ -114,6 +125,8 @@ impl DropState {
             stop_flag: Mutex::new(None),
             save_dir,
             seed,
+            store,
+            player_tags: Mutex::new(HashMap::new()),
         }
     }
 
@@ -661,17 +674,42 @@ impl DropState {
         self.known.lock().unwrap_or_else(|p| p.into_inner())
     }
 
+    fn lock_tags(&self) -> std::sync::MutexGuard<'_, HashMap<u64, String>> {
+        self.player_tags.lock().unwrap_or_else(|p| p.into_inner())
+    }
+
+    /// 把一份背包写到当前后端（redb 一个事务写 players + journal）。
+    fn persist_inventory(&self, user_tag: &str, inv: &PlayerInventory) {
+        if let Some(store) = &self.store {
+            if let Err(e) = store.save_player(user_tag, inv) {
+                warn!("redb player save failed tag={user_tag} seed={} ({e})", self.seed);
+            }
+        } else if let Err(e) = inv.save_to_dir(&self.save_dir, user_tag, self.seed) {
+            warn!("player save failed tag={user_tag} seed={} ({e})", self.seed);
+        }
+    }
+
     /// Join 时调入背包：读盘命中则用盘档，否则新背包 + 石头开局（后续替换为生存模式）。
     pub fn load_inventory(&self, conn_id: u64, user_tag: &str) -> (usize, u8) {
-        let (mut inv, is_new) =
-            PlayerInventory::load_from_dir(&self.save_dir, user_tag, self.seed).unwrap_or_else(
-                |_| (PlayerInventory::new(), true),
-            );
+        let (mut inv, is_new) = match &self.store {
+            Some(store) => {
+                let found = store.load_player(user_tag).unwrap_or_else(|e| {
+                    warn!("redb player load failed tag={user_tag} seed={} ({e})", self.seed);
+                    None
+                });
+                // 无记录 = 旧档缺文件；已有记录即使背包空也不能再发石头。
+                let is_new = found.is_none();
+                (found.unwrap_or_default(), is_new)
+            }
+            None => PlayerInventory::load_from_dir(&self.save_dir, user_tag, self.seed)
+                .unwrap_or_else(|_| (PlayerInventory::new(), true)),
+        };
         if is_new && inv.is_empty() {
             inv.slots_hotbar_starter();
         }
         let held = inv.selected();
         let filled = inv.filled_count();
+        self.lock_tags().insert(conn_id, user_tag.to_string());
         self.lock_invs().insert(conn_id, inv);
         self.lock_known().insert(conn_id, HashSet::new());
         let _ = (filled, held);
@@ -680,9 +718,10 @@ impl DropState {
 
     /// 断线时刷盘 + 释放连接状态（known/背包内存；手持栈先收回背包再存）。
     pub fn unload_inventory(&self, conn_id: u64, user_tag: &str) {
+        self.lock_tags().remove(&conn_id);
         if let Some(mut inv) = self.lock_invs().remove(&conn_id) {
             inv.stow_cursor();
-            let _ = inv.save_to_dir(&self.save_dir, user_tag, self.seed);
+            self.persist_inventory(user_tag, &inv);
         }
         self.lock_known().remove(&conn_id);
     }
@@ -690,7 +729,21 @@ impl DropState {
     /// 背包刷盘（拾取/放置后调用）。
     pub fn save_inventory(&self, conn_id: u64, user_tag: &str) {
         if let Some(inv) = self.lock_invs().get(&conn_id) {
-            let _ = inv.save_to_dir(&self.save_dir, user_tag, self.seed);
+            self.persist_inventory(user_tag, inv);
+        }
+    }
+
+    /// 60s 周期/退出时把全部在线背包 + XP 刷到当前后端（redb 模式一次一人一事务）。
+    pub fn save_all_inventories(&self) {
+        if self.store.is_none() {
+            return;
+        }
+        let tags = self.lock_tags();
+        let invs = self.lock_invs();
+        for (conn_id, inv) in invs.iter() {
+            if let Some(tag) = tags.get(conn_id) {
+                self.persist_inventory(tag, inv);
+            }
         }
     }
 
@@ -1226,5 +1279,43 @@ mod tests {
                 "decay must spawn {d:?}"
             );
         }
+    }
+
+    /// P36.2：redb 模式下背包/XP 走 WorldStore，缺旧 .dat 文件，重启/换连接仍在。
+    #[test]
+    fn redb_inventory_survives_reopen_and_periodic_save() {
+        use mc_world::store::WorldStore;
+        let dir = std::env::temp_dir().join(format!("mc-p38-drop-{}-redb", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let seed = 909;
+        {
+            let store = Arc::new(WorldStore::open(&dir, seed).unwrap());
+            let st = DropState::with_store(dir.clone(), seed, Some(Arc::clone(&store)));
+            st.load_inventory(7, "alice");
+            st.with_inventory(7, |inv| {
+                inv.add_item(55, 3);
+                inv.add_experience(9);
+            });
+            st.save_inventory(7, "alice"); // 拾取后即时刷盘
+            st.with_inventory(7, |inv| inv.add_experience(4));
+            st.save_all_inventories(); // 60s 周期刷盘
+            assert_eq!(store.load_player("alice").unwrap().unwrap().total_xp(), 13);
+            assert!(!PlayerInventory::save_path(&dir, "alice", seed).exists());
+        }
+        let st = DropState::with_store(
+            dir.clone(),
+            seed,
+            Some(Arc::new(WorldStore::open(&dir, seed).unwrap())),
+        );
+        let (filled, held) = st.load_inventory(8, "alice"); // 换连接按用户名恢复
+        assert_eq!(filled, 2, "starter stone in 36 + picked stack in 37");
+        assert_eq!(held, 0);
+        st.with_inventory(8, |inv| {
+            assert_eq!(inv.get(36), Some((mc_world::drops::ITEM_STONE, 64)));
+            assert_eq!(inv.get(37), Some((55, 3)));
+            assert_eq!(inv.total_xp(), 13);
+        });
+        st.unload_inventory(8, "alice");
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }

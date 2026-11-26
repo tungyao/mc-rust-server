@@ -19,12 +19,13 @@ use crate::{
     IRON_ORE_BLOCK_ID, MIN_Y, OAK_LOG_BLOCK_ID, SAND_BLOCK_ID, SECTION_COUNT, STONE_BLOCK_ID,
     WATER_BLOCK_ID,
 };
+use crate::store::{BlockEdit, StoreError, WorldStore};
 use mc_core::{BlockPos, ChunkPos};
 
 use std::collections::{HashMap, HashSet};
 use std::io::{Read, Write};
 use std::path::Path;
-use std::sync::RwLock;
+use std::sync::{Arc, RwLock};
 
 /// 世界纵向有效范围：y ∈ [MIN_Y, WORLD_TOP_Y]，section y=-64..319。
 pub const WORLD_TOP_Y: i32 = MIN_Y + SECTION_COUNT as i32 * 16 - 1;
@@ -85,6 +86,8 @@ struct Inner {
     overrides: HashMap<(i32, i32, i32), u16>,
     /// 自上次刷盘后被写过的 chunk。
     dirty: HashSet<ChunkPos>,
+    /// redb 模式：自上次 flush 以来的方块编辑（按落子顺序，供 journal 记录 old→new）。
+    edits: Vec<BlockEdit>,
 }
 
 /// 服务端权威可变世界：`Arc` 共享给 net 线程（读写）与 ECS（刷盘/出生点）。
@@ -93,11 +96,39 @@ pub struct MutableWorld {
     seed: i64,
     base: crate::WorldGen,
     inner: RwLock<Inner>,
+    /// `None` = 旧稀疏档模式（`save_to_dir`）；`Some` = redb 生产模式。
+    /// `new()` 保持 `None`，旧测试/旧调用方行为逐字节不变。
+    store: Option<Arc<WorldStore>>,
 }
 
 impl MutableWorld {
     pub fn new(seed: i64) -> Self {
-        Self { seed, base: crate::WorldGen::new(seed), inner: RwLock::new(Inner::default()) }
+        Self {
+            seed,
+            base: crate::WorldGen::new(seed),
+            inner: RwLock::new(Inner::default()),
+            store: None,
+        }
+    }
+
+    /// redb 模式构造：打开时把 `blocks` 物化视图注入 override 热层
+    /// （与基底相同的条目自愈丢弃，保持稀疏），后续编辑暂存在内存等 flush。
+    pub fn with_store(seed: i64, store: Arc<WorldStore>) -> Result<Self, StoreError> {
+        let world = Self::new(seed);
+        let mut inner = world.lock_write();
+        for ((x, y, z), id) in store.blocks()? {
+            if (MIN_Y..=WORLD_TOP_Y).contains(&y) && id != world.base_value(x, y, z) {
+                inner.overrides.insert((x, y, z), id);
+            }
+        }
+        inner.dirty.clear();
+        drop(inner);
+        Ok(Self { store: Some(store), ..world })
+    }
+
+    /// 是否处于 redb 模式（生产接线/诊断用）。
+    pub fn has_store(&self) -> bool {
+        self.store.is_some()
     }
 
     pub fn seed(&self) -> i64 {
@@ -175,6 +206,20 @@ impl MutableWorld {
     /// 写方块：返回旧值；y 越界时 no-op（返回空气）。
     /// 与基底相同的值会删除 override 条目（保持稀疏）；所在 chunk 记 dirty。
     pub fn set(&self, x: i32, y: i32, z: i32, id: u16) -> u16 {
+        self.set_with_context(x, y, z, id, 0, 0)
+    }
+
+    /// 带 actor/tick 的写：redb 模式下同时把 old→new 记入待刷盘 journal。
+    /// 未标注来源的调用方（`set`/`set_if`）用 0；协议/权威判定逻辑不变。
+    pub fn set_with_context(
+        &self,
+        x: i32,
+        y: i32,
+        z: i32,
+        id: u16,
+        actor: u64,
+        tick: u64,
+    ) -> u16 {
         if !(MIN_Y..=WORLD_TOP_Y).contains(&y) {
             return AIR_BLOCK_ID;
         }
@@ -182,10 +227,15 @@ impl MutableWorld {
         let base = self.base_value(x, y, z);
         let mut inner = self.lock_write();
         let old = inner.overrides.get(&(x, y, z)).copied().unwrap_or(base);
+        let old_override = inner.overrides.get(&(x, y, z)).copied().unwrap_or(u16::MAX);
         if id == base {
             inner.overrides.remove(&(x, y, z));
         } else {
             inner.overrides.insert((x, y, z), id);
+        }
+        let new_override = if id == base { u16::MAX } else { id };
+        if self.store.is_some() && old_override != new_override {
+            inner.edits.push(BlockEdit { x, y, z, old: old_override, new: new_override, actor, tick });
         }
         inner.dirty.insert(chunk_of_block(x, z));
         old
@@ -195,6 +245,20 @@ impl MutableWorld {
     /// 已被其它连接改动则返回 `None` 且不落子。用于挖掘的 get+set 去重
     /// （两连接同时挖同一格只能有一个成功、只生成一份掉落物）。
     pub fn set_if(&self, x: i32, y: i32, z: i32, expected: u16, id: u16) -> Option<u16> {
+        self.set_if_with_context(x, y, z, expected, id, 0, 0)
+    }
+
+    /// 带 actor/tick 的 CAS 写（redb journal 记录用）。
+    pub fn set_if_with_context(
+        &self,
+        x: i32,
+        y: i32,
+        z: i32,
+        expected: u16,
+        id: u16,
+        actor: u64,
+        tick: u64,
+    ) -> Option<u16> {
         if !(MIN_Y..=WORLD_TOP_Y).contains(&y) {
             return None;
         }
@@ -204,13 +268,55 @@ impl MutableWorld {
         if old != expected {
             return None;
         }
+        let old_override = inner.overrides.get(&(x, y, z)).copied().unwrap_or(u16::MAX);
         if id == base {
             inner.overrides.remove(&(x, y, z));
         } else {
             inner.overrides.insert((x, y, z), id);
         }
+        let new_override = if id == base { u16::MAX } else { id };
+        if self.store.is_some() && old_override != new_override {
+            inner.edits.push(BlockEdit { x, y, z, old: old_override, new: new_override, actor, tick });
+        }
         inner.dirty.insert(chunk_of_block(x, z));
         Some(old)
+    }
+
+    /// 取出待刷盘的方块编辑（redb 模式）；不改变 dirty 集。
+    pub fn take_edits(&self) -> Vec<BlockEdit> {
+        std::mem::take(&mut self.lock_write().edits)
+    }
+
+    /// redb 模式刷盘：一个事务写 `blocks` + `journal(old→new, actor, tick)`。
+    /// 成功后清 dirty；失败时编辑按原顺序放回，等下次触发点重试。
+    pub fn flush_to_store(&self, tick: u64) -> Result<usize, StoreError> {
+        let Some(store) = &self.store else {
+            return Ok(0);
+        };
+        let edits = self.take_edits();
+        if edits.is_empty() {
+            return Ok(0);
+        }
+        // 未标注来源的编辑用本次 flush 的全局 tick 补齐（actor=0 = 系统刷盘）。
+        let stamped: Vec<BlockEdit> = edits
+            .into_iter()
+            .map(|mut e| {
+                if e.tick == 0 {
+                    e.tick = tick;
+                }
+                e
+            })
+            .collect();
+        match store.flush_blocks(&stamped) {
+            Ok(n) => {
+                self.clear_dirty();
+                Ok(n)
+            }
+            Err(e) => {
+                self.lock_write().edits.splice(0..0, stamped);
+                Err(e)
+            }
+        }
     }
 
     /// 基底单方块值（内部用：set 时判断是否可删条目；调用前已持写锁会死锁，
@@ -721,5 +827,36 @@ mod tests {
             let lz = z.rem_euclid(16) as usize;
             self.sections[section][local_y * 256 + lz * 16 + lx]
         }
+    }
+
+    /// redb 模式：挖 → 放 → 设回基底，一次 flush 的 journal 完整记录 BlockSet/BlockClear。
+    #[test]
+    fn redb_edits_record_dig_place_and_clear_in_one_transaction() {
+        use crate::store::{Op, WorldStore};
+        use std::sync::Arc;
+        let dir = std::env::temp_dir().join(format!("mc-p38-edit-{}-{}", std::process::id(), STONE_BLOCK_ID));
+        let _ = std::fs::remove_dir_all(&dir);
+        let store = Arc::new(WorldStore::open(&dir, 404).unwrap());
+        let world = MutableWorld::with_store(404, Arc::clone(&store)).unwrap();
+        assert!(world.has_store());
+        // y=100 的基底是空气：放石头 → 挖掉（设回空气 = 清 override）。
+        world.set_with_context(3, 100, 3, STONE_BLOCK_ID, 11, 55);
+        world.set_with_context(3, 100, 3, AIR_BLOCK_ID, 12, 56);
+        assert_eq!(world.flush_to_store(77).unwrap(), 2);
+        assert_eq!(world.get(3, 100, 3), AIR_BLOCK_ID);
+        assert_eq!(world.override_count(), 0);
+        let recs = store.replay().unwrap();
+        assert_eq!(recs.len(), 2);
+        assert_eq!(recs[0].op, Op::BlockSet);
+        assert_eq!(recs[0].old, u16::MAX);
+        assert_eq!(recs[0].new, STONE_BLOCK_ID);
+        assert_eq!((recs[0].actor, recs[0].tick), (11, 55));
+        assert_eq!(recs[1].op, Op::BlockClear);
+        assert_eq!(recs[1].old, STONE_BLOCK_ID);
+        assert_eq!(recs[1].new, u16::MAX);
+        assert_eq!((recs[1].actor, recs[1].tick), (12, 56));
+        assert!(store.blocks().unwrap().is_empty(), "materialized view agrees with replay");
+        assert_eq!(world.flush_to_store(78).unwrap(), 0, "no edits after successful flush");
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }
