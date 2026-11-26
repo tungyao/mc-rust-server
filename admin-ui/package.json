@@ -1,0 +1,20 @@
+{
+  "name": "mc-admin-ui",
+  "version": "1.0.0",
+  "private": true,
+  "description": "Fully offline single-file admin panel for mc-rust-server (Vue 3 + Naive UI)",
+  "type": "module",
+  "scripts": {
+    "dev": "vite",
+    "build": "vite build && node scripts/postbuild.mjs",
+    "check:offline": "node scripts/check-offline.mjs"
+  },
+  "dependencies": {
+    "naive-ui": "2.41.0",
+    "vue": "3.5.13"
+  },
+  "devDependencies": {
+    "vite": "5.4.21",
+    "vite-plugin-singlefile": "2.3.4"
+  }
+}

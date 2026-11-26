@@ -1,0 +1,25 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>MC Admin · Vue 3 + Naive UI (26.3/777)</title>
+<!-- 完全离线：Vue 3 / Naive UI 已在构建时内联，运行时不加载任何外部资源。 -->
+<script>
+  // 本地资源异常时给出可见提示，而不是白屏（不再需要外部加载失败降级）。
+  window.addEventListener('error', function (e) {
+    var app = document.getElementById('app');
+    if (app && !app.hasChildNodes()) {
+      var box = document.createElement('div');
+      box.className = 'boot-error';
+      box.textContent = '本地前端资源加载失败：' + String((e && e.message) || e);
+      app.replaceChildren(box);
+    }
+  });
+</script>
+</head>
+<body>
+<div id="app"></div>
+<script type="module" src="/src/main.js"></script>
+</body>
+</html>
