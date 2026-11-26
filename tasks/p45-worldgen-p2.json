@@ -1,13 +1,24 @@
 {
   "id": "p45-worldgen-p2",
   "title": "worldgen P2：侵蚀/河流/细洞穴/多biome/逐列光照（含协议helper）",
-  "status": "todo",
-  "owner": "",
+  "status": "done",
+  "owner": "subagent-worldgen-p2",
   "priority": "p1",
   "deps": [],
   "branch": "",
   "created": "2026-11-26T05:58:13+00:00",
-  "updated": "2026-11-26T05:58:13+00:00",
-  "detail": "",
-  "files": []
+  "updated": "2026-11-26T07:02:45+00:00",
+  "detail": "v2侵蚀/河流/细洞穴/矿脉deepslate/4x4x4多biome/逐列天空光;mc-protocol新增biome容器与非均匀light helper;v1逐字节冻结;未抓包需真机;本地估算v2 1060ms;471 passed;merge见main",
+  "files": [
+    "crates/mc-world/src/worldgen/{terrain",
+    "caves",
+    "biome",
+    "light",
+    "mod",
+    "encode",
+    "ores",
+    "tests}.rs",
+    "crates/mc-protocol/src/packets/play_chunk.rs",
+    "crates/mc-network/src/chunk_cache.rs"
+  ]
 }

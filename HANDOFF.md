@@ -14,7 +14,8 @@
 > 已完成地图生成器调研（见 §5.29，用户已定：v1 冻结 + v2 新 seed、允许改协议 helper、
 > 流动水 + 游泳、单 chunk 小遗迹）；`p41-all-recipes` 283 条配方与 `p43-player-visible`
 > 玩家实体互见均已合入（见 §5.30）；`p44-worldgen-p1` v1 冻结 + v2 低风险视觉已合入
-> （见 §5.29）；P2/P3 已排期；`p32-broadcast-chat` 暂缓；
+> （见 §5.29）；`p45-worldgen-p2` v2 地形/多 biome/洞穴/光照已合入（见 §5.29）；
+> P3 待派发；`p32-broadcast-chat` 暂缓；
 > 后台管理面板已用 Vue 3 + Naive UI 重写并**完全离线化**合入（`p34-admin-vue` / `53f1016`、
 > `p35-admin-offline` / `48e14bd`，见 §5.25）；当前无进行中的派发任务。
 
@@ -413,8 +414,8 @@ $natives = 'C:\Users\qwe\AppData\Local\Temp\mc263natives'
 
 ### 本地检查
 
-- `cargo test --workspace`：全部通过（2026-11-26 实跑 **456 passed / 0 failed**；
-  P18 当时 215，之后 P18.1–P44 又追加单测与 play_stream / play_actions / play_crops /
+- `cargo test --workspace`：全部通过（2026-11-26 实跑 **471 passed / 0 failed**；
+  P18 当时 215，之后 P18.1–P45 又追加单测与 play_stream / play_actions / play_crops /
   play_all_crops / timer_persist / play_survival / play_recipes / player_visibility /
   admin_e2e 集成测试）。
 - redb 生产核心真机进程冒烟（2026-11-26）：临时 `server.toml` 设 `world_storage="redb"`、
@@ -876,7 +877,24 @@ $natives = 'C:\Users\qwe\AppData\Local\Temp\mc263natives'
     多树种（oak/birch/spruce/dark_oak，复用 P37 真实 ID）、草花与水岸植被；
     拆 `worldgen/{ores,features}.rs`，`mutable` 白名单同步。高度场/biome 容器/光照/协议
     包体均零改动。新增 16 个测试（旧 440 个一字未改），合计见 §4。
-    **P2 / P3 已排期**（任务 `p45-worldgen-p2` / `p46-worldgen-p3`）。
+    **P2 已实现并合入（`p45-worldgen-p2`，仅 v2）**：`worldgen/{terrain,caves,biome,light}.rs`
+    - 地形：高频侵蚀（`ridge²` 山脊抬升 y>68）+ 河流下切至 `SEA_LEVEL-2`，出生半径 20 内
+      权重为 0（覆盖出生 chunk，半径 16 河道权重 0），默认 seed 出生 y=73/3×3 干燥保持 v1。
+    - 洞穴：4×4×4 格点（约 1000 次 3D noise/块）三线性插值到 2×2×2 子格 + 2D 噪声带隧道；
+      逐方块无 3D noise；8 格壳/stone-only/MIN_Y+9 下限不变。
+    - 矿脉/deepslate：8×8×8 粗格 hash 门控 + 矿脉高值区概率翻倍；`y<-16` 深板岩、
+      `y<=-62` 深板岩矿（真实 ID 查表）。
+    - 多 biome：每 section 一个 **64 项（4×4×4）biome 容器**，16 个水平子格按
+      温度/湿度/高度/河流场取 river/birch/snowy/meadow/taiga/deep_dark 等，出生圈锁 forest/plains。
+    - 逐列天空光：按列最高不透明块起点，树叶/水各 -2，仅非零 section 发 2048B nibble。
+    - `mc-protocol` 新增 `encode_biome_paletted_container`（BPE 0 单值 / 1–3 间接 / 7 direct）
+      与 `encode_nonuniform_sky_light_data` helper，线格式不变；布局按 minecraft.wiki 26.3
+      已验证口径 + 逐字节回归测试，**本环境无原版客户端、未抓包，需真机复验**。
+    - 隔离：v1 仍走原 `network_bytes()`/`light_bytes()` 逐字节不变，old golden FNV 与
+      456 个旧测试一字未改；合并后 471 passed。
+    - **性能风险**：本地 debug rayon 估算 441 块 v1 685ms / v2 **1060ms**（约 1.55×），
+      包体 54KB/块；真机红线为无压缩 ≤700ms，v2 是否达标待真机复测（v1 仍是默认，不受影响）。
+    **P3 已排期**（任务 `p46-worldgen-p3`：流动水+游泳/block light/单 chunk 小遗迹）。
 
 30. **P41 全配方 + P43 玩家实体互见（均已合入）**：
     - **P41 配方补齐**：`crafting.rs` 从 7 条扩到 **283 条**（原 7 条逐字节保留）；
@@ -942,6 +960,7 @@ crates/mc-world/src/
   worldgen/
     mod.rs                   WorldGen + GeneratorVersion(v1 冻结/v2 显式)、高度/出生保护/biome/洞穴/树、跨 chunk 扫描
     ores.rs / features.rs    P44 v2 矿种高度带 / 地表材质·多树种·草花水岸植被
+    terrain.rs / caves.rs / biome.rs / light.rs   P45 v2 侵蚀河流 / 细洞穴 / 4×4×4 多 biome / 逐列天空光
     noise.rs                 2D/3D 平滑 value noise + 确定性 hash
     encode.rs                GeneratedChunk（sections/heights/motion_heights/biome_id）+ network/heightmap/light 编码
     tests.rs                 水/沙岸/树/biome/洞穴/矿/高度图/编码/4 seed 出生点测试
