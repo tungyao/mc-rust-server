@@ -21,7 +21,7 @@ const dashboardTemplate = `
     <n-card size="small" title="在线玩家（2s 轮询）">
       <n-table :bordered="true" :single-line="false" size="small">
         <thead>
-          <tr><th>conn</th><th>用户名</th><th>地址</th><th>位置</th><th>在线(s)</th><th>操作</th></tr>
+          <tr><th>conn</th><th>用户名</th><th>地址</th><th>位置</th><th>在线(s)</th><th>模式</th><th>操作</th></tr>
         </thead>
         <tbody>
           <tr v-for="p in online" :key="p.conn_id">
@@ -30,9 +30,14 @@ const dashboardTemplate = `
             <td>{{ p.addr }}</td>
             <td>{{ fmtPos(p.pos) }}</td>
             <td>{{ p.online_secs }}</td>
+            <td>
+              <n-select :value="p.gamemode || 'survival'" :options="gamemodeOptions" size="tiny"
+                        style="width: 100px" :loading="modeBusy === p.conn_id"
+                        @update:value="v => setMode(p, v)" />
+            </td>
             <td><n-button size="tiny" type="error" secondary @click="kick(p)">踢人</n-button></td>
           </tr>
-          <tr v-if="!online.length"><td colspan="6" class="muted">当前无在线玩家</td></tr>
+          <tr v-if="!online.length"><td colspan="7" class="muted">当前无在线玩家</td></tr>
         </tbody>
       </n-table>
       <template #footer><span class="muted">在线 {{ online.length }} 人；下方“发放 / 查看背包”的玩家列表取自这里。</span></template>
@@ -86,6 +91,60 @@ const dashboardTemplate = `
         <div v-for="n in invEmptySlots" :key="'e' + n" class="item-cell empty">[{{ n }}] 空</div>
       </div>
       <template #footer><span class="muted">{{ invHint }}</span></template>
+    </n-card>
+
+    <n-card size="small" title="工具等级 / 精准采集 / 时运（P47）">
+      <n-alert type="info" :show-icon="false">
+        挖掘按手持镐档位判定（木/石/铜/铁/钻石/下界合金），档位不足仍破坏但零掉落；
+        时运给矿石确定性额外掉落，精准采集掉方块自身物品（无对应物品则回退原掉落）。
+        MVP：无耐久/挖掘速度；附魔为连接级服务端开关，不解析 Slot data component。
+      </n-alert>
+      <div class="row">
+        <span class="label">档位</span>
+        <n-select v-model:value="toolTier" :options="tierOptions" size="small" style="width: 130px" />
+        <span class="label">镐子</span>
+        <n-select v-model:value="selectedTool" :options="toolOptions" filterable size="small" style="width: 240px" />
+        <span class="label">玩家</span>
+        <n-select v-model:value="toolUser" :options="userOptions" filterable clearable
+                  placeholder="选择在线玩家" size="small" style="width: 200px" />
+        <span class="label">附魔</span>
+        <n-select v-model:value="toolEnchant" :options="enchantOptions" size="small" style="width: 130px" />
+        <n-button type="primary" size="small" :disabled="!toolUser || !selectedTool" @click="giveTool">发放</n-button>
+        <n-button size="small" :disabled="!toolUser" @click="applyToolEnchant">设置附魔</n-button>
+        <span class="muted">{{ toolMsg }}</span>
+      </div>
+      <n-table :bordered="true" :single-line="false" size="small">
+        <thead><tr><th>方块</th><th>block_id</th><th>所需档位</th><th>掉落物品</th><th>时运</th></tr></thead>
+        <tbody>
+          <tr v-for="b in toolBlocks" :key="b.block_id">
+            <td>{{ b.block }}</td><td>{{ b.block_id }}</td><td>{{ b.tier_name }}</td>
+            <td>{{ b.item }} #{{ b.item_id }}</td><td>{{ b.fortune ? '是' : '否' }}</td>
+          </tr>
+        </tbody>
+      </n-table>
+    </n-card>
+
+    <n-card size="small" title="配方浏览（P47，2×2 / 3×3 共用 283 条）">
+      <div class="row">
+        <span class="label">分类</span>
+        <n-select v-model:value="recipeCat" :options="recipeCatOptions" size="small" style="width: 160px" />
+        <span class="label">搜索</span>
+        <n-input v-model:value="recipeQuery" placeholder="配方名/物品名/id" clearable size="small" style="width: 240px" />
+        <span class="muted">{{ recipeHint }}</span>
+      </div>
+      <div class="item-grid">
+        <div v-for="r in visibleRecipes" :key="r.name" class="item-cell" @click="selectedRecipe = r.name"
+             :class="{ selected: r.name === selectedRecipe }">
+          <div>{{ r.result.name }} ×{{ r.result.count }}</div>
+          <small>{{ r.name }} · {{ r.category }}</small>
+        </div>
+      </div>
+      <template #footer><span class="muted">{{ selectedRecipeDetail }}</span></template>
+    </n-card>
+
+    <n-card size="small" title="工作台会话（P47，仅内存）">
+      <pre class="kv">{{ craft9Text }}</pre>
+      <template #footer><span class="muted">右键放置 crafting_table 后登记；离开/断线即丢，无 block entity 存档。</span></template>
     </n-card>
 
     <n-card size="small" title="广播">
@@ -161,8 +220,136 @@ export const Dashboard = {
       return '非空 ' + total + ' 格' + (filteringInv.value ? '（显示 ' + invSlots.value.length + '）' : '');
     });
 
+    // P47：工具等级 / 附魔 / 配方浏览 / 工作台会话 / 游戏模式。
+    const gamemodeOptions = [
+      { label: '生存', value: 'survival' },
+      { label: '创造', value: 'creative' },
+    ];
+    const enchantOptions = [
+      { label: '无', value: 'none' },
+      { label: '时运', value: 'fortune' },
+      { label: '精准采集', value: 'silk_touch' },
+    ];
+    const modeBusy = ref(null);
+    const toolCatalog = ref(null);
+    const toolTier = ref(null);
+    const selectedTool = ref('minecraft:wooden_pickaxe');
+    const toolUser = ref(null);
+    const toolEnchant = ref('none');
+    const toolMsg = ref('');
+    const recipes = ref([]);
+    const recipeCat = ref('');
+    const recipeQuery = ref('');
+    const selectedRecipe = ref('');
+    const craft9 = ref(null);
+
+    const tierOptions = computed(() => (toolCatalog.value?.tiers || []).map(t =>
+      ({ label: `${t.tier} · ${t.name}`, value: t.tier })));
+    const toolOptions = computed(() => (toolCatalog.value?.tools || [])
+      .filter(t => toolTier.value === null || t.tier === toolTier.value)
+      .map(t => ({ label: `${t.name} (tier ${t.tier}, #${t.item_id})`, value: t.item })));
+    const toolBlocks = computed(() => toolCatalog.value?.blocks || []);
+    const recipeCatOptions = computed(() => {
+      const cats = [...new Set(recipes.value.map(r => r.category))].sort();
+      return [{ label: '全部', value: '' }, ...cats.map(c => ({ label: c, value: c }))];
+    });
+    const filteredRecipes = computed(() => recipes.value.filter(r => {
+      if (recipeCat.value && r.category !== recipeCat.value) return false;
+      const q = (recipeQuery.value || '').trim().toLowerCase();
+      if (!q) return true;
+      return r.name.toLowerCase().includes(q)
+        || (r.result.name || '').toLowerCase().includes(q)
+        || String(r.result.item_id) === q
+        || (r.needs || []).some(n => (n.name || '').toLowerCase().includes(q));
+    }));
+    const visibleRecipes = computed(() => filteredRecipes.value.slice(0, 120));
+    const recipeHint = computed(() => {
+      const n = filteredRecipes.value.length;
+      return `共 ${n} 条` + (n > 120 ? '（只显示前 120）' : '');
+    });
+    const selectedRecipeDetail = computed(() => {
+      const r = recipes.value.find(x => x.name === selectedRecipe.value);
+      if (!r) return '点击卡片查看输入/输出明细';
+      const inputs = (r.needs || []).map(n => `${n.name} ×${n.count} (#${n.item_id})`).join(' + ');
+      return `${r.name}：${inputs} → ${r.result.name} ×${r.result.count} (#${r.result.item_id})；槽 2×2/3×3`;
+    });
+    const craft9Text = computed(() => {
+      const s = craft9.value;
+      if (!s || !s.ok) return 'loading…';
+      return JSON.stringify(s.sessions || [], null, 2);
+    });
+
     function fmtPos(pos) {
       return (pos || []).map(v => Number(v).toFixed(1)).join(',');
+    }
+
+    async function setMode(p, mode) {
+      modeBusy.value = p.conn_id;
+      try {
+        const r = await jpost('/api/gamemode', { conn_id: p.conn_id, gamemode: mode });
+        if (r.status !== 200 || !r.body.ok) message.error('切换失败：' + JSON.stringify(r.body));
+        else message.success(`${p.username} → ${mode}`);
+      } catch (e) {
+        message.error('gamemode failed: ' + e);
+      } finally {
+        modeBusy.value = null;
+        await refreshOnline();
+      }
+    }
+    async function loadTools() {
+      try {
+        toolCatalog.value = await jget('/api/tools');
+        if (toolCatalog.value?.ok && !selectedTool.value) {
+          selectedTool.value = toolCatalog.value.tools[0]?.item || null;
+        }
+      } catch (e) {
+        toolMsg.value = 'tools load failed: ' + e;
+      }
+    }
+    async function loadRecipes() {
+      try {
+        recipes.value = (await jget('/api/recipes')).recipes || [];
+      } catch (e) {
+        recipeQuery.value = 'recipes load failed: ' + e;
+      }
+    }
+    async function loadCraft9() {
+      try {
+        craft9.value = await jget('/api/craft9');
+      } catch (e) { /* 下次轮询重试 */ }
+    }
+    async function giveTool() {
+      if (!toolUser.value || !selectedTool.value) {
+        message.warning('请选择玩家与镐子');
+        return;
+      }
+      try {
+        const r = await jpost('/api/give', { username: toolUser.value, item: selectedTool.value, count: 1 });
+        toolMsg.value = 'HTTP ' + r.status + ' ' + JSON.stringify(r.body);
+        if (r.status === 200 && r.body.ok) message.success('已发放 ' + selectedTool.value);
+        else message.error('发放失败：' + JSON.stringify(r.body));
+      } catch (e) {
+        toolMsg.value = 'give tool failed: ' + e;
+        message.error(toolMsg.value);
+      }
+    }
+    async function applyToolEnchant() {
+      if (!toolUser.value) {
+        message.warning('请选择在线玩家');
+        return;
+      }
+      try {
+        const r = await jpost('/api/tool-enchant', {
+          username: toolUser.value,
+          enchant: toolEnchant.value,
+        });
+        toolMsg.value = 'HTTP ' + r.status + ' ' + JSON.stringify(r.body);
+        if (r.status === 200 && r.body.ok) message.success('附魔已设置');
+        else message.error('设置失败：' + JSON.stringify(r.body));
+      } catch (e) {
+        toolMsg.value = 'tool-enchant failed: ' + e;
+        message.error(toolMsg.value);
+      }
     }
 
     async function refreshWorld() {
@@ -244,9 +431,13 @@ export const Dashboard = {
 
     const timers = [];
     onMounted(async () => {
-      await Promise.all([loadItems(), refreshWorld(), refreshOnline()]);
+      await Promise.all([
+        loadItems(), refreshWorld(), refreshOnline(),
+        loadTools(), loadRecipes(), loadCraft9(),
+      ]);
       timers.push(setInterval(refreshWorld, 5000));
       timers.push(setInterval(refreshOnline, 2000));
+      timers.push(setInterval(loadCraft9, 2000));
     });
     onBeforeUnmount(() => timers.forEach(clearInterval));
 
@@ -255,6 +446,11 @@ export const Dashboard = {
       userOptions, giveUser, giveCount, giveCat, giveQuery, categoryOptions,
       selectedItem, filteredItems, visibleItems, giveHint, giveMsg, giveItem,
       invUser, invCat, invQuery, invSlots, invEmptySlots, invHint, showInv,
+      gamemodeOptions, modeBusy, setMode,
+      toolTier, tierOptions, selectedTool, toolOptions, toolUser, toolEnchant,
+      enchantOptions, toolMsg, toolBlocks, giveTool, applyToolEnchant,
+      recipeCat, recipeCatOptions, recipeQuery, recipes, filteredRecipes,
+      visibleRecipes, recipeHint, selectedRecipe, selectedRecipeDetail, craft9Text,
     };
   },
 };

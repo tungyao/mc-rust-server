@@ -133,7 +133,11 @@ fn main() {
         .with_hub(Arc::clone(&hub))
         .with_fluid(Arc::clone(&fluid))
         // P43：生产入口开启玩家实体互见（旧入口/既有 e2e 仍走默认关闭）。
-        .with_player_visibility(true);
+        .with_player_visibility(true)
+        // P47：生产入口开启挖掘进度 0x05 广播（旧 e2e 默认关闭，包流不变）。
+        .with_destroy_stage(true)
+        // P47：生产入口开启工具等级/时运/精准采集（旧 e2e 默认关闭，掉落口径不变）。
+        .with_tool_rules(true);
     info!(
         "config view_distance={} effective_view_radius={} seed={} compression_threshold={}",
         cfg.view_distance, cfg.effective_view_distance(), cfg.seed, cfg.compression_threshold

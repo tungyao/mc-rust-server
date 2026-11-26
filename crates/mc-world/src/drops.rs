@@ -51,6 +51,11 @@ pub const ITEM_WHEAT: i32 = crate::registry_id(mc_registry::ITEMS, "minecraft:wh
 /// P27 骨粉：`data/777/items.json` 的 `bone_meal.id=1215`（手持对小麦/树苗右键催熟，
 /// 获得途径见 HANDOFF §5：无合成，靠管理面板 `/api/give` 领取）。
 pub const ITEM_BONE_MEAL: i32 = crate::registry_id(mc_registry::ITEMS, "minecraft:bone_meal") as i32;
+/// P47 工作台：物品/方块 ID 均来自生成表，`crafting_table` 可放置并开 3×3 会话。
+pub const ITEM_CRAFTING_TABLE: i32 =
+    crate::registry_id(mc_registry::ITEMS, "minecraft:crafting_table") as i32;
+pub const CRAFTING_TABLE_BLOCK_ID: u16 =
+    crate::registry_id(mc_registry::BLOCKS, "minecraft:crafting_table") as u16;
 /// P27 苹果：`data/777/items.json` 的 `apple.id=1007`（仅树叶 decay 小概率掉落；
 /// 无饥饿/进食系统，吃苹果不做，见 HANDOFF §5）。
 pub const ITEM_APPLE: i32 = crate::registry_id(mc_registry::ITEMS, "minecraft:apple") as i32;
@@ -222,6 +227,8 @@ pub fn block_for_item(item_id: i32) -> Option<u16> {
         ITEM_DIRT => Some(DIRT_BLOCK_ID),
         ITEM_SAND => Some(SAND_BLOCK_ID),
         ITEM_OAK_LOG => Some(OAK_LOG_BLOCK_ID),
+        // P47：放置工作台 → 网络层为连接开 3×3 合成会话。
+        ITEM_CRAFTING_TABLE => Some(CRAFTING_TABLE_BLOCK_ID),
         // 草方块没有对应物品（草掉泥土）；原木树叶等其余暂不支持；
         // 小麦/煤/铁/木棍在原版中不可放置，保持 None（只 ack）。
         _ => None,

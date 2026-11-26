@@ -42,6 +42,10 @@ pub struct NetConfig {
     pub fluid: Option<Arc<FluidState>>,
     /// P43 玩家实体互见开关；默认 false 保持既有 e2e 包流，生产入口显式打开。
     pub player_visibility: bool,
+    /// P47 挖掘动画 0x05 广播开关；默认 false 保持既有 e2e 包流逐字节不变，生产入口显式打开。
+    pub destroy_stage: bool,
+    /// P47 工具档位/时运/精准采集开关；默认 false 保持旧掉落口径，生产入口显式打开。
+    pub tool_rules: bool,
 }
 
 impl Default for NetConfig {
@@ -60,6 +64,8 @@ impl Default for NetConfig {
             hub: None,
             fluid: None,
             player_visibility: false,
+            destroy_stage: false,
+            tool_rules: false,
         }
     }
 }
@@ -82,6 +88,8 @@ impl NetConfig {
             hub: None,
             fluid: None,
             player_visibility: false,
+            destroy_stage: false,
+            tool_rules: false,
         }
     }
 
@@ -148,6 +156,18 @@ impl NetConfig {
     /// P43：开启玩家实体互见（需同时 `.with_hub(...)`）。
     pub fn with_player_visibility(mut self, enabled: bool) -> Self {
         self.player_visibility = enabled;
+        self
+    }
+
+    /// P47：开启挖掘进度广播（需同时 `.with_hub(...)`）；默认关闭保持旧包流。
+    pub fn with_destroy_stage(mut self, enabled: bool) -> Self {
+        self.destroy_stage = enabled;
+        self
+    }
+
+    /// P47：开启工具等级/时运/精准采集判定；默认关闭保持旧掉落测试逐字节不变。
+    pub fn with_tool_rules(mut self, enabled: bool) -> Self {
+        self.tool_rules = enabled;
         self
     }
 }

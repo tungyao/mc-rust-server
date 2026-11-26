@@ -421,3 +421,90 @@ async fn admin_items_catalog_give_compat_and_inventory_detail() {
     env.shutdown.store(true, Ordering::SeqCst);
     let _ = std::fs::remove_dir_all(env.world_dir.parent().unwrap());
 }
+
+/// P47 后台联动 e2e：工具表/配方表可读、模式与附魔可切换并立即反映到在线表。
+#[tokio::test]
+async fn admin_tools_recipes_gamemode_and_enchant_flow() {
+    let env = boot().await;
+    let mut s = join(env.game, "ModePlayer").await;
+    let mut online = serde_json::Value::Null;
+    for _ in 0..50 {
+        let (st, b) = http(env.admin, "GET", "/api/online", "").await;
+        assert_eq!(st, 200);
+        online = j(&b);
+        if online["count"] == 1 {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
+    assert_eq!(online["online"][0]["gamemode"], "survival");
+    assert_eq!(online["online"][0]["tool_enchant"], "none");
+
+    // 新增只读端点：工具档位/可挖表 + 283 条配方 + 会话快照。
+    let (st, b) = http(env.admin, "GET", "/api/tools", "").await;
+    assert_eq!(st, 200);
+    let tools = j(&b);
+    assert_eq!(tools["tiers"].as_array().unwrap().len(), 7);
+    assert_eq!(tools["tools"].as_array().unwrap().len(), 6);
+    assert!(tools["blocks"].as_array().unwrap().len() >= 11);
+    let (st, b) = http(env.admin, "GET", "/api/recipes", "").await;
+    assert_eq!(st, 200);
+    assert_eq!(j(&b)["count"], 283);
+    let (st, b) = http(env.admin, "GET", "/api/craft9", "").await;
+    assert_eq!(st, 200);
+    assert_eq!(j(&b)["sessions"].as_array().unwrap().len(), 0);
+
+    // 模式切换：在线表旧字段保留，新增 gamemode 立刻变成 creative。
+    let (st, b) = http(
+        env.admin,
+        "POST",
+        "/api/gamemode",
+        r#"{"username":"ModePlayer","gamemode":"creative"}"#,
+    )
+    .await;
+    assert_eq!(st, 200);
+    assert_eq!(j(&b)["gamemode"], "creative");
+    let (_, b) = http(env.admin, "GET", "/api/online", "").await;
+    let online = j(&b);
+    assert_eq!(online["online"][0]["username"], "ModePlayer");
+    assert_eq!(online["online"][0]["gamemode"], "creative");
+    assert!(online["online"][0]["pos"].is_array(), "old fields must remain");
+
+    // 附魔开关：响应和在线表同步；再用 /api/give 发放镐子（旧端点不变）。
+    let (st, b) = http(
+        env.admin,
+        "POST",
+        "/api/tool-enchant",
+        r#"{"username":"ModePlayer","enchant":"fortune"}"#,
+    )
+    .await;
+    assert_eq!(st, 200);
+    assert_eq!(j(&b)["enchant"], "fortune");
+    let (_, b) = http(env.admin, "GET", "/api/online", "").await;
+    assert_eq!(j(&b)["online"][0]["tool_enchant"], "fortune");
+    let pickaxe = mc_registry::item_id("minecraft:wooden_pickaxe").unwrap() as i64;
+    let (st, _) = http(
+        env.admin,
+        "POST",
+        "/api/give",
+        &format!(r#"{{"username":"ModePlayer","item_id":{pickaxe},"count":1}}"#),
+    )
+    .await;
+    assert_eq!(st, 200, "existing give endpoint must remain usable");
+    let mut synced = false;
+    for _ in 0..40 {
+        let (id, payload) = read_frame_timeout(&mut s, Duration::from_secs(5)).await.unwrap();
+        if id == packets::PLAY_SET_CONTAINER_CONTENT_S2C_ID {
+            let (c, _) = packets::SetContainerContent::decode_body(&payload).unwrap();
+            if c.slots.iter().any(|sl| sl.item_id as i64 == pickaxe && sl.count == 1) {
+                synced = true;
+                break;
+            }
+        }
+    }
+    assert!(synced, "given pickaxe must reach the client immediately");
+
+    env.drops.stop_global_tick();
+    env.shutdown.store(true, Ordering::SeqCst);
+    let _ = std::fs::remove_dir_all(env.world_dir.parent().unwrap());
+}

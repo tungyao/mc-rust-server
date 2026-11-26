@@ -46,6 +46,16 @@ pub const DEFAULT_HUNGER_TICKS: u64 = 400;
 /// P40 饥饿扣血节拍：生产 200 ticks = 10s 扣 1 点；测试可经 `set_starvation_ticks` 调小。
 pub const DEFAULT_STARVATION_TICKS: u64 = 200;
 
+/// P47 工作台会话：右键放置 `crafting_table` 后按连接登记，槽 0 结果 + 1..=9 合成格。
+/// **MVP**：只存内存会话（不写存档），断线即丢；背包本体仍由 `PlayerInventory` 持久化。
+#[derive(Debug, Clone)]
+pub struct Craft9Session {
+    pub x: i32,
+    pub y: i32,
+    pub z: i32,
+    pub grid: [Option<(i32, i32)>; mc_world::crafting::GRID9_SIZE],
+}
+
 /// P22/P33 作物条目：种下时的全局 tick + 上次已广播的 age + 作物规格。
 /// 生长只由全服唯一 ticker 推进（P18.1 R1：连接侧绝不 tick），阶段变更经
 /// `MutableWorld::set` 落子并走 hub 广播 fan-out；挖掉后由挖掘路径显式摘除。
@@ -132,6 +142,12 @@ pub struct DropState {
     restored_timers: Mutex<Vec<TimerRecord>>,
     /// conn_id → 用户名（redb 的 players 表键；load/unload 时维护）。
     player_tags: Mutex<HashMap<u64, String>>,
+    /// P47 工具附魔开关（时运/精准采集）：服务端权威的连接态，默认无附魔；
+    /// 不解析 Slot data component（需注册表驱动解码，猜字节会错位 TCP 流），
+    /// 由管理面板 `/api/tool-enchant` 设置，挖掘判定经 `drops_for_block_with_tool` 读取。
+    tool_enchants: Mutex<HashMap<u64, mc_world::tools::ToolEnchant>>,
+    /// P47 工作台 3×3 会话（仅当前连接/进程内；无 block entity 存档 MVP）。
+    craft9: Mutex<HashMap<u64, Craft9Session>>,
 }
 
 impl DropState {
@@ -180,6 +196,8 @@ impl DropState {
             store,
             restored_timers: Mutex::new(Vec::new()),
             player_tags: Mutex::new(HashMap::new()),
+            tool_enchants: Mutex::new(HashMap::new()),
+            craft9: Mutex::new(HashMap::new()),
         };
         if let Some(store) = &me.store {
             match store.timers() {
@@ -1254,6 +1272,64 @@ impl DropState {
     /// 本连接的用户名标签（redb/legacy 存档键；P40 进食后刷盘用）。
     pub fn player_tag(&self, conn_id: u64) -> Option<String> {
         self.lock_tags().get(&conn_id).cloned()
+    }
+
+    /// P47：本连接当前工具附魔（默认无；只查内存，不碰 Socket/磁盘）。
+    pub fn tool_enchant(&self, conn_id: u64) -> mc_world::tools::ToolEnchant {
+        self.tool_enchants
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
+            .get(&conn_id)
+            .copied()
+            .unwrap_or_default()
+    }
+
+    /// P47：管理面板设置本连接的工具附魔开关（仅当前会话，跨重启回默认）。
+    pub fn set_tool_enchant(&self, conn_id: u64, enchant: mc_world::tools::ToolEnchant) {
+        self.tool_enchants
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
+            .insert(conn_id, enchant);
+    }
+
+    /// P47：放置工作台后开一个 3×3 会话（同格重复开保留已放原料；跨格重开清空）。
+    pub fn open_craft9(&self, conn_id: u64, x: i32, y: i32, z: i32) {
+        let mut sessions = self.craft9.lock().unwrap_or_else(|p| p.into_inner());
+        let same = sessions.get(&conn_id).map(|s| (s.x, s.y, s.z) == (x, y, z)).unwrap_or(false);
+        if !same {
+            sessions.insert(
+                conn_id,
+                Craft9Session { x, y, z, grid: [None; mc_world::crafting::GRID9_SIZE] },
+            );
+        }
+    }
+
+    /// P47：离开/关闭会话（背包原样保留，光标由 `stow_cursor` 在断线时收回）。
+    pub fn close_craft9(&self, conn_id: u64) {
+        self.craft9.lock().unwrap_or_else(|p| p.into_inner()).remove(&conn_id);
+    }
+
+    /// P47：会话快照（后台/测试可见）。
+    pub fn craft9_session(&self, conn_id: u64) -> Option<Craft9Session> {
+        self.craft9.lock().unwrap_or_else(|p| p.into_inner()).get(&conn_id).cloned()
+    }
+
+    /// P47：在会话锁内执行闭包（调用方负责背包锁顺序：先 craft9、再 inventory，绝不反序）。
+    pub fn with_craft9<R>(
+        &self,
+        conn_id: u64,
+        f: impl FnOnce(&mut Craft9Session) -> R,
+    ) -> Option<R> {
+        self.craft9
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
+            .get_mut(&conn_id)
+            .map(f)
+    }
+
+    /// P47：全部工作台会话（后台诊断）。
+    pub fn craft9_sessions(&self) -> Vec<Craft9Session> {
+        self.craft9.lock().unwrap_or_else(|p| p.into_inner()).values().cloned().collect()
     }
 
     /// 对背包加独占锁执行闭包（调用方负责发包/刷盘）。

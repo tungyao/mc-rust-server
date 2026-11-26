@@ -12,6 +12,7 @@ pub mod store; // P36：redb 自有世界存储原型（不接入生产路径，
 pub mod worldgen;
 pub mod items;
 pub mod inventory;
+pub mod tools;
 pub mod xp;
 
 pub use crops::{

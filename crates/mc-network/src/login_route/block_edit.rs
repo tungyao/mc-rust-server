@@ -76,6 +76,32 @@ pub fn decide_dig(
     radius: i32,
     act: &packets::PlayerAction,
 ) -> Option<BlockEditOutcome> {
+    // 旧入口逐字节保持旧行为：不启用工具规则，徒手 + 无附魔。
+    decide_dig_with_tool(
+        world,
+        eye,
+        center,
+        radius,
+        act,
+        None,
+        mc_world::tools::ToolEnchant::None,
+        false,
+    )
+}
+
+/// P47：带手持物品与附魔开关的挖掘判定。档位不够仍破坏方块但零掉落（与原版一致），
+/// 时运/精准采集由 `mc_world::tools::drops_for_block_with_tool` 统一判定；
+/// 不引入耐久/挖掘速度（无计时模型，见 HANDOFF）。
+pub fn decide_dig_with_tool(
+    world: Option<&MutableWorld>,
+    eye: (f64, f64, f64),
+    center: mc_core::ChunkPos,
+    radius: i32,
+    act: &packets::PlayerAction,
+    held_item: Option<i32>,
+    enchant: mc_world::tools::ToolEnchant,
+    rules_enabled: bool,
+) -> Option<BlockEditOutcome> {
     let world = world?;
     match act.status {
         packets::PLAYER_ACTION_START_DIG | packets::PLAYER_ACTION_FINISH_DIG => {
@@ -111,7 +137,13 @@ pub fn decide_dig(
             // 只回现状（不生成第二份掉落），避免 N 连接并发挖一格刷出 N 份物品。
             match world.set_if(x, y, z, cur, mc_world::AIR_BLOCK_ID) {
                 Some(old) => {
-                    let drops = mc_world::drops_for_block(old, x, y, z, world.seed());
+                    let drops = if rules_enabled {
+                        mc_world::tools::drops_for_block_with_tool(
+                            old, x, y, z, world.seed(), held_item, enchant,
+                        )
+                    } else {
+                        mc_world::drops_for_block(old, x, y, z, world.seed())
+                    };
                     Some(BlockEditOutcome {
                         sequence: act.sequence,
                         changes: vec![BlockChange {

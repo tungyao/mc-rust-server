@@ -248,6 +248,48 @@ impl BlockUpdate {
     }
 }
 
+// ---------------------------------------------------------------------------
+// P47 S2C Block Destruction（原 wiki 名 Set Block Destroy Stage）0x05：
+// 包 ID 查 `data/777/packets.json` 的 `clientbound.play.block_destruction`=5；
+// 包体按 wiki 26.3 已验证口径：Entity ID VarInt + BlockPos(packed i64 BE，
+// 与 block_update/player_action 同一个 helper) + Destroy Stage u8（0..=9 进度，
+// 255 取消破坏动画）。不猜字节、不复用 Ack 布局。
+// ---------------------------------------------------------------------------
+
+/// S2C Block Destruction 包 ID（777 CB `0x05`）。
+pub const PLAY_BLOCK_DESTRUCTION_S2C_ID: i32 =
+    super::packet_id("clientbound.play", "block_destruction");
+/// 破坏进度取消（客户端把 stage=255 解释为清除进度）。
+pub const DESTROY_STAGE_CANCEL: u8 = 255;
+/// 最大破坏进度（0..=9，共 10 段）。
+pub const DESTROY_STAGE_MAX: u8 = 9;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct BlockDestruction {
+    pub entity_id: i32,
+    pub x: i32,
+    pub y: i32,
+    pub z: i32,
+    pub stage: u8,
+}
+
+impl BlockDestruction {
+    pub fn encode_body(&self, out: &mut Vec<u8>) {
+        write_varint(self.entity_id, out);
+        write_block_pos(self.x, self.y, self.z, out);
+        out.push(self.stage);
+    }
+
+    pub fn decode_body(buf: &[u8]) -> Result<(Self, usize), ProtocolError> {
+        let (entity_id, n) = read_varint(buf)?;
+        let ((x, y, z), m) = read_block_pos(&buf[n..])?;
+        if buf.len() < n + m + 1 {
+            return Err(ProtocolError::UnexpectedEof);
+        }
+        Ok((Self { entity_id, x, y, z, stage: buf[n + m] }, n + m + 1))
+    }
+}
+
 /// Block Update 打成完整线包。
 pub fn encode_block_update_packet(v: &BlockUpdate, out: &mut Vec<u8>) {
     let mut body = Vec::new();
@@ -376,6 +418,17 @@ mod tests {
     fn dig_status_matches_jar_enum_order() {
         // 26.3 jar `ServerboundPlayerActionPacket$Action` 声明顺序：
         // START=0, CHANGE_DESTROY_DIRECTION=1, ABORT=2, STOP=3（`readEnum` 按 ordinal 编解码）。
+        assert_eq!(PLAY_BLOCK_DESTRUCTION_S2C_ID, 5);
+        assert_eq!(mc_registry::packet_id_in("clientbound.play", "block_destruction"), Some(5));
+        let p = BlockDestruction { entity_id: 1_000_000_000, x: 369, y: 72, z: 381, stage: 7 };
+        let mut body = Vec::new();
+        p.encode_body(&mut body);
+        assert_eq!(body.len(), 5 + 8 + 1, "VarInt entity id + packed i64 pos + u8 stage");
+        assert_eq!(BlockDestruction::decode_body(&body).unwrap().0, p);
+        let cancel = BlockDestruction { stage: DESTROY_STAGE_CANCEL, ..p };
+        let mut body = Vec::new();
+        cancel.encode_body(&mut body);
+        assert_eq!(BlockDestruction::decode_body(&body).unwrap().0.stage, 255);
         assert_eq!(PLAYER_ACTION_START_DIG, 0);
         assert_eq!(PLAYER_ACTION_CHANGE_DIRECTION, 1);
         assert_eq!(PLAYER_ACTION_CANCEL_DIG, 2);
