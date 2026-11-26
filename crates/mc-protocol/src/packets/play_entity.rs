@@ -46,6 +46,8 @@ pub const PLAY_SET_CONTAINER_SLOT_S2C_ID: i32 = super::packet_id("clientbound.pl
 /// S2C Set Held Slot：`set_held_slot`（clientbound.play=107=0x6B，生成表断言锁定）——
 /// 服务端→客户端同步选中快捷栏（VarInt 0..=8）；Join 时必发一次，对齐客户端默认选 0。
 pub const PLAY_SET_HELD_SLOT_S2C_ID: i32 = super::packet_id("clientbound.play", "set_held_slot");
+/// S2C Set Experience：`set_experience`（clientbound.play 105 = 0x69，777 生成表查得）。
+pub const PLAY_SET_EXPERIENCE_S2C_ID: i32 = super::packet_id("clientbound.play", "set_experience");
 
 /// S2C Set Held Slot 包体：VarInt 选中槽 0..=8（越界由调用方保证不发送）。
 pub fn encode_set_held_slot_s2c(slot: u8) -> Vec<u8> {
@@ -57,6 +59,10 @@ pub fn encode_set_held_slot_s2c(slot: u8) -> Vec<u8> {
 /// `minecraft:item` 在 EntityType 注册表中的位置，编译期从 `mc-registry` 由
 /// data/777/entities.json 生成的 ENTITIES 表派生（26.3 实测值 72）。
 pub const ITEM_ENTITY_TYPE_ID: i32 = super::entity_id("minecraft:item");
+
+/// P31 `minecraft:experience_orb` 在 EntityType 注册表中的位置，编译期从 `mc-registry`
+/// 由 data/777/entities.json 生成的 ENTITIES 表派生（26.3 实测值 50）。
+pub const EXPERIENCE_ORB_ENTITY_TYPE_ID: i32 = super::entity_id("minecraft:experience_orb");
 
 /// 玩家背包窗口 ID（window 0）。
 pub const PLAYER_INVENTORY_WINDOW_ID: i32 = 0;
@@ -298,6 +304,80 @@ pub fn encode_spawn_item_packet(v: &SpawnItemEntity, out: &mut Vec<u8>) {
 }
 
 // ---------------------------------------------------------------------------
+// P31 经验球生成：复用 add_entity 包体（wiki §Spawn Entity 对全部实体通用），
+// 只把 type 换成 50（minecraft:experience_orb），data 仍为 0。
+// data/777/packets.json 没有 spawn_experience_orb 的 ID，故不猜新包，保守复用已验证包。
+// ---------------------------------------------------------------------------
+
+/// 经验球生成（S2C 0x01，`minecraft:experience_orb`，data=0）。
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct SpawnExperienceOrb {
+    pub entity_id: i32,
+    pub uuid: u128,
+    pub x: f64,
+    pub y: f64,
+    pub z: f64,
+    pub vel: LpVec3,
+    pub pitch: u8,
+    pub yaw: u8,
+    pub head_yaw: u8,
+}
+
+impl SpawnExperienceOrb {
+    pub fn encode_body(&self, out: &mut Vec<u8>) {
+        write_varint(self.entity_id, out);
+        write_uuid(self.uuid, out);
+        write_varint(EXPERIENCE_ORB_ENTITY_TYPE_ID, out);
+        write_f64_be(self.x, out);
+        write_f64_be(self.y, out);
+        write_f64_be(self.z, out);
+        self.vel.encode_body(out);
+        out.push(self.pitch);
+        out.push(self.yaw);
+        out.push(self.head_yaw);
+        write_varint(0, out);
+    }
+
+    pub fn decode_body(buf: &[u8]) -> Result<(Self, usize), ProtocolError> {
+        let mut off = 0;
+        let (entity_id, n) = read_varint(&buf[off..])?;
+        off += n;
+        let (uuid, n) = read_uuid(&buf[off..])?;
+        off += n;
+        let (typ, n) = read_varint(&buf[off..])?;
+        off += n;
+        if typ != EXPERIENCE_ORB_ENTITY_TYPE_ID {
+            return Err(ProtocolError::UnexpectedEof);
+        }
+        let (x, n) = read_f64_be(&buf[off..])?;
+        off += n;
+        let (y, n) = read_f64_be(&buf[off..])?;
+        off += n;
+        let (z, n) = read_f64_be(&buf[off..])?;
+        off += n;
+        let (vel, n) = LpVec3::decode_body(&buf[off..])?;
+        off += n;
+        if buf.len() < off + 3 {
+            return Err(ProtocolError::UnexpectedEof);
+        }
+        let (pitch, yaw, head_yaw) = (buf[off], buf[off + 1], buf[off + 2]);
+        off += 3;
+        let (data, n) = read_varint(&buf[off..])?;
+        off += n;
+        if data != 0 {
+            return Err(ProtocolError::UnexpectedEof);
+        }
+        Ok((Self { entity_id, uuid, x, y, z, vel, pitch, yaw, head_yaw }, off))
+    }
+}
+
+pub fn encode_spawn_experience_orb_packet(v: &SpawnExperienceOrb, out: &mut Vec<u8>) {
+    let mut body = Vec::new();
+    v.encode_body(&mut body);
+    encode_packet(PLAY_SPAWN_ENTITY_S2C_ID, &body, out);
+}
+
+// ---------------------------------------------------------------------------
 // Set Entity Data：entity_id + [index 8 u8, type 7 varint, Slot] + 0xFF。
 // ---------------------------------------------------------------------------
 
@@ -341,6 +421,56 @@ impl ItemEntityData {
 }
 
 pub fn encode_set_entity_data_packet(v: &ItemEntityData, out: &mut Vec<u8>) {
+    let mut body = Vec::new();
+    v.encode_body(&mut body);
+    encode_packet(PLAY_SET_ENTITY_DATA_S2C_ID, &body, out);
+}
+
+// ---------------------------------------------------------------------------
+// P31 经验球元数据（S2C 0x65）：index 8 / type VarInt(1) / 经验值 VarInt + 0xFF。
+// wiki Entity metadata §Experience Orb：index 8 = VarInt(1) = 「orb 拾取时给的经验」。
+// ---------------------------------------------------------------------------
+
+/// 经验球的经验值元数据（决定客户端渲染大小与球内数值）。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct XpOrbEntityData {
+    pub entity_id: i32,
+    pub amount: i32,
+}
+
+impl XpOrbEntityData {
+    pub fn encode_body(&self, out: &mut Vec<u8>) {
+        write_varint(self.entity_id, out);
+        out.push(8);
+        write_varint(1, out); // EntityDataSerializers.INT
+        write_varint(self.amount, out);
+        out.push(0xFF);
+    }
+
+    pub fn decode_body(buf: &[u8]) -> Result<(Self, usize), ProtocolError> {
+        let mut off = 0;
+        let (entity_id, n) = read_varint(&buf[off..])?;
+        off += n;
+        if buf.len() <= off || buf[off] != 8 {
+            return Err(ProtocolError::UnexpectedEof);
+        }
+        off += 1;
+        let (typ, n) = read_varint(&buf[off..])?;
+        off += n;
+        if typ != 1 {
+            return Err(ProtocolError::UnexpectedEof);
+        }
+        let (amount, n) = read_varint(&buf[off..])?;
+        off += n;
+        if buf.len() <= off || buf[off] != 0xFF {
+            return Err(ProtocolError::UnexpectedEof);
+        }
+        off += 1;
+        Ok((Self { entity_id, amount }, off))
+    }
+}
+
+pub fn encode_xp_orb_data_packet(v: &XpOrbEntityData, out: &mut Vec<u8>) {
     let mut body = Vec::new();
     v.encode_body(&mut body);
     encode_packet(PLAY_SET_ENTITY_DATA_S2C_ID, &body, out);
@@ -536,6 +666,46 @@ pub fn encode_take_item_packet(v: &TakeItemEntity, out: &mut Vec<u8>) {
     let mut body = Vec::new();
     v.encode_body(&mut body);
     encode_packet(PLAY_PICKUP_ITEM_S2C_ID, &body, out);
+}
+
+// ---------------------------------------------------------------------------
+// P31 Set Experience（S2C 0x69）：Float 进度 + VarInt 等级 + VarInt 总经验。
+// 来源：wiki §Set Experience（ID 105/0x69）+ data/777/packets.json set_experience。
+// ---------------------------------------------------------------------------
+
+/// 经验/等级同步包体（客户端经验条与等级显示）。
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct SetExperience {
+    /// 当前等级内进度 0.0..=1.0。
+    pub progress: f32,
+    pub level: i32,
+    /// 总经验值（wiki Total Experience）。
+    pub total: i32,
+}
+
+impl SetExperience {
+    pub fn encode_body(&self, out: &mut Vec<u8>) {
+        write_f32_be(self.progress, out);
+        write_varint(self.level, out);
+        write_varint(self.total, out);
+    }
+
+    pub fn decode_body(buf: &[u8]) -> Result<(Self, usize), ProtocolError> {
+        let mut off = 0;
+        let (progress, n) = read_f32_be(&buf[off..])?;
+        off += n;
+        let (level, n) = read_varint(&buf[off..])?;
+        off += n;
+        let (total, n) = read_varint(&buf[off..])?;
+        off += n;
+        Ok((Self { progress, level, total }, off))
+    }
+}
+
+pub fn encode_set_experience_packet(v: &SetExperience, out: &mut Vec<u8>) {
+    let mut body = Vec::new();
+    v.encode_body(&mut body);
+    encode_packet(PLAY_SET_EXPERIENCE_S2C_ID, &body, out);
 }
 
 // ---------------------------------------------------------------------------
@@ -774,6 +944,58 @@ mod tests {
         assert_eq!(super::super::play_block::PLAY_CLICK_CONTAINER_C2S_ID, 0x12);
         assert_eq!(PLAY_SET_HELD_SLOT_S2C_ID, 0x6B);
         assert_eq!(ITEM_ENTITY_TYPE_ID, 72);
+        // P31：从 data/777 生成表查得，不允许硬编码猜测。
+        assert_eq!(PLAY_SET_EXPERIENCE_S2C_ID, 105);
+        assert_eq!(EXPERIENCE_ORB_ENTITY_TYPE_ID, 50);
+    }
+
+    /// P31：经验球 Spawn/Data 与 SetExperience 的包体往返（保守复用已验证布局）。
+    #[test]
+    fn p31_xp_packets_roundtrip() {
+        let v = SpawnExperienceOrb {
+            entity_id: 1001,
+            uuid: 0x0102030405060708090a0b0c0d0e0f10,
+            x: 369.5,
+            y: 73.0,
+            z: 381.5,
+            vel: LpVec3::zero(),
+            pitch: 0,
+            yaw: 0,
+            head_yaw: 0,
+        };
+        let mut body = Vec::new();
+        v.encode_body(&mut body);
+        let (got, used) = SpawnExperienceOrb::decode_body(&body).unwrap();
+        assert_eq!(used, body.len());
+        assert_eq!(got, v);
+        // 物品 Spawn 不能误收经验球（type 校验不同），反之亦然。
+        assert!(SpawnItemEntity::decode_body(&body).is_err());
+        let mut pkt = Vec::new();
+        encode_spawn_experience_orb_packet(&v, &mut pkt);
+        let (_, n) = read_varint(&pkt).unwrap();
+        let (id, _) = decode_packet_id(&pkt[n..]).unwrap();
+        assert_eq!(id, PLAY_SPAWN_ENTITY_S2C_ID);
+
+        let d = XpOrbEntityData { entity_id: 1001, amount: 3 };
+        let mut body = Vec::new();
+        d.encode_body(&mut body);
+        let (got, used) = XpOrbEntityData::decode_body(&body).unwrap();
+        assert_eq!(used, body.len());
+        assert_eq!(got, d);
+        assert!(ItemEntityData::decode_body(&body).is_err());
+        assert!(XpOrbEntityData::decode_body(&body[..body.len() - 1]).is_err());
+
+        let e = SetExperience { progress: 0.5, level: 1, total: 11 };
+        let mut body = Vec::new();
+        e.encode_body(&mut body);
+        let (got, used) = SetExperience::decode_body(&body).unwrap();
+        assert_eq!(used, body.len());
+        assert_eq!(got, e);
+        let mut pkt = Vec::new();
+        encode_set_experience_packet(&e, &mut pkt);
+        let (_, n) = read_varint(&pkt).unwrap();
+        let (id, _) = decode_packet_id(&pkt[n..]).unwrap();
+        assert_eq!(id, PLAY_SET_EXPERIENCE_S2C_ID);
     }
 
     #[test]

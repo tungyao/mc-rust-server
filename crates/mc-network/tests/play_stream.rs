@@ -602,6 +602,163 @@ async fn dig_spawns_pickable_drop_and_inventory_syncs() {
     let _ = std::fs::remove_dir_all(&dir);
 }
 
+/// P31 端到端：挖铁矿 → 经验球 Spawn/Data → 拾取（TakeItem+Remove+SetExperience）
+/// → XP 累加/落盘 → 断线重进 XP 仍在（Join 补发 SetExperience）。
+#[tokio::test]
+async fn dig_ore_spawns_xp_orb_pickup_syncs_and_survives_reconnect() {
+    use mc_network::DropState;
+    use mc_world::PlayerInventory;
+    let dir = std::env::temp_dir().join(format!("mc-p31-e2e-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    let (tx, rx) = crossbeam_channel::unbounded::<PlayEvent>();
+    let mutable = Arc::new(MutableWorld::new(DEFAULT_SEED));
+    let cache = Arc::new(ChunkCache::new(DEFAULT_SEED, 64).with_mutable(Arc::clone(&mutable)));
+    let drops = Arc::new(DropState::new(dir.clone(), DEFAULT_SEED));
+    let config = NetConfig::new(100, "xp-orbs".into(), Arc::new(AtomicUsize::new(0)))
+        .with_play_events(tx)
+        .with_view_distance(2)
+        .with_chunk_cache(cache)
+        .with_mutable_world(Arc::clone(&mutable))
+        .with_drops(Arc::clone(&drops));
+    let addr = spawn_server(config).await; // serve 会启动全服唯一 ticker
+    let mut s = login_and_join(addr, "XpMiner", 2).await;
+
+    // Join 背包：XP=0 不发 SetExperience（保持既有零包序）。
+    let (id, payload) = read_frame_timeout(&mut s, Duration::from_secs(5)).await.unwrap();
+    assert_eq!(id, packets::PLAY_SET_CONTAINER_CONTENT_S2C_ID);
+    let (content, _) = packets::SetContainerContent::decode_body(&payload).unwrap();
+    assert_eq!(content.slots[36], packets::Slot { count: 64, item_id: 1 });
+
+    let spawn = WorldGen::new(DEFAULT_SEED).spawn_pos();
+    let (fx, fy, fz) = (spawn.0 as f64 + 0.5, spawn.1 as f64, spawn.2 as f64 + 0.5);
+    let (gx, gy, gz) = (spawn.0, spawn.1 - 1, spawn.2);
+    // 脚下方块换成铁矿：确定性 1 XP + raw_iron 物品掉落。
+    mutable.set(gx, gy, gz, mc_world::IRON_ORE_BLOCK_ID);
+    send_pos_y(&mut s, fx, fy, fz).await;
+    let conn_id = match next_event(&rx).await {
+        PlayEvent::Movement { conn_id, .. } => conn_id,
+        other => panic!("expected movement event, got {other:?}"),
+    };
+
+    // 挖矿：BlockUpdate + Ack + 物品 Spawn/Data + 经验球 Spawn/Data。
+    let mut body = Vec::new();
+    packets::PlayerAction { status: 3, x: gx, y: gy, z: gz, face: 1, sequence: 31 }
+        .encode_body(&mut body);
+    mc_network::framing::write_packet(&mut s, packets::PLAY_PLAYER_ACTION_C2S_ID, &body)
+        .await
+        .unwrap();
+    let (id, payload) = read_frame_timeout(&mut s, Duration::from_secs(5)).await.unwrap();
+    assert_eq!(id, packets::PLAY_BLOCK_UPDATE_S2C_ID);
+    assert_eq!(packets::BlockUpdate::decode_body(&payload).unwrap().0.block_id, 0);
+    let (id, payload) = read_frame_timeout(&mut s, Duration::from_secs(5)).await.unwrap();
+    assert_eq!(id, packets::PLAY_BLOCK_CHANGED_ACK_S2C_ID);
+    assert_eq!(read_varint(&payload).unwrap().0, 31);
+    let mut item_id = None;
+    let mut orb_id = None;
+    let mut orb_amount = None;
+    for _ in 0..4 {
+        let (id, payload) = read_frame_timeout(&mut s, Duration::from_secs(5)).await.unwrap();
+        match id {
+            packets::PLAY_SPAWN_ENTITY_S2C_ID => {
+                if let Ok((v, _)) = packets::SpawnItemEntity::decode_body(&payload) {
+                    item_id = Some(v.entity_id);
+                } else {
+                    let (v, _) = packets::SpawnExperienceOrb::decode_body(&payload).unwrap();
+                    assert!(v.entity_id >= 1000, "orb id must use the global allocator");
+                    orb_id = Some(v.entity_id);
+                }
+            }
+            packets::PLAY_SET_ENTITY_DATA_S2C_ID => {
+                if let Ok((v, _)) = packets::ItemEntityData::decode_body(&payload) {
+                    assert_eq!(Some(v.entity_id), item_id);
+                } else {
+                    let (v, _) = packets::XpOrbEntityData::decode_body(&payload).unwrap();
+                    assert_eq!(Some(v.entity_id), orb_id);
+                    orb_amount = Some(v.amount);
+                }
+            }
+            other => panic!("unexpected spawn packet {other:#04x}"),
+        }
+        if item_id.is_some() && orb_amount.is_some() {
+            break;
+        }
+    }
+    let orb_id = orb_id.expect("dig must spawn an XP orb");
+    assert!(item_id.is_some() && item_id.unwrap() != orb_id, "item/orb ids must not collide");
+    assert_eq!(orb_amount, Some(1), "iron ore drops exactly 1 XP");
+    match next_event(&rx).await {
+        PlayEvent::BlockEdit { old_id, .. } => assert_eq!(old_id, mc_world::IRON_ORE_BLOCK_ID),
+        other => panic!("expected block edit event, got {other:?}"),
+    }
+
+    // 拾取：站在球上等 delay 到期 → TakeItem(count=1) + Remove + SetExperience。
+    let mut saw_xp_take = false;
+    let mut saw_xp_remove = false;
+    let mut saw_exp = false;
+    for _ in 0..80 {
+        let (id, payload) = read_frame_timeout(&mut s, Duration::from_secs(5)).await.unwrap();
+        match id {
+            packets::PLAY_ENTITY_POSITION_SYNC_S2C_ID | packets::PLAY_KEEPALIVE_S2C_ID => continue,
+            packets::PLAY_PICKUP_ITEM_S2C_ID => {
+                let (t, _) = packets::TakeItemEntity::decode_body(&payload).unwrap();
+                if t.collected_id == orb_id {
+                    assert_eq!((t.collector_id, t.count), (1, 1), "XP orb pickup count must be 1");
+                    saw_xp_take = true;
+                }
+            }
+            packets::PLAY_REMOVE_ENTITIES_S2C_ID => {
+                let (r, _) = packets::RemoveEntities::decode_body(&payload).unwrap();
+                if r.ids.contains(&orb_id) {
+                    saw_xp_remove = true;
+                }
+            }
+            packets::PLAY_SET_EXPERIENCE_S2C_ID => {
+                let (e, _) = packets::SetExperience::decode_body(&payload).unwrap();
+                assert_eq!((e.level, e.total), (0, 1));
+                assert!(e.progress > 0.0 && e.progress < 1.0);
+                saw_exp = true;
+            }
+            packets::PLAY_SET_CONTAINER_CONTENT_S2C_ID => {} // 物品拾取的全量同步
+            other => panic!("unexpected packet {other:#04x} while waiting for XP pickup"),
+        }
+        if saw_xp_take && saw_xp_remove && saw_exp {
+            break;
+        }
+    }
+    assert!(saw_xp_take && saw_xp_remove && saw_exp, "XP pickup must animate, remove and sync");
+    assert_eq!(drops.with_inventory(conn_id, |inv| inv.total_xp()), Some(1));
+
+    // 断线 → 刷盘 → 重进：Join 补发 SetExperience，XP 不丢。
+    drop(s);
+    match next_event(&rx).await {
+        PlayEvent::Disconnect { .. } => {}
+        other => panic!("expected disconnect event, got {other:?}"),
+    }
+    for _ in 0..100 {
+        if PlayerInventory::save_path(&dir, "XpMiner", DEFAULT_SEED).exists() {
+            break;
+        }
+        std::thread::sleep(Duration::from_millis(50));
+    }
+    let (back, is_new) = PlayerInventory::load_from_dir(&dir, "XpMiner", DEFAULT_SEED).unwrap();
+    assert!(!is_new && back.total_xp() == 1, "XP must be persisted on disconnect");
+
+    let mut s2 = login_and_join(addr, "XpMiner", 2).await;
+    let mut saw_rejoin_exp = false;
+    for _ in 0..40 {
+        let (id, payload) = read_frame_timeout(&mut s2, Duration::from_secs(5)).await.unwrap();
+        if id == packets::PLAY_SET_EXPERIENCE_S2C_ID {
+            let (e, _) = packets::SetExperience::decode_body(&payload).unwrap();
+            assert_eq!(e.total, 1, "reconnect must restore XP");
+            saw_rejoin_exp = true;
+            break;
+        }
+    }
+    assert!(saw_rejoin_exp, "join after reconnect must send SetExperience for saved XP");
+    drop(s2);
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
 /// P18 回归：忙连接（持续发移动包，模拟原版客户端每 tick 发包）下拾取仍能发生。
 /// 旧实现把掉落 tick 只放在 50ms 读超时分支，包流不断时超时永不触发，
 /// pickup_delay 减不下去，掉落物永远捡不起来。本用例在修之前必超时失败。

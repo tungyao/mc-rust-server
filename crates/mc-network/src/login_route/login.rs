@@ -1,6 +1,6 @@
 //! login: PlayOptions + login handshake / config / join sequence (moved from login_route.rs, no logic change).
 //! Shared small helpers (compression-aware IO, event emit, user_tag, chunk batches) reused by sibling modules.
-use super::drop_sync::send_full_inventory;
+use super::drop_sync::{send_experience, send_full_inventory};
 use super::play_loop;
 use crate::broadcast::{BroadcastHub, QueuedPacket};
 use crate::chunk_cache::{encode_chunk_data_body, encode_chunk_data_body_mutable, ChunkCache};
@@ -415,6 +415,13 @@ async fn send_join_inventory(
     drops.load_inventory(opts.conn_id, &user_tag(profile));
     if let Err(e) = send_full_inventory(stream, opts, drops).await {
         debug!("play uuid={} join inventory send failed ({e})", profile.uuid);
+    }
+    // P31 Join 经验同步：XP>0 才发（新玩家 XP=0 与客户端默认一致，保持既有包序不变）。
+    let has_xp = drops.with_inventory(opts.conn_id, |inv| inv.total_xp() > 0).unwrap_or(false);
+    if has_xp {
+        if let Err(e) = send_experience(stream, opts, drops).await {
+            debug!("play uuid={} join experience send failed ({e})", profile.uuid);
+        }
     }
     // P28.3 Join 选中同步：读盘恢复的 selected 经 S2C 0x6B 发给客户端。
     // 客户端重进默认选中 0 格，不发会造成"你看着选了 A，服务端按 B 出手"

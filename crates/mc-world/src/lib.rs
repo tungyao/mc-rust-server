@@ -7,10 +7,12 @@ pub mod save;
 pub mod worldgen;
 pub mod items;
 pub mod inventory;
+pub mod xp;
 
 pub use drops::{Drop, block_for_item, drops_for_block};
 pub use items::{ItemEntities, ItemEntity};
 pub use inventory::PlayerInventory;
+pub use xp::{XpOrb, XpOrbEntities};
 pub use mutable::{
     MutableWorld, DEFAULT_PLACE_BLOCK_ID, EYE_HEIGHT, MAX_REACH, PLACEABLE_BLOCK_IDS,
     WORLD_TOP_Y, chunk_of_block, is_placeable, is_replaceable,
