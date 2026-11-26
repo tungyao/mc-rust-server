@@ -6,7 +6,7 @@
 > P27 种田闭环、P28 Q 扔按视角飞 + 三个补丁（拾取延迟/弹道/选中槽同步）均已合入 main；
 > 但除 P18 早期真机外，上述新增功能均**未做原版客户端真机复验**（见 §5 各条 TODO）。
 > 当前待办：`p31-xp-orbs`、`p33-multi-crop-planting`（多作物种植，很多作物目前种不了）；
-> `p32-broadcast-chat` 暂缓；后台管理面板用 Vue + Naive UI 重写（独立 worktree 进行中）。
+> `p32-broadcast-chat` 暂缓；后台管理面板已用 Vue 3 + Naive UI 重写并合入（`p34-admin-vue` / `53f1016`）。
 
 ## 1. 一句话现状
 
@@ -714,11 +714,14 @@ $natives = 'C:\Users\qwe\AppData\Local\Temp\mc263natives'
     种子 → blockstate 映射（各自生长阶段与成熟掉落），保留现有小麦/树苗/骨粉/树叶 decay
     行为（用户确认这些均正常），不改扔东西与后台 API 语义。任务见
     `tasks/p33-multi-crop-planting.json`。
-25. **后台管理面板 Vue + Naive UI 重写（进行中）**：当前面板是
-    `crates/mc-server/src/admin_page.html`（208 行，原生 JS + inline CSS/JS，`include_str!`
-    编译进二进制），后端 `admin.rs` 800 行 / `admin_items.rs` 215 行。
-    在独立 worktree 用 Vue 3 + Naive UI 重建前端，**后端 API（`/api/online`/`world`/`items`/
-    `inventory`/`give`/`kick`/`save`）与 e2e 语义保持不变**；完成后再合并 main。
+25. **后台管理面板 Vue + Naive UI 重写（已完成并合入，`p34-admin-vue` / `53f1016`）**：
+    `crates/mc-server/src/admin_page.html` 由 208 行原生 JS 单文件改为 370 行 Vue 3.5.13 +
+    Naive UI 2.41.0 单文件（ESM CDN + importmap，零构建、零 Rust 依赖，仍 `include_str!` 走 `GET /`）。
+    **权衡**：浏览器需联网从 esm.sh 加载前端资源；加载失败有可见降级提示，非白屏；
+    如需完全离线可后续改本地打包 dist。后端 `admin.rs` 800 行 / `admin_items.rs` 215 行零改动，
+    API（`/api/online`/`world`/`items`/`inventory`/`give`/`kick`/`save`）与 3 个 admin_e2e 一字未动，
+    336 passed / 0 failed；broadcast 仍 501 stub，页面只显示说明不发包。
+    验证仅到 HTTP 层 + Vue 模板编译检查（环境无浏览器，未做真实渲染）。
 
 ## 6. 关键文件
 

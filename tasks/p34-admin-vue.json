@@ -1,13 +1,15 @@
 {
   "id": "p34-admin-vue",
   "title": "后台管理面板 Vue3 + Naive UI 重写",
-  "status": "doing",
+  "status": "done",
   "owner": "subagent-admin-vue",
   "priority": "p1",
   "deps": [],
   "branch": "",
   "created": "2026-11-26T01:41:08+00:00",
-  "updated": "2026-11-26T01:41:08+00:00",
-  "detail": "",
-  "files": []
+  "updated": "2026-11-26T01:47:42+00:00",
+  "detail": "Vue3.5.13+NaiveUI2.41.0 CDN/importmap 单文件重写 admin_page.html，零构建/零Rust改动，7个API与3个admin_e2e不变；336 passed；merge 53f1016",
+  "files": [
+    "crates/mc-server/src/admin_page.html"
+  ]
 }
