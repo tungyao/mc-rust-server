@@ -7,9 +7,10 @@
 > 但除 P18 早期真机外，上述新增功能均**未做原版客户端真机复验**（见 §5 各条 TODO）。
 > `p31-xp-orbs` 经验球已合入（`2563ebe`，见 §5.26），`p33-multi-crop-planting`
 > 多作物种植与 `p37-all-crops` **全部作物可种 + 作物模块拆分**均已合入（见 §5.24）；
-> 新世界存储格式已完成**方案设计 + 原型 + 生产核心**
-> （`p36-world-storage` / `f24a0bb`、`p38-store-core`，redb，明确不做 Anvil 兼容，
-> **默认 `world_storage = "redb"`**，见 §5.27）；`p32-broadcast-chat` 暂缓；
+> 新世界存储格式已完成**方案设计 + 原型 + 生产核心 + 增长计时持久化**
+> （`p36-world-storage` / `f24a0bb`、`p38-store-core`、`p39-timer-persist`，redb，
+> 明确不做 Anvil 兼容，**默认 `world_storage = "redb"`**，见 §5.27）；
+> `p32-broadcast-chat` 暂缓；下一批 `p40-survival`（合成 + 生存基础）待派发；
 > 后台管理面板已用 Vue 3 + Naive UI 重写并**完全离线化**合入（`p34-admin-vue` / `53f1016`、
 > `p35-admin-offline` / `48e14bd`，见 §5.25）；当前无进行中的派发任务。
 
@@ -407,9 +408,9 @@ $natives = 'C:\Users\qwe\AppData\Local\Temp\mc263natives'
 
 ### 本地检查
 
-- `cargo test --workspace`：全部通过（2026-11-26 实跑 **395 passed / 0 failed**；
-  P18 当时 215，之后 P18.1–P38 又追加单测与 play_stream / play_actions / play_crops /
-  play_all_crops / admin_e2e 集成测试）。
+- `cargo test --workspace`：全部通过（2026-11-26 实跑 **403 passed / 0 failed**；
+  P18 当时 215，之后 P18.1–P39 又追加单测与 play_stream / play_actions / play_crops /
+  play_all_crops / timer_persist / admin_e2e 集成测试）。
 - redb 生产核心真机进程冒烟（2026-11-26）：临时 `server.toml` 设 `world_storage="redb"`、
   独立端口与 world_dir，启动后日志 `redb world opened seed=... / world loaded storage=Redb`
   → `listening` → ticker/keepalive 正常，目录下生成 `state-<seed>.redb` 与 `migration-<seed>.json`，
@@ -584,7 +585,8 @@ $natives = 'C:\Users\qwe\AppData\Local\Temp\mc263natives'
     把存量小麦重新纳入跟踪（**从重启时刻重计时**，与 Anvil 的差距见下）。
     - **与原版差异（有意 MVP，后续再补，均已记 TODO）**：无需耕地（直接种在草/泥土上，
       无 farmland 方块、无锄头）；无水源/光照加速；固定时长生长（原版随机 tick）；
-      重启后存量作物重计时（不持久化 planted）；小麦是非地形弱方块——`heights`
+      ~~重启后存量作物重计时（不持久化 planted）~~ **已由 §5.27 P39 修正（redb 模式续算，
+      legacy 模式仍重计时）**；小麦是非地形弱方块——`heights`
       （地形顶）不变、天空光起点不变，但 `motion_heights` 随麦顶 +1（与水/树叶同口径，
       高度图含麦顶，客户端渲染/高度一致）；`drop_rest_y` 把小麦当支撑（掉落物可停在麦顶）。
     - 测试：`drops` 单测（成熟/未熟掉落、两分支覆盖、种子不可放置）+ `lib` 单测
@@ -617,7 +619,8 @@ $natives = 'C:\Users\qwe\AppData\Local\Temp\mc263natives'
       本轮只要土壤是草/泥土、目标格空气就放，被占只跳过该格）；
       无树叶 decay/苹果掉落（树叶只走通用挖掘掉落表）；无骨粉催熟
        （均为 P26 当时状态；P27 已补骨粉与 decay，见第 20 条）；
-      生长不持久化 planted（重启重计时）；大树/白桦/变种一律不做，只有固定 4 高小橡树。
+      生长 planted 已由 §5.27 P39 持久化；大树/白桦/变种仍不做（P37 已补其它树种材质，
+      但仍是 P26 小树形）。
     - 测试：`lib` 单测（形状确定性/57 格/去角/十字/平移）+ `drop_state` 单测
       （到期长树/被占跳过/挖苗取消/挖土取消/重启认领）+ `play_actions.rs` 新增 1 个 e2e
       （种树苗→BlockUpdate 30→扣苗；调小 `set_sapling_ticks(10)` 后出现 log 140 +
@@ -662,9 +665,8 @@ $natives = 'C:\Users\qwe\AppData\Local\Temp\mc263natives'
       锄头/骨粉无合成、无掉落来源（管理面板发）；骨粉对草地无长草/长花效果；
       decay 是到原木直接距离 ≤3（原版树叶 distance 属性逐格传播 7 格）且延迟固定 5s；
       decay 苹果率 1/200（原版橡树叶一致量级）但徒手挖树叶不掉苹果（旧单测锁定）；
-      无饥饿/进食（苹果只能看/囤）；生长 planted 与 decay scheduled 均不持久化
-      （重启重计时/清空观察；存量认领仍走 P22/P26 路径，decay 观察重启后清空，
-      砍树重新触发）；树苗可种在耕地上（原版不行，P27 简化）。
+      无饥饿/进食（苹果只能看/囤）；~~生长 planted 与 decay scheduled 均不持久化~~
+      **已由 §5.27 P39 修正（redb 模式跨重启续算）**；树苗可种在耕地上（原版不行，P27 简化）。
     - 测试：`drops` 单测（ID/hoe 表/耕地掉泥/骨粉 1~2 双分支/decay 苹果臂存在且前缀=徒手表）+
       `lib` 单测（farmland=6875/土壤集合/半径 3）+ `mutable` 单测（耕后高度图不动）+
       `block_edit` 单测（耕地/骨粉小麦推进钳制/成熟 noop/树苗路由/拒绝臂）+
@@ -811,8 +813,16 @@ $natives = 'C:\Users\qwe\AppData\Local\Temp\mc263natives'
     迁移仅在库不存在时执行：读 `P17W`/`P18I`（含 v1 XP=0）→ 事务写入 → 写
     `migration-<seed>.json` → 旧档改名 `.bak`；失败回滚，库已存在时旧档只告警不读。
     协议包与权威判定零变化。真机进程冒烟见 §4。
-    **仍待**：P36.3 增长计时持久化（timers 表 + tick_offset）、journal 裁剪/运维、
-    net 调用点逐连接 `actor` 标注（已有 `set_with_context` API，当前 actor=0）。
+    **P39 增长计时持久化已合入**：redb 模式登记时把 `kind+pos+planted_tick+stage+spec`
+    写入 `timers`，同一事务更新 `meta.tick_offset`；重启 `tick_count = tick_offset`，
+    `now - planted_tick` 按原进度继续。P33 作物 / P37 全部生长模型（Age/Tree/Vertical/
+    Side/Fruit）、树苗、树叶观察都恢复；阶段推进/骨粉/挖除/到期分别写或删 timer
+    （新增 `delete_timer` + `TimerClear` journal，`set_timers` 批量写），IO 在释放内存锁后做。
+    legacy（`store=None`）仍从 0 计时、行为逐字节不变。新增 `drop_state/timer_io.rs`
+    与 `timer_spec.rs`（spec 字节 = 来源表 tag + 索引，bit7 记 Fruit 已落果）。
+    `timer_persist.rs` 6 个真实 redb + ticker 集成测试，合计见 §4。
+    **仍待**：journal 裁剪/运维、net 调用点逐连接 `actor` 标注（已有 `set_with_context`
+    API，当前 actor=0）、每个 tick 都写 tick_offset（目前仅登记/推进/60s 刷新）。
 
 ## 6. 关键文件
 
@@ -831,7 +841,8 @@ crates/mc-protocol/src/packets/
 crates/mc-network/src/
   login_route/               Play 接线目录：login.rs（登录/Join序列）+ mod.rs（play_loop）+ block_edit.rs（decide_dig/decide_place + BlockUpdate/Ack）+ crops.rs（P37 作物路由/种植/骨粉/挖掘副作用）+ drop_sync.rs（掉落生成/50ms tick/拾取/背包同步 + P19 Q扔）+ view_sync.rs（视距节流/flush）
   broadcast.rs               P21 per-player 写通道 hub（conn_id → 队列 + 位置/视距快照，BlockUpdate/Spawn/Data/Remove/TakeItem 视距广播）
-  drop_state.rs              P18 DropState：ItemEntities + conn_id→背包 + entity_id 自增 + known 视距集 + 用户名键存档
+  drop_state.rs / drop_state/timer_io.rs / timer_spec.rs   DropState：ItemEntities + 背包 + 视距集 + 存档；P39 timer IO 与 spec 字节映射
+  tests/timer_persist.rs      P39 真实 redb + ticker 跨重启续算集成测试
   chunk_view.rs              clamp_view_radius/view_chunk_count、per-connection 视距集合/去重/跨区块 add/remove 规划
   chunk_cache.rs             共享已编码 ChunkData 0x2E 包体缓存（Mutex+HashMap+FIFO，默认 1024；`bodies` rayon 并行批量；P17 `with_mutable` + `invalidate`）
   play_events.rs             net 线程 → ECS 的移动/KeepAlive/Disconnect/BlockEdit 事件（conn_id 实体键）

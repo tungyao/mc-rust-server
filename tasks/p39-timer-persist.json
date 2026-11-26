@@ -1,0 +1,21 @@
+{
+  "id": "p39-timer-persist",
+  "title": "P36.3 增长计时持久化：redb timers + tick_offset 跨重启续算",
+  "status": "done",
+  "owner": "subagent-timer",
+  "priority": "p1",
+  "deps": [],
+  "branch": "",
+  "created": "2026-11-26T03:21:46+00:00",
+  "updated": "2026-11-26T03:50:11+00:00",
+  "detail": "redb timers+tick_offset跨重启续算;作物/树苗/树叶全模型;新增delete_timer/TimerClear与timer_spec;legacy不变;403 passed;merge见main",
+  "files": [
+    "crates/mc-world/src/store.rs",
+    "crates/mc-network/src/drop_state.rs",
+    "crates/mc-network/src/drop_state/timer_io.rs",
+    "crates/mc-network/src/timer_spec.rs",
+    "crates/mc-network/tests/timer_persist.rs",
+    "crates/mc-server/src/main.rs",
+    "docs/world-storage-plan.md"
+  ]
+}
