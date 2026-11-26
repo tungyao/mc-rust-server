@@ -83,6 +83,9 @@ fn main() {
     );
     // P18 掉落物实体 + 背包：net 线程共享状态（存档与 overrides 同目录、seed 隔离）。
     // P36.2：redb 模式下背包/XP 读写也走同一个 `WorldStore`。
+    // P36.3/P39：with_store 在 redb 模式从 meta.tick_offset 恢复全局 tick 基线，
+    // 并从 timers 重建作物/树苗/树叶观察的原 planted_tick 与 stage；`serve`
+    // 的 adopt_existing_* 会按这些记录续算而非从 0 重计时。legacy 模式不变。
     let drop_state = std::sync::Arc::new(mc_network::DropState::with_store(
         world_dir.clone().into(),
         cfg.seed,

@@ -208,7 +208,13 @@ value = planted_tick:u64be || stage:u8 || spec:u8    共 10B
 1. 种下/登记时写 `timers` 一条（kind + pos + planted_tick + stage + spec）。
 2. 每次 flush 把当前 `tick_count` 写进 `meta.tick_offset`。
 3. 启动时 `DropState.tick_count = tick_offset`（从断点续算，而非从 0 开始）；`adopt_existing_crops/saplings` 改为从 `timers` 读取**原 planted_tick 与 stage**，树叶观察同样从 `timers` 恢复。
-4. 语义升级：从"重启重计时"变为"跨重启继续生长/继续 decay 观察"。这需要 e2e/真机复验（本轮不接入生产，行为不变）。
+4. 语义升级：从"重启重计时"变为"跨重启继续生长/继续 decay 观察"。**P39 已接入生产**：
+   `DropState::with_store` 启动时读 `tick_offset` 与全部 `timers` 并恢复内存跟踪，
+   `adopt_existing_crops/plants/saplings` 优先用原 planted/stage，树叶观察在构造时重建；
+   legacy 模式（`store=None`）仍按旧口径重计时。
+5. `spec` 字节仍是 10B 值里的 1B：低 4bit 为规格表索引，高 4bit 为来源表 tag
+   （P33 作物 / P37 Age / Tree / Vertical / Side），bit7 是 Fruit 是否已落果标志；
+   删除 timer 记 `TimerClear` journal（`op=5`），`tick` 用当前 `tick_offset`。
 
 ### 3.7 复杂度与体积评估
 
@@ -268,7 +274,7 @@ value = planted_tick:u64be || stage:u8 || spec:u8    共 10B
 |---|---|---|---|
 | **P36.1（本任务，已完成）** | `mc-world/src/store.rs` 原型：redb 打开/关闭、方块读写、背包+XP 读写、journal 重放、timers、旧档迁移、schema/seed 守卫；7 个单测；文档 | 独立模块，不接生产；358 旧测试不动 | 低（零侵入） |
 | **P36.2** | 生产替换：`persist.rs::autosave_system` 改调 `WorldStore` flush（同 60s/断线/退出触发点）；`main.rs` 启动时建/开库并迁移；`drop_state.rs` 的背包读写改走 store | 现有玩法不变、存档换成 redb；旧档保留 | 中（需 e2e 全绿 + 真机冒烟）；用配置开关可一键回退旧档 |
-| **P36.3** | 计时持久化：`timers` 表接入 `plant_crop`/`plant_sapling`/`schedule_leaf_decay_around`；启动时恢复 `tick_offset` 与原 stage/planted | 作物/树苗/decay 跨重启续算 | 中（语义变化，需 e2e 验"重启后继续生长"） |
+| **P36.3（P39 已完成）** | 计时持久化：`timers` 表接入 `plant_crop`/`plant_sapling`/`schedule_leaf_decay_around`；启动时恢复 `tick_offset` 与原 stage/planted | 作物/树苗/decay 跨重启续算；新增 8 个单测/e2e，403 测试全绿 | 中（语义变化，需 e2e 验"重启后继续生长"） |
 | **P36.4** | 运维工具：journal 查询/回放 CLI 或管理页 API；`snapshot` 表 + journal 裁剪；compact 调度 | 可审计、可 undo、可控体积 | 低 |
 | **P36.5** | 可选优化：写穿事务（阶段 2 并发模型）、`DashMap` 分片热层、批量 tick 落盘 | 更低丢失窗口/更低锁竞争 | 中（需压测确认收益） |
 
