@@ -6,3 +6,5 @@ seed = 123456789
 compression_threshold = -1
 # P38 世界存储后端："redb"（默认，world/state-<seed>.redb）或 "legacy"（旧 overrides/player .dat）
 world_storage = "redb"
+# P44 生成器版本：1=legacy（冻结默认，老 seed 必须保持），2=仅新 seed/显式启用的低风险视觉增强
+generator_version = 1

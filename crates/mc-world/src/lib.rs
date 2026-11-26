@@ -27,7 +27,8 @@ pub use mutable::{
     WORLD_TOP_Y, chunk_of_block, is_placeable, is_replaceable,
 };
 pub use worldgen::{
-    GeneratedChunk, WorldGen, DEFAULT_SEED, MAX_SURFACE_Y, MIN_SURFACE_Y, SEA_LEVEL,
+    GeneratedChunk, GeneratorVersion, WorldGen, DEFAULT_SEED, MAX_SURFACE_Y, MIN_SURFACE_Y,
+    SEA_LEVEL,
 };
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -140,6 +141,38 @@ pub const IRON_ORE_BLOCK_ID: u16 = registry_id(mc_registry::BLOCKS, "minecraft:i
 /// `Blocks.FARMLAND.defaultBlockState()`（干燥 moisture=0）：`data/777/blocks.json` 的
 /// `farmland.default_state_id=6875`；P27 只用这一个默认态（无水分/踩回退化，见 HANDOFF §5）。
 pub const FARMLAND_BLOCK_ID: u16 = registry_id(mc_registry::BLOCKS, "minecraft:farmland") as u16;
+// ---------------------------------------------------------------------------
+// P44 v2 worldgen 新方块：全部从 `data/777/blocks.json` 的 default_state_id 查表，
+// 不手写数字；v1 基底完全不使用这些 ID。
+// ---------------------------------------------------------------------------
+/// 地表过渡材质。
+pub const GRAVEL_BLOCK_ID: u16 = registry_id(mc_registry::BLOCKS, "minecraft:gravel") as u16;
+pub const SANDSTONE_BLOCK_ID: u16 = registry_id(mc_registry::BLOCKS, "minecraft:sandstone") as u16;
+pub const COARSE_DIRT_BLOCK_ID: u16 = registry_id(mc_registry::BLOCKS, "minecraft:coarse_dirt") as u16;
+pub const PODZOL_BLOCK_ID: u16 = registry_id(mc_registry::BLOCKS, "minecraft:podzol") as u16;
+pub const CLAY_BLOCK_ID: u16 = registry_id(mc_registry::BLOCKS, "minecraft:clay") as u16;
+pub const SNOW_BLOCK_ID: u16 = registry_id(mc_registry::BLOCKS, "minecraft:snow_block") as u16;
+pub const ICE_BLOCK_ID: u16 = registry_id(mc_registry::BLOCKS, "minecraft:ice") as u16;
+/// 新矿种（y 高度带见 `worldgen::ores`）。
+pub const COPPER_ORE_BLOCK_ID: u16 = registry_id(mc_registry::BLOCKS, "minecraft:copper_ore") as u16;
+pub const GOLD_ORE_BLOCK_ID: u16 = registry_id(mc_registry::BLOCKS, "minecraft:gold_ore") as u16;
+pub const REDSTONE_ORE_BLOCK_ID: u16 = registry_id(mc_registry::BLOCKS, "minecraft:redstone_ore") as u16;
+pub const DIAMOND_ORE_BLOCK_ID: u16 = registry_id(mc_registry::BLOCKS, "minecraft:diamond_ore") as u16;
+pub const EMERALD_ORE_BLOCK_ID: u16 = registry_id(mc_registry::BLOCKS, "minecraft:emerald_ore") as u16;
+pub const LAPIS_ORE_BLOCK_ID: u16 = registry_id(mc_registry::BLOCKS, "minecraft:lapis_ore") as u16;
+/// 草花 / 水下植被（均为非地形、非 MOTION_BLOCKING 装饰方块）。
+pub const SHORT_GRASS_BLOCK_ID: u16 = registry_id(mc_registry::BLOCKS, "minecraft:short_grass") as u16;
+pub const TALL_GRASS_BLOCK_ID: u16 = registry_id(mc_registry::BLOCKS, "minecraft:tall_grass") as u16;
+pub const FERN_BLOCK_ID: u16 = registry_id(mc_registry::BLOCKS, "minecraft:fern") as u16;
+pub const DEAD_BUSH_BLOCK_ID: u16 = registry_id(mc_registry::BLOCKS, "minecraft:dead_bush") as u16;
+pub const BUSH_BLOCK_ID: u16 = registry_id(mc_registry::BLOCKS, "minecraft:bush") as u16;
+pub const DANDELION_BLOCK_ID: u16 = registry_id(mc_registry::BLOCKS, "minecraft:dandelion") as u16;
+pub const POPPY_BLOCK_ID: u16 = registry_id(mc_registry::BLOCKS, "minecraft:poppy") as u16;
+pub const CORNFLOWER_BLOCK_ID: u16 = registry_id(mc_registry::BLOCKS, "minecraft:cornflower") as u16;
+pub const SEAGRASS_BLOCK_ID: u16 = registry_id(mc_registry::BLOCKS, "minecraft:seagrass") as u16;
+pub const TALL_SEAGRASS_BLOCK_ID: u16 = registry_id(mc_registry::BLOCKS, "minecraft:tall_seagrass") as u16;
+pub const KELP_BLOCK_ID: u16 = registry_id(mc_registry::BLOCKS, "minecraft:kelp") as u16;
+pub const LILY_PAD_BLOCK_ID: u16 = registry_id(mc_registry::BLOCKS, "minecraft:lily_pad") as u16;
 /// P27 树叶 decay 判定半径（Chebyshev）：3 格内无橡木原木即失支撑。
 /// 原版是树叶 distance 属性逐格传播（7 格），这里简化为到原木的直接距离（见 HANDOFF §5）。
 pub const LEAF_DECAY_RADIUS: i32 = 3;
@@ -366,6 +399,41 @@ mod tests {
         // decay 参数 sanity：半径取小（3 格，原版 distance 传播 7 格的简化，见 HANDOFF）。
         assert_eq!(LEAF_DECAY_RADIUS, 3);
         assert!(LEAF_DECAY_TICKS >= 1, "decay delay must be a positive tick count");
+    }
+
+    /// P44：v2 新方块 ID 必须随 `data/777` codegen 漂移，禁止手写数字。
+    #[test]
+    fn p44_worldgen_block_ids_come_from_registry() {
+        for (name, expected, id) in [
+            ("minecraft:gravel", 127, GRAVEL_BLOCK_ID),
+            ("minecraft:sandstone", 677, SANDSTONE_BLOCK_ID),
+            ("minecraft:coarse_dirt", 11, COARSE_DIRT_BLOCK_ID),
+            ("minecraft:podzol", 13, PODZOL_BLOCK_ID),
+            ("minecraft:clay", 8616, CLAY_BLOCK_ID),
+            ("minecraft:snow_block", 8598, SNOW_BLOCK_ID),
+            ("minecraft:ice", 8597, ICE_BLOCK_ID),
+            ("minecraft:copper_ore", 31147, COPPER_ORE_BLOCK_ID),
+            ("minecraft:gold_ore", 132, GOLD_ORE_BLOCK_ID),
+            ("minecraft:redstone_ore", 8552, REDSTONE_ORE_BLOCK_ID),
+            ("minecraft:diamond_ore", 6863, DIAMOND_ORE_BLOCK_ID),
+            ("minecraft:emerald_ore", 11315, EMERALD_ORE_BLOCK_ID),
+            ("minecraft:lapis_ore", 662, LAPIS_ORE_BLOCK_ID),
+            ("minecraft:short_grass", 2363, SHORT_GRASS_BLOCK_ID),
+            ("minecraft:tall_grass", 14771, TALL_GRASS_BLOCK_ID),
+            ("minecraft:fern", 2364, FERN_BLOCK_ID),
+            ("minecraft:dead_bush", 2365, DEAD_BUSH_BLOCK_ID),
+            ("minecraft:bush", 2366, BUSH_BLOCK_ID),
+            ("minecraft:dandelion", 3813, DANDELION_BLOCK_ID),
+            ("minecraft:poppy", 3816, POPPY_BLOCK_ID),
+            ("minecraft:cornflower", 3825, CORNFLOWER_BLOCK_ID),
+            ("minecraft:seagrass", 2370, SEAGRASS_BLOCK_ID),
+            ("minecraft:tall_seagrass", 2372, TALL_SEAGRASS_BLOCK_ID),
+            ("minecraft:kelp", 18419, KELP_BLOCK_ID),
+            ("minecraft:lily_pad", 10654, LILY_PAD_BLOCK_ID),
+        ] {
+            assert_eq!(id as u32, expected, "wrong blockstate ID for {name}");
+            assert_eq!(Some(id as u32), mc_registry::block_id(name), "registry drift for {name}");
+        }
     }
 
     #[test]

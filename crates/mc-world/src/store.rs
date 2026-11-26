@@ -236,6 +236,8 @@ pub enum StoreError {
     Version(u32, u32),
     #[error("seed mismatch: file={0} requested={1}")]
     Seed(i64, i64),
+    #[error("generator version mismatch: file={0} requested={1}")]
+    GeneratorVersion(u32, u32),
     #[error("bad record: {0}")]
     BadRecord(String),
 }
@@ -446,6 +448,38 @@ fn meta_u64_read(db: &Database, key: &str) -> Result<Option<u64>, StoreError> {
     }
 }
 
+/// 只读字符串 meta。
+fn meta_str_read(db: &Database, key: &str) -> Result<Option<String>, StoreError> {
+    let tx = db.begin_read()?;
+    let t = tx.open_table(META)?;
+    let out = t.get(key)?.map(|g| String::from_utf8_lossy(g.value()).into_owned());
+    drop(t);
+    Ok(out)
+}
+
+/// `meta.generator` 的 P44 扩展：在原有标识后追加 `|worldgen=<1|2>`，
+/// 老库里没有该后缀时按 v1（legacy）解释，绝不猜成 v2。
+const GENERATOR_VERSION_MARK: &str = "|worldgen=";
+
+fn generator_value(version: u32) -> String {
+    format!("{GENERATOR}{GENERATOR_VERSION_MARK}{version}")
+}
+
+fn parse_generator(value: &str) -> Result<(u32, bool), StoreError> {
+    let Some(suffix) = value.rsplit_once(GENERATOR_VERSION_MARK) else {
+        return Ok((1, false));
+    };
+    let n: u32 = suffix.1.trim().parse().map_err(|_| {
+        StoreError::BadRecord(format!("bad generator version in meta: {value:?}"))
+    })?;
+    if crate::worldgen::GeneratorVersion::from_number(n).is_none() {
+        return Err(StoreError::BadRecord(format!(
+            "unsupported generator version {n} in meta"
+        )));
+    }
+    Ok((n, true))
+}
+
 // ---------------------------------------------------------------------------
 // WorldStore
 // ---------------------------------------------------------------------------
@@ -492,7 +526,9 @@ impl WorldStore {
             let zero = 0u64.to_be_bytes();
             meta_put(&tx, META_SEQ, zero.as_slice())?;
             meta_put(&tx, META_TICK, zero.as_slice())?;
-            meta_put(&tx, META_GENERATOR, GENERATOR.as_bytes())?;
+            // P44：新库默认 v1；v2 只能由显式配置经 ensure_generator_version 写入。
+            let g = generator_value(1);
+            meta_put(&tx, META_GENERATOR, g.as_bytes())?;
             tx.commit()?;
         } else {
             let tx = db.begin_write()?;
@@ -522,6 +558,46 @@ impl WorldStore {
 
     pub fn path(&self) -> &Path {
         &self.path
+    }
+
+    /// 存档记录的生成器版本：缺 `meta.generator` 或老格式（无后缀）按 v1。
+    pub fn generator_version(&self) -> Result<u32, StoreError> {
+        match meta_str_read(&self.db, META_GENERATOR)? {
+            Some(value) => Ok(parse_generator(&value)?.0),
+            None => Ok(1),
+        }
+    }
+
+    /// 启动校验：存档版本与请求版本不一致时拒绝，绝不静默混用两种基底。
+    pub fn validate_generator_version(&self, version: u32) -> Result<(), StoreError> {
+        let stored = self.generator_version()?;
+        if stored != version {
+            return Err(StoreError::GeneratorVersion(stored, version));
+        }
+        Ok(())
+    }
+
+    /// 启动入口：先校验，再在老库缺版本后缀时补写（新库初始化已写 v1）。
+    pub fn ensure_generator_version(&self, version: u32) -> Result<(), StoreError> {
+        self.validate_generator_version(version)?;
+        let has_mark = match meta_str_read(&self.db, META_GENERATOR)? {
+            Some(value) => parse_generator(&value)?.1,
+            None => false,
+        };
+        if has_mark {
+            return Ok(());
+        }
+        let value = generator_value(version);
+        self.with_write(|tx, _| meta_put(tx, META_GENERATOR, value.as_bytes()))
+    }
+
+    /// 显式改写版本（仅供未来迁移工具使用；正常启动请用 ensure）。
+    pub fn set_generator_version(&self, version: u32) -> Result<(), StoreError> {
+        if crate::worldgen::GeneratorVersion::from_number(version).is_none() {
+            return Err(StoreError::BadRecord(format!("unsupported generator version {version}")));
+        }
+        let value = generator_value(version);
+        self.with_write(|tx, _| meta_put(tx, META_GENERATOR, value.as_bytes()))
     }
 
     /// 当前全局 tick 偏移：重启时用它初始化 `DropState::tick_count`，使持久化的
@@ -1450,6 +1526,59 @@ mod tests {
         assert!(s.block(2, 100, 2).unwrap().is_none());
         assert!(s.load_player("dave").unwrap().is_none());
         assert!(crate::mutable::MutableWorld::save_path(&dir, seed).exists(), "legacy file untouched");
+        cleanup(&dir);
+    }
+
+    /// P44：`meta.generator` 记录生成器版本；启动校验不一致必须拒绝，不静默混用。
+    #[test]
+    fn generator_version_is_recorded_checked_and_rejected_on_mismatch() {
+        use std::sync::Arc;
+        let dir = tmp("genver");
+        let seed = 909;
+        let s = WorldStore::open(&dir, seed).unwrap();
+        assert_eq!(s.generator_version().unwrap(), 1, "new store defaults to legacy v1");
+        s.ensure_generator_version(1).unwrap();
+        assert_eq!(s.generator_version().unwrap(), 1);
+        // 显式切到 v2（只允许新库/新 seed）。
+        s.set_generator_version(2).unwrap();
+        assert_eq!(s.generator_version().unwrap(), 2);
+        assert!(matches!(
+            s.validate_generator_version(1),
+            Err(StoreError::GeneratorVersion(2, 1))
+        ));
+        drop(s);
+        let again = WorldStore::open(&dir, seed).unwrap();
+        assert_eq!(again.generator_version().unwrap(), 2, "version survives reopen");
+        again.ensure_generator_version(2).unwrap();
+        assert!(matches!(
+            crate::MutableWorld::with_store_and_version(
+                seed,
+                Arc::new(again),
+                crate::GeneratorVersion::V1,
+            ),
+            Err(StoreError::GeneratorVersion(2, 1))
+        ));
+        cleanup(&dir);
+    }
+
+    /// 老库 `meta.generator` 无 `|worldgen=` 后缀时按 v1 解释并可补写。
+    #[test]
+    fn legacy_generator_meta_is_treated_as_v1() {
+        let dir = tmp("genver-legacy");
+        let seed = 910;
+        let path = WorldStore::store_path(&dir, seed);
+        {
+            let s = WorldStore::open(&dir, seed).unwrap();
+            drop(s);
+            let db = Database::open(&path).unwrap();
+            let tx = db.begin_write().unwrap();
+            meta_put(&tx, META_GENERATOR, GENERATOR.as_bytes()).unwrap();
+            tx.commit().unwrap();
+        }
+        let s = WorldStore::open(&dir, seed).unwrap();
+        assert_eq!(s.generator_version().unwrap(), 1);
+        s.ensure_generator_version(1).unwrap();
+        assert!(meta_str_read(&s.db, META_GENERATOR).unwrap().unwrap().contains("worldgen=1"));
         cleanup(&dir);
     }
 }
