@@ -15,7 +15,8 @@
 > 流动水 + 游泳、单 chunk 小遗迹）；`p41-all-recipes` 283 条配方与 `p43-player-visible`
 > 玩家实体互见均已合入（见 §5.30）；`p44-worldgen-p1` v1 冻结 + v2 低风险视觉已合入
 > （见 §5.29）；`p45-worldgen-p2` v2 地形/多 biome/洞穴/光照与 `p46-worldgen-p3`
-> v2 流动水/游泳/block light/遗迹均已合入（见 §5.29）；地图生成三阶段全部落地，
+> v2 流动水/游泳/block light/遗迹均已合入（见 §5.29）；地图生成三阶段全部落地；
+> `p47-gameplay-admin` 工具等级/3×3 工作台/游戏模式/挖掘动画 + 后台联动已合入（见 §5.31）；
 > **真机复验仍未做**；`p32-broadcast-chat` 暂缓；
 > 后台管理面板已用 Vue 3 + Naive UI 重写并**完全离线化**合入（`p34-admin-vue` / `53f1016`、
 > `p35-admin-offline` / `48e14bd`，见 §5.25）；当前无进行中的派发任务。
@@ -415,10 +416,10 @@ $natives = 'C:\Users\qwe\AppData\Local\Temp\mc263natives'
 
 ### 本地检查
 
-- `cargo test --workspace`：全部通过（2026-11-26 实跑 **490 passed / 0 failed**；
-  P18 当时 215，之后 P18.1–P46 又追加单测与 play_stream / play_actions / play_crops /
+- `cargo test --workspace`：全部通过（2026-11-26 实跑 **509 passed / 0 failed**；
+  P18 当时 215，之后 P18.1–P47 又追加单测与 play_stream / play_actions / play_crops /
   play_all_crops / timer_persist / play_survival / play_recipes / player_visibility /
-  fluid / admin_e2e 集成测试）。
+  fluid / play_tools / admin_e2e 集成测试）。
 - redb 生产核心真机进程冒烟（2026-11-26）：临时 `server.toml` 设 `world_storage="redb"`、
   独立端口与 world_dir，启动后日志 `redb world opened seed=... / world loaded storage=Redb`
   → `listening` → ticker/keepalive 正常，目录下生成 `state-<seed>.redb` 与 `migration-<seed>.json`，
@@ -934,7 +935,35 @@ $natives = 'C:\Users\qwe\AppData\Local\Temp\mc263natives'
       **未做**：`player_info_update 0x47` 名字/tab/皮肤（bitmask 无抓包不猜字节）、
       挖掘动画 `0x05`。ID/类型查生成表，布局按 wiki 26.3 已验证口径，记录于
       `docs/packet-map-777.md` §8。新增双连接 e2e（互见 Spawn / 移动 / Remove / 零 Ack）。
-    合计见 §4（440 passed）。
+    合计见 §4。
+
+31. **P47 剩余玩法 + 后台联动（已合入，`p47-gameplay-admin`）**：
+    - **工具等级 / 时运 / 精准采集**：`mc-world/src/tools.rs` 6 档镐（木/石/铜/铁/钻石/
+      下界合金）与矿/方块门槛表，ID 全部查生成表；时运 = seed+坐标 hash 额外 0~2 个，
+      精准采集按 blockstate 注册名找同名物品（无则回退旧掉落）；档位不够仍破坏但零掉落。
+      不做耐久/挖掘速度/附魔 NBT（用连接级服务端开关）。`decide_dig_with_tool` 由
+      `NetConfig.tool_rules` opt-in（默认关保旧包流，生产入口开）。
+    - **3×3 工作台 + 整箱整理**：`login_route/craft9.rs` 复用 283 条配方引擎，
+      右键放置 crafting_table 开连接级会话（0 结果 / 1–9 格 / 10–45 背包），
+      SHIFT 结果槽从背包补料连续合成；会话仅内存无 block entity 存档；
+      `open_screen` 因 26.3 无 menu type 生成表、不猜字节而未发。
+    - **游戏模式**：hub per-conn survival（默认）/creative；创造 START 即破坏零掉落、
+      放置不扣手持。飞行未做（Player Abilities 0x41 包体未验证），
+      `Set Creative Mode Slot 0x39` 仍不解析。
+    - **挖掘动画 0x05**：ID 查生成表、包体按 wiki 26.3（VarInt 实体 id + packed i64
+      BlockPos + u8 stage 0..9 / 255 取消）；START 发 0、STOP/创造破坏发 255 给视距内连接，
+      操作者只收 Ack；由 `NetConfig.destroy_stage` opt-in（生产入口开）。
+    - **后台联动**：新增 `GET /api/tools`（档位/可挖表）、`POST /api/tool-enchant`
+      （none|fortune|silk_touch）、`GET /api/recipes`（283 条）、`GET /api/craft9`（会话快照）、
+      `POST /api/gamemode`；`/api/online` 增 `gamemode`/`tool_enchant` 字段（旧字段保留）。
+      Vue `admin-ui/src/Dashboard.js` 加工具等级/配方浏览/工作台会话卡片与在线模式下拉，
+      `npm ci && npm run build` 重建离线单文件 `admin_page.html`，
+      `check-offline.mjs` 零外链通过；旧 3 个 admin_e2e 未改，新增 1 个。
+    - **附带修复**：`drop_state.rs` 2060 行触发 2000 行软告警，把测试模块拆到
+      `drop_state/tests.rs`（旧测试一字未改），budget 恢复零 WARN。
+    - 旧 490 个测试一字不改；合并后 **509 passed / 0 failed**，budget 与离线检查绿。
+    - 未做：耐久/挖掘速度、飞行、创造槽包、真实 open_screen GUI、工作台存档、
+      完整 Respawn 0x54、名字/皮肤 0x47、聊天广播（p32 blocked）、生物 AI/战斗/命令/声音。
 
 ## 6. 关键文件
 
@@ -951,7 +980,7 @@ crates/mc-protocol/src/packets/
   play_sync.rs               PlayerPositionSync/KeepAlive/C2S 移动包
   data/*_777.bin             LoginPlay / PositionSync / UpdateTags 抓包
 crates/mc-network/src/
-  login_route/               Play 接线目录：login.rs（登录/Join序列）+ mod.rs（play_loop）+ block_edit.rs（decide_dig/decide_place + BlockUpdate/Ack）+ crops.rs（P37 作物路由/种植/骨粉/挖掘副作用）+ drop_sync.rs（掉落生成/50ms tick/拾取/背包同步 + P19 Q扔）+ view_sync.rs（视距节流/flush）
+  login_route/               Play 接线目录：login.rs（登录/Join序列）+ mod.rs（play_loop）+ block_edit.rs（decide_dig/decide_place + BlockUpdate/Ack）+ crops.rs（P37 作物路由）+ craft9.rs（P47 3×3 工作台会话）+ drop_sync.rs（掉落/50ms tick/拾取/背包同步 + P19 Q扔）+ view_sync.rs（视距节流/flush）
   broadcast.rs               P21 per-player 写通道 hub（conn_id → 队列 + 位置/视距快照，BlockUpdate/Spawn/Data/Remove/TakeItem 视距广播）+ P43 玩家实体状态/known
   player_visibility.rs       P43 对外玩家 id 分配、Join/移动/视距/断线广播
   fluid_sync.rs              P46 v2 全服唯一流体 ticker + BlockUpdate 广播
@@ -974,7 +1003,8 @@ crates/mc-world/src/
   crops/{mod,growth,drops}.rs P33/P37 通用作物规格表 + 各生长模型（Age/Tree/Vertical/Side/Fruit）+ 掉落规则
   items.rs                   P18 物品实体纯逻辑（生成/合并/重力/拾取/despawn/视距过滤）
   inventory.rs               P18 背包（46 槽/手持/合并/扣减）+ `player-<user>-<seed>.dat` 存档 + P19 throw_held/throw_from_slot
-  crafting.rs                P40/P41 2×2 合成 283 条配方 + 无序匹配/槽指纹消歧/消耗
+  tools.rs                   P47 工具档位/矿门槛/时运/精准采集纯逻辑
+  crafting.rs                P40/P41/P47 2×2 283 条配方 + 3×3 `match_recipe_9`/`consume_grid9`
   survival.rs                P40 生存状态（health/food/saturation）与食物表纯逻辑
   store.rs                   P36/P38/P39 redb 存储（生产核心 + 计时）
   worldgen/
@@ -994,7 +1024,7 @@ crates/mc-server/src/
   movement.rs                PlayEvent 排空 + MovementQueue/Position/KeepAlive + PendingPlayerRemoval 唯一删除点（+BlockEdit 日志臂）
   play.rs                    ECS PlayScaffold：登录队列 + `last_view_radius/chunks` 诊断 + KeepAlive 计数（P16.1 无区块生成/编码；socket 未接入）
   persist.rs                 autosave_system（60s 周期/断线即刷；必须排在 player_removal 之前）+ SharedWorld/WorldSaveDir
-  admin.rs / admin_items.rs / admin_page.html   管理面板后端 + 离线 Vue/Naive UI 单文件产物（源码在 admin-ui/）
+  admin.rs / admin_items.rs / admin_page.html   管理面板后端（含 P47 tools/recipes/craft9/gamemode 端点）+ 离线 Vue 单文件产物（源码 admin-ui/src/Dashboard.js）
 docs/packet-map-777.md                 777 包 ID 对照表（权威；§6 挖掘/放置 9 个 ID；§7 P18 掉落/背包 10 个 ID + 物品/实体 ID 表）
 docs/registries-777.md                 注册表清单
 docs/world-storage-plan.md             P36 新世界存储格式方案（redb，不做 Anvil 兼容）

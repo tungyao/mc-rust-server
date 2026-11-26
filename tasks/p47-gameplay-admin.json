@@ -1,0 +1,20 @@
+{
+  "id": "p47-gameplay-admin",
+  "title": "剩余玩法缺口 + 后台管理联动（工具等级/3x3工作台/游戏模式/挖掘动画）",
+  "status": "done",
+  "owner": "subagent-gameplay-admin",
+  "priority": "p1",
+  "deps": [],
+  "branch": "",
+  "created": "2026-11-26T08:28:22+00:00",
+  "updated": "2026-11-26T09:11:12+00:00",
+  "detail": "工具档位/时运/精准采集+3x3工作台整箱整理+游戏模式+挖掘动画0x05;后台新增5个API与Vue卡片并重建离线产物;drop_state测试拆子模块消budget告警;509 passed;merge见main",
+  "files": [
+    "crates/mc-world/src/tools.rs",
+    "crates/mc-network/src/login_route/craft9.rs",
+    "crates/mc-network/src/drop_state/tests.rs",
+    "crates/mc-server/src/admin.rs",
+    "admin-ui/src/Dashboard.js",
+    "crates/mc-server/src/admin_page.html"
+  ]
+}
