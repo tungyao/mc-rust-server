@@ -16,7 +16,7 @@
 
 use mc_world::crops::PlantKind;
 use mc_world::store::{TimerKind, TimerRecord, WorldStore};
-use mc_world::{ItemEntities, MutableWorld, PlayerInventory, XpOrbEntities};
+use mc_world::{ItemEntities, MutableWorld, PlayerInventory, SurvivalState, XpOrbEntities};
 use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
 use std::sync::{
@@ -30,6 +30,7 @@ use super::broadcast::BroadcastHub;
 use super::chunk_cache::ChunkCache;
 use super::timer_spec::{self, Restored};
 mod timer_io;
+mod survival;
 
 /// 全服掉落物物理节拍（ms）：只由 [`DropState::start_global_tick`] 的一个 ticker 驱动。
 pub const DROP_TICK_MS: u64 = 50;
@@ -40,6 +41,10 @@ pub const FIRST_DROP_ENTITY_ID: i32 = 1000;
 pub const PLAYER_ENTITY_ID: i32 = 1;
 /// 新背包开局石头数量（ hotbar 槽 36），保证“放置扣 1”可验证；后续按生存模式替换。
 pub const STARTER_STONE_COUNT: i32 = mc_world::inventory::STARTER_COUNT;
+/// P40 饥饿节拍：生产 400 ticks = 20s 扣一格（饱和优先）；测试经 `set_hunger_ticks` 调小。
+pub const DEFAULT_HUNGER_TICKS: u64 = 400;
+/// P40 饥饿扣血节拍：生产 200 ticks = 10s 扣 1 点；测试可经 `set_starvation_ticks` 调小。
+pub const DEFAULT_STARVATION_TICKS: u64 = 200;
 
 /// P22/P33 作物条目：种下时的全局 tick + 上次已广播的 age + 作物规格。
 /// 生长只由全服唯一 ticker 推进（P18.1 R1：连接侧绝不 tick），阶段变更经
@@ -77,6 +82,12 @@ pub struct DropState {
     /// 物理只由 [`Self::physics_tick`] 推进，连接侧绝不 tick（P18.1 R1）。
     pub orbs: Mutex<XpOrbEntities>,
     inventories: Mutex<HashMap<u64, PlayerInventory>>,
+    /// P40 per-conn 生存状态（health/food/saturation）；与背包同锁外独立，
+    /// 只在全服唯一 ticker 内推进（连接侧只发包/应用伤害结果）。
+    survival: Mutex<HashMap<u64, SurvivalState>>,
+    /// P40 饥饿/饿死节拍（全局 tick 计数；测试可调小加速）。
+    hunger_ticks: AtomicU64,
+    starvation_ticks: AtomicU64,
     known: Mutex<HashMap<u64, HashSet<i32>>>,
     next_id: AtomicI32,
     /// 物理 tick 次数（只统计 `ItemEntities::tick()`，与在线连接数无关；测试可观测）。
@@ -146,6 +157,9 @@ impl DropState {
             items: Mutex::new(ItemEntities::new()),
             orbs: Mutex::new(XpOrbEntities::new()),
             inventories: Mutex::new(HashMap::new()),
+            survival: Mutex::new(HashMap::new()),
+            hunger_ticks: AtomicU64::new(DEFAULT_HUNGER_TICKS),
+            starvation_ticks: AtomicU64::new(DEFAULT_STARVATION_TICKS),
             known: Mutex::new(HashMap::new()),
             next_id: AtomicI32::new(FIRST_DROP_ENTITY_ID),
             tick_count: AtomicU64::new(tick_offset),
@@ -315,6 +329,10 @@ impl DropState {
             orbs.resume_fall(id, new_rest);
         }
         orbs.tick();
+        drop(orbs);
+        // P40 生存：饥饿衰减/饿死伤害/死亡处理都在本唯一 ticker 内推进，连接侧绝不 tick
+        //（P18.1 R1 不重犯）。放在其它物理之后，保持既有物理时序不变。
+        self.tick_survival(world);
     }
 
     /// P22：按 `(now - planted) / interval` 算应处 age，到阶段即
@@ -1183,6 +1201,8 @@ impl DropState {
         let held = inv.selected();
         let filled = inv.filled_count();
         self.lock_tags().insert(conn_id, user_tag.to_string());
+        // P40：生存状态跟随背包读盘（旧档满状态）；与背包一起由本连接负责刷盘。
+        self.survival.lock().unwrap_or_else(|p| p.into_inner()).insert(conn_id, inv.survival());
         self.lock_invs().insert(conn_id, inv);
         self.lock_known().insert(conn_id, HashSet::new());
         let _ = (filled, held);
@@ -1192,6 +1212,7 @@ impl DropState {
     /// 断线时刷盘 + 释放连接状态（known/背包内存；手持栈先收回背包再存）。
     pub fn unload_inventory(&self, conn_id: u64, user_tag: &str) {
         self.lock_tags().remove(&conn_id);
+        self.survival.lock().unwrap_or_else(|p| p.into_inner()).remove(&conn_id);
         if let Some(mut inv) = self.lock_invs().remove(&conn_id) {
             inv.stow_cursor();
             self.persist_inventory(user_tag, &inv);
@@ -1228,6 +1249,11 @@ impl DropState {
                 warn!("redb tick_offset save failed seed={} tick={tick} ({e})", self.seed);
             }
         }
+    }
+
+    /// 本连接的用户名标签（redb/legacy 存档键；P40 进食后刷盘用）。
+    pub fn player_tag(&self, conn_id: u64) -> Option<String> {
+        self.lock_tags().get(&conn_id).cloned()
     }
 
     /// 对背包加独占锁执行闭包（调用方负责发包/刷盘）。
@@ -1928,6 +1954,31 @@ mod tests {
             assert_eq!(inv.total_xp(), 13);
         });
         st.unload_inventory(8, "alice");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// P40：生存状态随 redb players 表跨 DropState 重建保持（断线/周期刷盘路径）。
+    #[test]
+    fn redb_player_survival_roundtrip() {
+        let dir = std::env::temp_dir().join(format!("mc-p40-redb-surv-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let seed = 91;
+        let target = SurvivalState { health: 12.5, food: 6, saturation: 1.5 };
+        {
+            let store = Arc::new(WorldStore::open(&dir, seed).unwrap());
+            let st = DropState::with_store(dir.clone(), seed, Some(Arc::clone(&store)));
+            st.load_inventory(11, "survivor");
+            st.apply_survival(11, |s| *s = target);
+            assert_eq!(st.survival_state(11), Some(target));
+            st.save_inventory(11, "survivor");
+            st.unload_inventory(11, "survivor");
+        }
+        let reopened = WorldStore::open(&dir, seed).unwrap();
+        let persisted = reopened.load_player("survivor").unwrap().unwrap();
+        assert_eq!(persisted.survival(), target);
+        let st2 = DropState::with_store(dir.clone(), seed, Some(Arc::new(reopened)));
+        st2.load_inventory(12, "survivor");
+        assert_eq!(st2.survival_state(12), Some(target));
         let _ = std::fs::remove_dir_all(&dir);
     }
 }

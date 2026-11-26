@@ -140,6 +140,7 @@ mod registry_id_tests {
             (super::PLAY_MOVE_POSROT_C2S_ID, "serverbound.play", "move_player_pos_rot"),
             (super::PLAY_MOVE_ROT_C2S_ID, "serverbound.play", "move_player_rot"),
             (super::PLAY_MOVE_FLAGS_C2S_ID, "serverbound.play", "move_player_status_only"),
+            (super::PLAY_SET_HEALTH_S2C_ID, "clientbound.play", "set_health"),
         ];
         for &(constant, state, name) in cases {
             assert_eq!(

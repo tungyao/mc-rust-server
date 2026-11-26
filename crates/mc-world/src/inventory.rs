@@ -9,6 +9,11 @@
 //! 键用稳定用户名而非 uuid：离线模式 `offline_uuid` 每次登录随机 v4（见
 //! `mc_protocol::packets::login::offline_uuid`），uuid 作键则重连永远 miss；
 //! 用户名在离线模式是稳定身份。在线模式落地后应切回 uuid 键（TODO）。
+//!
+//! P40：加入生存三字段（health/food/saturation）并设存档 v3（= v2 + 12B 尾部生存字段），
+//! v1/v2 旧档仍可读、生存值取默认满状态；redb `players` 表对应 v2 记录（见 store.rs）。
+//! P40 合成：槽 1–4 现在允许 PICKUP 放入/取出原料，槽 0 是只读结果槽（点击走
+//! `craft_result`）；9–45 的 PICKUP/SWAP/QUICK_MOVE/THROW 语义一字未改。
 
 use std::io::{Read, Write};
 use std::path::Path;
@@ -25,10 +30,13 @@ pub const HOTBAR_START: usize = 36;
 pub const HOTBAR_END: usize = 44;
 
 /// 存档魔数 + 版本（自有格式，与 P17 overrides 存档同目录、seed 隔离）。
-/// v2 = v1 + 尾部 4 字节总经验（P31）；v1 文件仍可读，XP 缺省 0（向后兼容）。
+/// v2 = v1 + 尾部 4 字节总经验（P31）；v3 = v2 + 尾部 12 字节生存状态（P40：
+/// health f32 BE + food i32 BE + saturation f32 BE）。v1/v2 旧档仍可读，
+/// XP/生存值分别缺省 0 / 满状态（向后兼容）。
 const SAVE_MAGIC: [u8; 4] = *b"P18I";
-const SAVE_VERSION: u8 = 2;
+const SAVE_VERSION: u8 = 3;
 const LEGACY_SAVE_VERSION: u8 = 1;
+const LEGACY_SAVE_VERSION_V2: u8 = 2;
 /// 新背包开局石头数（hotbar 槽 36）。
 pub const STARTER_COUNT: i32 = 64;
 
@@ -42,11 +50,20 @@ pub struct PlayerInventory {
     cursor: Option<(i32, i32)>,
     /// P31 总经验值（与背包同文件存盘；旧存档缺省 0）。
     total_xp: i32,
+    /// P40 生存状态（与背包同文件/同 redb 记录存盘；旧档默认满血满饥饿）。
+    survival: crate::survival::SurvivalState,
 }
 
 impl Default for PlayerInventory {
     fn default() -> Self {
-        Self { slots: [None; SLOT_COUNT], selected: 0, state_id: 1, cursor: None, total_xp: 0 }
+        Self {
+            slots: [None; SLOT_COUNT],
+            selected: 0,
+            state_id: 1,
+            cursor: None,
+            total_xp: 0,
+            survival: crate::survival::SurvivalState::full(),
+        }
     }
 }
 
@@ -72,7 +89,8 @@ impl PlayerInventory {
         }
     }
 
-    /// 集装箱点击应用（只处理玩家背包窗口的 9..=45 槽；返回 true=状态变了）：
+    /// 集装箱点击应用（玩家背包窗口；返回 true=状态变了）：
+    /// P40 起 PICKUP 额外接受合成格 1..=4；SWAP/QUICK_MOVE/THROW 仍只处理 9..=45。
     /// - PICKUP(0) 左键 button=0：拿起整栈 / 放下 / 同物合并 / 异物交换；
     ///   右键 button=1：放一 / 拿半（向上取整）。
     /// - SWAP(2)：button=快捷栏序号 0..=8，与点击槽交换。
@@ -87,7 +105,44 @@ impl PlayerInventory {
         }
     }
 
-    /// 可操作槽：主背包 9-35、快捷栏 36-44、副手 45；合成/盔甲 0-8 不碰。
+    /// P40：点击合成结果槽（0）= 权威配方判定 + 扣 1-4 格原料 + 结果给光标（同物已满则
+    /// 溢出进背包）。两种鼠标键都取结果（原版左/右点击结果槽都是取走整份）。
+    /// 不匹配时返回 None，调用方保持结果槽为空、不扣任何原料。
+    pub fn craft_result(&mut self, button: i8) -> Option<(i32, i32)> {
+        if button != 0 && button != 1 {
+            return None;
+        }
+        let mut grid = [None; crate::crafting::GRID_SIZE];
+        for (i, slot) in grid.iter_mut().enumerate() {
+            *slot = self.slots[1 + i];
+        }
+        let recipe = crate::crafting::match_recipe(grid)?;
+        let (id, count) = recipe.result;
+        // 光标为空直接拿；同物未满则合并、装不下的部分进背包；异物则拒绝（不吞光标物品）。
+        match self.cursor {
+            None => self.cursor = Some((id, count)),
+            Some((cid, cc)) if cid == id => {
+                let take = (crate::items::MAX_STACK - cc).min(count);
+                self.cursor = Some((id, cc + take));
+                let left = count - take;
+                if left > 0 {
+                    self.add_item(id, left);
+                }
+            }
+            _ => return None,
+        }
+        // 原料在校验通过后才扣：consume_grid 只会取对应 ID 的数量。
+        if crate::crafting::consume_grid(&mut grid, recipe) {
+            for (i, slot) in grid.into_iter().enumerate() {
+                self.slots[1 + i] = slot;
+            }
+        }
+        self.slots[crate::crafting::RESULT_SLOT] = None;
+        Some((id, count))
+    }
+
+    /// 可操作槽（P18 原有语义，保持不变）：主背包 9-35、快捷栏 36-44、副手 45；
+    /// 合成/盔甲 0-8 不碰。SWAP / QUICK_MOVE / THROW 继续走这里。
     fn play_slot(&self, slot: i16) -> Option<usize> {
         if (9..=45).contains(&slot) {
             Some(slot as usize)
@@ -96,8 +151,18 @@ impl PlayerInventory {
         }
     }
 
+    /// P40 合成格：1-4 也允许 PICKUP（放/取原料）；槽 0 结果由 `craft_result` 处理。
+    /// 只扩展 PICKUP，不改 9-45 原有语义，也不碰盔甲 5-8。
+    fn pickup_slot(&self, slot: i16) -> Option<usize> {
+        if (1..=4).contains(&slot) || (9..=45).contains(&slot) {
+            Some(slot as usize)
+        } else {
+            None
+        }
+    }
+
     fn click_pickup(&mut self, slot: i16, button: i8) -> bool {
-        let idx = match self.play_slot(slot) {
+        let idx = match self.pickup_slot(slot) {
             Some(i) => i,
             None => return false,
         };
@@ -266,6 +331,31 @@ impl PlayerInventory {
         crate::xp::xp_progress(self.total_xp)
     }
 
+    // ---- P40 生存（与背包同存档/同 redb 记录） ----
+
+    /// 当前生存状态（生命/饥饿/饱和）的只读快照。
+    pub fn survival(&self) -> crate::survival::SurvivalState {
+        self.survival
+    }
+
+    /// 覆盖生存状态（读盘/复活/测试）。保存前会钳制到合法范围。
+    pub fn set_survival(&mut self, s: crate::survival::SurvivalState) {
+        self.survival = s.sanitize();
+    }
+
+    /// 对生存状态做原地修改（ticker/进食/伤害入口）。
+    pub fn with_survival<R>(&mut self, f: impl FnOnce(&mut crate::survival::SurvivalState) -> R) -> R {
+        f(&mut self.survival)
+    }
+
+    /// 清空所有槽（死亡掉落用；光标也收回后丢弃）。
+    pub fn clear_all(&mut self) {
+        for slot in self.slots.iter_mut() {
+            *slot = None;
+        }
+        self.cursor = None;
+    }
+
     pub fn get(&self, idx: usize) -> Option<(i32, i32)> {
         self.slots.get(idx).copied().flatten()
     }
@@ -426,7 +516,7 @@ impl PlayerInventory {
     }
 
     /// 落盘（tmp+rename 原子替换）：魔数/版本/selected/state/条目(槽u8+物品i32+数量i32)
-    /// + 尾部 4 字节总经验（P31 v2）。
+    /// + 尾部 4 字节总经验（P31 v2）+ 12 字节生存状态（P40 v3）。
     pub fn save_to_dir(&self, dir: &Path, user_tag: &str, seed: i64) -> std::io::Result<usize> {
         std::fs::create_dir_all(dir)?;
         let mut entries = Vec::new();
@@ -437,7 +527,7 @@ impl PlayerInventory {
         }
         let path = Self::save_path(dir, user_tag, seed);
         let tmp = path.with_extension("tmp");
-        let mut buf = Vec::with_capacity(12 + entries.len() * 9 + 4);
+        let mut buf = Vec::with_capacity(12 + entries.len() * 9 + 4 + 12);
         buf.extend_from_slice(&SAVE_MAGIC);
         buf.push(SAVE_VERSION);
         buf.push(self.selected);
@@ -450,6 +540,10 @@ impl PlayerInventory {
         }
         // v2：尾部追加总经验（i32 BE）；旧版本文件无此字段，读盘按 0 处理。
         buf.extend_from_slice(&self.total_xp.to_be_bytes());
+        // v3：生存三字段（f32/i32/f32 BE），旧版本文件无此字段，读盘按满状态处理。
+        buf.extend_from_slice(&self.survival.health.to_be_bytes());
+        buf.extend_from_slice(&self.survival.food.to_be_bytes());
+        buf.extend_from_slice(&self.survival.saturation.to_be_bytes());
         {
             let mut f = std::fs::File::create(&tmp)?;
             f.write_all(&buf)?;
@@ -477,7 +571,10 @@ impl PlayerInventory {
                 format!("{}: 魔数不符（非 P18 背包存档）", path.display()),
             ));
         }
-        if head[4] != SAVE_VERSION && head[4] != LEGACY_SAVE_VERSION {
+        if head[4] != SAVE_VERSION
+            && head[4] != LEGACY_SAVE_VERSION
+            && head[4] != LEGACY_SAVE_VERSION_V2
+        {
             return Err(std::io::Error::new(
                 std::io::ErrorKind::InvalidData,
                 format!("{}: 版本 {} 不支持", path.display(), head[4]),
@@ -505,13 +602,33 @@ impl PlayerInventory {
                 inv.slots[slot] = Some((id, c));
             }
         }
-        // v2 尾部 4 字节总经验；v1 无此字段，XP 缺省 0（向后兼容旧存档）。
-        if head[4] == SAVE_VERSION {
+        // v2+ 尾部 4 字节总经验；v1 无此字段，XP 缺省 0（向后兼容旧存档）。
+        if head[4] == SAVE_VERSION || head[4] == LEGACY_SAVE_VERSION_V2 {
             let mut xp = [0u8; 4];
             f.read_exact(&mut xp).map_err(|e| {
                 std::io::Error::new(e.kind(), format!("{}: 经验字段截断 ({e})", path.display()))
             })?;
             inv.total_xp = i32::from_be_bytes(xp).max(0);
+        }
+        // v3+ 生存三字段；v1/v2 无此字段，生存状态取默认满值（向后兼容）。
+        if head[4] == SAVE_VERSION {
+            let mut health = [0u8; 4];
+            let mut food = [0u8; 4];
+            let mut sat = [0u8; 4];
+            f.read_exact(&mut health).map_err(|e| {
+                std::io::Error::new(e.kind(), format!("{}: 生命字段截断 ({e})", path.display()))
+            })?;
+            f.read_exact(&mut food).map_err(|e| {
+                std::io::Error::new(e.kind(), format!("{}: 饥饿字段截断 ({e})", path.display()))
+            })?;
+            f.read_exact(&mut sat).map_err(|e| {
+                std::io::Error::new(e.kind(), format!("{}: 饱和字段截断 ({e})", path.display()))
+            })?;
+            inv.set_survival(crate::survival::SurvivalState {
+                health: f32::from_be_bytes(health),
+                food: i32::from_be_bytes(food),
+                saturation: f32::from_be_bytes(sat),
+            });
         }
         let mut tail = [0u8; 1];
         if f.read(&mut tail)? != 0 {
@@ -753,6 +870,59 @@ mod tests {
         assert!(!inv.apply_click(9, 9, 2));
         // 未知类型拒绝。
         assert!(!inv.apply_click(9, 0, 9));
+    }
+
+    /// P40：合成格可 PICKUP，结果槽点击扣原料；9-45 语义不变。
+    #[test]
+    fn crafting_grid_pickup_and_result_consumes_inputs() {
+        let mut inv = PlayerInventory::new();
+        // 从主包拿一个原木放进合成格 1。
+        inv.slots[9] = Some((crate::drops::ITEM_OAK_LOG, 1));
+        assert!(inv.apply_click(9, 0, 0));
+        assert!(inv.apply_click(1, 0, 0));
+        assert_eq!(inv.get(1), Some((crate::drops::ITEM_OAK_LOG, 1)));
+        // 点结果槽 → 4 木板进光标、原料清空。
+        assert_eq!(inv.craft_result(0), Some((crate::drops::ITEM_OAK_PLANKS, 4)));
+        assert_eq!(inv.cursor(), Some((crate::drops::ITEM_OAK_PLANKS, 4)));
+        assert_eq!(inv.get(1), None);
+        // 结果槽与盔甲槽仍不可直接 PICKUP；合成格仍不能 THROW/SWAP/QUICK_MOVE。
+        assert!(!inv.apply_click(0, 0, 0));
+        assert!(!inv.apply_click(5, 0, 0));
+        // 空合成格可用光标里的木板放入/取回（只扩展 PICKUP，不碰盔甲/快捷栏语义）。
+        assert!(inv.apply_click(2, 0, 0));
+        assert_eq!(inv.get(2), Some((crate::drops::ITEM_OAK_PLANKS, 4)));
+        assert!(inv.apply_click(2, 0, 0));
+        assert_eq!(inv.get(2), None);
+        assert!(inv.apply_click(9, 0, 0), "stow cursor back to main inventory");
+        assert_eq!(inv.cursor(), None);
+        assert!(!inv.apply_click(1, 0, 1));
+        assert!(!inv.apply_click(1, 0, 2));
+        assert_eq!(inv.throw_from_slot(1, 0), None);
+    }
+
+    /// P40：生存状态随背包存档 roundtrip，v1/v2 旧档读回满状态。
+    #[test]
+    fn survival_save_load_roundtrip_and_legacy_defaults() {
+        let dir = std::env::temp_dir().join(format!("mc-p40-surv-{}-rt", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let mut inv = PlayerInventory::new();
+        inv.add_item(55, 3);
+        inv.set_survival(crate::survival::SurvivalState { health: 11.5, food: 7, saturation: 2.0 });
+        inv.save_to_dir(&dir, "surv-user", 88).unwrap();
+        let (back, _) = PlayerInventory::load_from_dir(&dir, "surv-user", 88).unwrap();
+        assert_eq!(back.survival(), inv.survival());
+        // v2 旧档（XP=5，无生存字段）仍可读，生存取默认满值。
+        let mut v2 = b"P18I".to_vec();
+        v2.push(2);
+        v2.push(0);
+        v2.extend_from_slice(&1i32.to_be_bytes());
+        v2.extend_from_slice(&0u16.to_be_bytes());
+        v2.extend_from_slice(&5i32.to_be_bytes());
+        std::fs::write(PlayerInventory::save_path(&dir, "v2", 88), &v2).unwrap();
+        let (old, _) = PlayerInventory::load_from_dir(&dir, "v2", 88).unwrap();
+        assert_eq!(old.total_xp(), 5);
+        assert_eq!(old.survival(), crate::survival::SurvivalState::full());
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]

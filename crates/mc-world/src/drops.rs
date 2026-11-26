@@ -39,6 +39,8 @@ pub const ITEM_COBBLESTONE: i32 = crate::registry_id(mc_registry::ITEMS, "minecr
 pub const ITEM_OAK_SAPLING: i32 = crate::registry_id(mc_registry::ITEMS, "minecraft:oak_sapling") as i32;
 pub const ITEM_SAND: i32 = crate::registry_id(mc_registry::ITEMS, "minecraft:sand") as i32;
 pub const ITEM_OAK_LOG: i32 = crate::registry_id(mc_registry::ITEMS, "minecraft:oak_log") as i32;
+/// P40 合成用：`data/777/items.json` 的 oak_planks.id=63（编译期查生成表）。
+pub const ITEM_OAK_PLANKS: i32 = crate::registry_id(mc_registry::ITEMS, "minecraft:oak_planks") as i32;
 pub const ITEM_COAL: i32 = crate::registry_id(mc_registry::ITEMS, "minecraft:coal") as i32;
 pub const ITEM_STICK: i32 = crate::registry_id(mc_registry::ITEMS, "minecraft:stick") as i32;
 pub const ITEM_RAW_IRON: i32 = crate::registry_id(mc_registry::ITEMS, "minecraft:raw_iron") as i32;
@@ -241,6 +243,7 @@ mod tests {
             ("minecraft:oak_sapling", 77, ITEM_OAK_SAPLING),
             ("minecraft:sand", 88, ITEM_SAND),
             ("minecraft:oak_log", 163, ITEM_OAK_LOG),
+            ("minecraft:oak_planks", 63, ITEM_OAK_PLANKS),
             ("minecraft:coal", 1010, ITEM_COAL),
             ("minecraft:stick", 1060, ITEM_STICK),
             ("minecraft:raw_iron", 1017, ITEM_RAW_IRON),

@@ -1,8 +1,10 @@
 //! mc-world: Chunk 存储 + 生成 + 存档，不依赖网络
 //! 对标 FerrumC world + SteelMC parity 思路
+pub mod crafting;
 pub mod crops;
 pub mod drops;
 pub mod load;
+pub mod survival;
 pub mod mutable;
 pub mod save;
 pub mod store; // P36：redb 自有世界存储原型（不接入生产路径，不做 Anvil）
@@ -16,6 +18,7 @@ pub use crops::{
     plant_at, CropKind, CropSpec, CROPS,
 };
 pub use drops::{Drop, block_for_item, drops_for_block};
+pub use survival::{SurvivalState, food_for_item};
 pub use items::{ItemEntities, ItemEntity};
 pub use inventory::PlayerInventory;
 pub use xp::{XpOrb, XpOrbEntities};
