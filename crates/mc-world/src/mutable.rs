@@ -145,6 +145,17 @@ impl MutableWorld {
             .collect()
     }
 
+    /// P37：当前所有新植物方块（新 age 作物/新树苗/竖向/瓜果梗/可可）。
+    /// 供重启后 `DropState::adopt_existing_plants` 重新纳入跟踪。
+    pub fn plant_blocks(&self) -> Vec<((i32, i32, i32), u16)> {
+        self.lock_read()
+            .overrides
+            .iter()
+            .filter(|(_, id)| crate::plant_at(**id).is_some())
+            .map(|(pos, id)| (*pos, *id))
+            .collect()
+    }
+
     /// P26：当前所有树苗方块（pos 列表；树苗永不在基底里，override 全量即全集）。
     /// 供重启后把存量树苗重新纳入生长（`adopt_existing_saplings`）。
     pub fn sapling_blocks(&self) -> Vec<(i32, i32, i32)> {

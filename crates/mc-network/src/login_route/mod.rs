@@ -4,6 +4,7 @@
 //! 视距来自 `ServerConfig.view_distance`（`clamp_view_radius` 限制 2..=10），
 //! 区块包体优先走共享 `ChunkCache`；连接结束在所有退出路径恰好投递一次 Disconnect。
 pub mod block_edit;
+pub mod crops;
 pub mod drop_sync;
 pub mod login;
 pub mod view_sync;
@@ -226,76 +227,11 @@ async fn play_loop(
                             &act,
                         ) {
                             if let Some(world) = mutable {
-                                // P27/P33：土壤被挖连带拔掉上方作物（原版 pop 口径：上方
-                                // 小麦/胡萝卜/马铃薯/甜菜/树苗一起掉并摘除跟踪，避免作物悬空）；
-                                // 原木被挖登记周围
-                                // 树叶 decay 观察。必须在 apply/spawn 之前改 outcome，
-                                // 广播与掉落才能一次下发。
+                                // P27/P33/P37：挖掘连带（土壤 pop 作物/树苗、新土壤 pop
+                                // 新作物、竖著作物连根、原木登记树叶 decay）。必须在
+                                // apply/spawn 之前改 outcome，广播与掉落才能一次下发。
                                 if let Some(ds) = &opts.drops {
-                                    let snapshot = outcome.changes.clone();
-                                    for c in snapshot {
-                                        if c.new_id == mc_world::AIR_BLOCK_ID
-                                            && mc_world::is_crop_soil(c.old_id)
-                                        {
-                                            let above = world.get(c.x, c.y + 1, c.z);
-                                            if mc_world::crop_age_of(above).is_some() {
-                                                let old = world.set(
-                                                    c.x,
-                                                    c.y + 1,
-                                                    c.z,
-                                                    mc_world::AIR_BLOCK_ID,
-                                                );
-                                                outcome.changes.push(BlockChange {
-                                                    x: c.x,
-                                                    y: c.y + 1,
-                                                    z: c.z,
-                                                    old_id: old,
-                                                    new_id: mc_world::AIR_BLOCK_ID,
-                                                });
-                                                outcome.drops.extend(
-                                                    mc_world::drops_for_block(
-                                                        old,
-                                                        c.x,
-                                                        c.y + 1,
-                                                        c.z,
-                                                        world.seed(),
-                                                    ),
-                                                );
-                                                ds.uproot_crop(c.x, c.y + 1, c.z);
-                                            } else if above
-                                                == mc_world::OAK_SAPLING_BLOCK_ID
-                                            {
-                                                let old = world.set(
-                                                    c.x,
-                                                    c.y + 1,
-                                                    c.z,
-                                                    mc_world::AIR_BLOCK_ID,
-                                                );
-                                                outcome.changes.push(BlockChange {
-                                                    x: c.x,
-                                                    y: c.y + 1,
-                                                    z: c.z,
-                                                    old_id: old,
-                                                    new_id: mc_world::AIR_BLOCK_ID,
-                                                });
-                                                outcome.drops.extend(
-                                                    mc_world::drops_for_block(
-                                                        old,
-                                                        c.x,
-                                                        c.y + 1,
-                                                        c.z,
-                                                        world.seed(),
-                                                    ),
-                                                );
-                                                ds.uproot_sapling(c.x, c.y + 1, c.z);
-                                            }
-                                        }
-                                        if c.new_id == mc_world::AIR_BLOCK_ID
-                                            && c.old_id == mc_world::OAK_LOG_BLOCK_ID
-                                        {
-                                            ds.schedule_leaf_decay_around(world, c.x, c.y, c.z);
-                                        }
-                                    }
+                                    crops::apply_dig_effects(world, ds, &mut outcome);
                                 }
                                 if let Err(e) =
                                     apply_block_outcome(stream, addr, profile, opts, cache, &outcome).await
@@ -377,7 +313,8 @@ async fn play_loop(
                                         BonemealAction::Wheat(outcome) => {
                                             let advanced = outcome.changes.iter().any(|c| {
                                                 c.new_id != c.old_id
-                                                    && mc_world::crop_age_of(c.new_id).is_some()
+                                                    && (mc_world::any_age_crop_of(c.new_id).is_some()
+                                                        || mc_world::plant_at(c.new_id).is_some())
                                             });
                                             if let Err(e) = apply_block_outcome(
                                                 stream, addr, profile, opts, cache, &outcome,
@@ -389,12 +326,23 @@ async fn play_loop(
                                             }
                                             if advanced {
                                                 if let Some(ds) = &opts.drops {
-                                                    if let Some(c) = outcome.changes.first() {
+                                                    for c in &outcome.changes {
+                                                        if c.new_id == c.old_id {
+                                                            continue;
+                                                        }
                                                         if let Some((crop, age)) =
                                                             mc_world::crop_age_of(c.new_id)
                                                         {
                                                             ds.apply_bonemeal_crop_spec(
                                                                 crop, c.x, c.y, c.z, age,
+                                                            );
+                                                        } else {
+                                                            ds.apply_bonemeal_plant(
+                                                                mutable.unwrap(),
+                                                                c.x,
+                                                                c.y,
+                                                                c.z,
+                                                                c.new_id,
                                                             );
                                                         }
                                                     }
@@ -480,6 +428,80 @@ async fn play_loop(
                                                 break;
                                             }
                                         }
+                                        BonemealAction::GrowTreeKind {
+                                            x,
+                                            y,
+                                            z,
+                                            sequence,
+                                            spec,
+                                        } => {
+                                            // P37：其它树种按各自 log/leaves 落多格树；
+                                            // hub 广播由 grow_tree_kind_now 完成，这里只回 Ack。
+                                            let grew = opts
+                                                .drops
+                                                .as_ref()
+                                                .map(|ds| {
+                                                    ds.grow_tree_kind_now(
+                                                        mutable.unwrap(),
+                                                        x,
+                                                        y,
+                                                        z,
+                                                        spec,
+                                                    )
+                                                })
+                                                .unwrap_or(false);
+                                            if grew {
+                                                if let Some(ds) = &opts.drops {
+                                                    let consumed = ds.with_inventory(
+                                                        opts.conn_id,
+                                                        |inv| inv.consume_held(),
+                                                    );
+                                                    if consumed.flatten().is_some() {
+                                                        if let Err(e) =
+                                                            send_held_slot(stream, opts, ds).await
+                                                        {
+                                                            debug!("play uuid={} bonemeal held sync failed ({e}), closing", profile.uuid);
+                                                            break;
+                                                        }
+                                                        ds.save_inventory(
+                                                            opts.conn_id,
+                                                            &conn_user,
+                                                        );
+                                                    }
+                                                }
+                                                if let Err(e) =
+                                                    send_ack_only(stream, threshold, sequence).await
+                                                {
+                                                    debug!("play uuid={} bonemeal ack failed ({e}), closing", profile.uuid);
+                                                    break;
+                                                }
+                                            } else if let Err(e) = apply_block_outcome(
+                                                stream,
+                                                addr,
+                                                profile,
+                                                opts,
+                                                cache,
+                                                &BlockEditOutcome {
+                                                    sequence,
+                                                    changes: vec![{
+                                                        let cur = mutable.unwrap().get(x, y, z);
+                                                        BlockChange {
+                                                            x,
+                                                            y,
+                                                            z,
+                                                            old_id: cur,
+                                                            new_id: cur,
+                                                        }
+                                                    }],
+                                                    drops: Vec::new(),
+                                                },
+                                            )
+                                            .await
+                                            {
+                                                debug!("play uuid={} bonemeal noop failed ({e}), closing", profile.uuid);
+                                                break;
+                                            }
+                                        }
                                         BonemealAction::Noop { sequence, resend } => {
                                             if let Err(e) = apply_block_outcome(
                                                 stream,
@@ -504,55 +526,149 @@ async fn play_loop(
                             }
                             continue;
                         }
-                        // P22/P23/P33：手持作物种子（小麦/胡萝卜/马铃薯/甜菜）或树苗对土壤
-                        // 顶面右键 → 种下（专属路径，不走方块映射）。树苗复用同一判定
-                        // （仅 plant_id 不同），但不登记生长；其它种子由通用作物表映射。
-                        let held_plant: Option<u16> = opts
+                        // P22/P23/P33/P37：手持种子/树苗/可可豆对土壤顶面（可可在
+                        // jungle_log 侧面）右键 → 专属种植路径，不走方块放置映射。
+                        // 路由/判定收敛在 `login_route::crops`，这里只做发包与扣手持。
+                        let held_item = opts
                             .drops
                             .as_ref()
                             .and_then(|ds| ds.with_inventory(opts.conn_id, |inv| inv.held()).flatten())
-                            .and_then(|(item_id, _)| {
-                                if item_id == mc_world::drops::ITEM_OAK_SAPLING {
-                                    Some(mc_world::OAK_SAPLING_BLOCK_ID)
-                                } else {
-                                    mc_world::crop_base_for_seed(item_id)
-                                }
-                            });
-                        if let Some(plant_id) = held_plant {
-                            if let Some(outcome) = decide_plant(
-                                mutable,
-                                eye_of(last_pos),
-                                view.center(),
-                                view.radius(),
-                                &act,
-                                plant_id,
-                            ) {
-                                if mutable.is_some() {
-                                    let planted = outcome.changes.iter().any(|c| {
-                                        c.new_id == plant_id && c.old_id != c.new_id
-                                    });
-                                    if let Err(e) = apply_block_outcome(
-                                        stream, addr, profile, opts, cache, &outcome,
-                                    )
-                                    .await
-                                    {
-                                        debug!("play uuid={} plant outcome failed ({e}), closing", profile.uuid);
-                                        break;
-                                    }
-                                    if planted {
-                                        if let Some(ds) = &opts.drops {
-                                            // 所有作物登记多阶段生长（按各自 CropSpec）；
-                                            // 树苗登记单次长树（P26）。
-                                            if plant_id == mc_world::OAK_SAPLING_BLOCK_ID {
-                                                if let Some(c) = outcome.changes.first() {
-                                                    ds.plant_sapling(c.x, c.y, c.z);
-                                                }
-                                            } else if let Some(c) = outcome.changes.first() {
-                                                let crop = mc_world::crop_age_of(plant_id)
-                                                    .map(|(crop, _)| crop)
-                                                    .unwrap_or(&mc_world::crops::WHEAT);
-                                                ds.plant_crop_spec(crop, c.x, c.y, c.z);
+                            .map(|(item_id, _)| item_id);
+                        let routed = held_item.map(crops::held_plant).unwrap_or(crops::HeldPlant::None);
+                        let mut plant_outcome: Option<BlockEditOutcome> = None;
+                        let mut legacy_id: Option<u16> = None;
+                        let mut new_plant: Option<(mc_world::crops::PlantKind, u8)> = None;
+                        match routed {
+                            crops::HeldPlant::Legacy(plant_id) => {
+                                legacy_id = Some(plant_id);
+                                plant_outcome = decide_plant(
+                                    mutable,
+                                    eye_of(last_pos),
+                                    view.center(),
+                                    view.radius(),
+                                    &act,
+                                    plant_id,
+                                );
+                            }
+                            crops::HeldPlant::Age(spec) => {
+                                plant_outcome = crops::decide_plant_top(
+                                    mutable,
+                                    eye_of(last_pos),
+                                    view.center(),
+                                    view.radius(),
+                                    &act,
+                                    spec.base_id,
+                                    spec.soil,
+                                );
+                                if let Some(outcome) = &mut plant_outcome {
+                                    let planted = outcome.changes.iter().any(|c| c.new_id == spec.base_id && c.old_id != c.new_id);
+                                    // 猪笼草上下两半：种下时同步补上半（空气才放）。
+                                    if planted && spec.name == mc_world::crops::PITCHER_CROP.name {
+                                        let c = outcome.changes[0];
+                                        let (_, upper) = mc_world::crops::pitcher_states(0);
+                                        if mutable.map(|w| w.get(c.x, c.y + 1, c.z)) == Some(mc_world::AIR_BLOCK_ID) {
+                                            if let Some(world) = mutable {
+                                                let old = world.set(c.x, c.y + 1, c.z, upper);
+                                                outcome.changes.push(BlockChange { x: c.x, y: c.y + 1, z: c.z, old_id: old, new_id: upper });
                                             }
+                                        }
+                                    }
+                                }
+                                new_plant = Some((mc_world::crops::PlantKind::Age(spec), 0));
+                            }
+                            crops::HeldPlant::Tree(spec) => {
+                                plant_outcome = crops::decide_plant_top(
+                                    mutable,
+                                    eye_of(last_pos),
+                                    view.center(),
+                                    view.radius(),
+                                    &act,
+                                    spec.sapling_id,
+                                    mc_world::crops::Soil::Crop,
+                                );
+                                new_plant = Some((mc_world::crops::PlantKind::Tree(spec), 0));
+                            }
+                            crops::HeldPlant::Vertical(spec) => {
+                                plant_outcome = crops::decide_plant_top(
+                                    mutable,
+                                    eye_of(last_pos),
+                                    view.center(),
+                                    view.radius(),
+                                    &act,
+                                    spec.base_id,
+                                    spec.soil,
+                                );
+                                new_plant = Some((mc_world::crops::PlantKind::Vertical(spec), 0));
+                            }
+                            crops::HeldPlant::Cocoa => {
+                                plant_outcome = crops::decide_plant_side(
+                                    mutable,
+                                    eye_of(last_pos),
+                                    view.center(),
+                                    view.radius(),
+                                    &act,
+                                );
+                                let facing = mc_world::crops::cocoa_facing_index(act.face).unwrap_or(0);
+                                new_plant = Some((mc_world::crops::PlantKind::Side(&mc_world::crops::COCOA), facing));
+                            }
+                            crops::HeldPlant::None => {}
+                        }
+                        if let Some(outcome) = plant_outcome {
+                            if let Some(plant_id) = legacy_id {
+                                if let Some(_world) = mutable {
+                                        let planted = outcome.changes.iter().any(|c| {
+                                            c.new_id == plant_id && c.old_id != c.new_id
+                                        });
+                                        if let Err(e) = apply_block_outcome(
+                                            stream, addr, profile, opts, cache, &outcome,
+                                        )
+                                        .await
+                                        {
+                                            debug!("play uuid={} plant outcome failed ({e}), closing", profile.uuid);
+                                            break;
+                                        }
+                                        if planted {
+                                            if let Some(ds) = &opts.drops {
+                                                if plant_id == mc_world::OAK_SAPLING_BLOCK_ID {
+                                                    if let Some(c) = outcome.changes.first() {
+                                                        ds.plant_sapling(c.x, c.y, c.z);
+                                                    }
+                                                } else if let Some(c) = outcome.changes.first() {
+                                                    let crop = mc_world::crop_age_of(plant_id)
+                                                        .map(|(crop, _)| crop)
+                                                        .unwrap_or(&mc_world::crops::WHEAT);
+                                                    ds.plant_crop_spec(crop, c.x, c.y, c.z);
+                                                }
+                                                let consumed = ds.with_inventory(opts.conn_id, |inv| {
+                                                    inv.consume_held()
+                                                });
+                                                if consumed.flatten().is_some() {
+                                                    if let Err(e) = send_held_slot(stream, opts, ds).await
+                                                    {
+                                                        debug!("play uuid={} plant held sync failed ({e}), closing", profile.uuid);
+                                                        break;
+                                                    }
+                                                    ds.save_inventory(opts.conn_id, &conn_user);
+                                                }
+                                            }
+                                        }
+                                    }
+                                continue;
+                            }
+                            if let Some((kind, facing)) = new_plant {
+                                if let Some(c) = outcome.changes.first() {
+                                    let planted = c.old_id != c.new_id;
+                                    if planted {
+                                        if let Err(e) = apply_block_outcome(
+                                            stream, addr, profile, opts, cache, &outcome,
+                                        )
+                                        .await
+                                        {
+                                            debug!("play uuid={} plant outcome failed ({e}), closing", profile.uuid);
+                                            break;
+                                        }
+                                        if let Some(ds) = &opts.drops {
+                                            ds.plant_kind(kind, c.x, c.y, c.z, facing);
                                             let consumed = ds.with_inventory(opts.conn_id, |inv| {
                                                 inv.consume_held()
                                             });
@@ -565,9 +681,19 @@ async fn play_loop(
                                                 ds.save_inventory(opts.conn_id, &conn_user);
                                             }
                                         }
+                                    } else if let Err(e) = apply_block_outcome(
+                                        stream, addr, profile, opts, cache, &outcome,
+                                    )
+                                    .await
+                                    {
+                                        debug!("play uuid={} plant rollback failed ({e}), closing", profile.uuid);
+                                        break;
                                     }
                                 }
+                                continue;
                             }
+                        }
+                        if !matches!(routed, crops::HeldPlant::None) {
                             continue;
                         }
                         // P27：手持锄头对土壤顶面右键 → 耕地（专属路径，不消耗，不扣耐久）。

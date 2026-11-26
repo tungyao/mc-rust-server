@@ -10,7 +10,10 @@ pub mod items;
 pub mod inventory;
 pub mod xp;
 
-pub use crops::{CropKind, CropSpec, CROPS, crop_age, crop_age_of, crop_base_for_seed, crop_for_seed, crop_stage_id};
+pub use crops::{
+    any_age_crop_of, crop_age, crop_age_of, crop_base_for_seed, crop_for_seed, crop_stage_id,
+    plant_at, CropKind, CropSpec, CROPS,
+};
 pub use drops::{Drop, block_for_item, drops_for_block};
 pub use items::{ItemEntities, ItemEntity};
 pub use inventory::PlayerInventory;
@@ -82,6 +85,30 @@ const fn registry_id(table: &[(u32, &str)], name: &str) -> u32 {
         i += 1;
     }
     panic!("mc-registry generated table is missing a required name");
+}
+
+/// P37 编译期 blockstate 解析：`full/blocks.json` 里每个方块的 states 连续排列，
+/// 由 `mc-registry` 生成 `(first_state_id, name, count)`。按属性组合索引取 ID，
+/// 避免 cocoa(age×facing)/bamboo(age×leaves×stage) 这类多属性方块写死数字。
+const fn state_index_id(table: &[(u32, &str, u16)], name: &str, index: u16) -> u16 {
+    let needle = name.as_bytes();
+    let mut i = 0;
+    while i < table.len() {
+        let (first, candidate, count) = table[i];
+        let haystack = candidate.as_bytes();
+        let mut same = haystack.len() == needle.len();
+        let mut j = 0;
+        while same && j < needle.len() {
+            same = haystack[j] == needle[j];
+            j += 1;
+        }
+        if same {
+            assert!(index < count, "blockstate index out of range");
+            return (first + index as u32) as u16;
+        }
+        i += 1;
+    }
+    panic!("mc-registry generated block-state table is missing a required name");
 }
 
 /// 方块 ID 来自 `mc_registry::BLOCKS` 的 26.3 全局 blockstate ID（default_state_id）：
@@ -156,31 +183,7 @@ pub fn is_crop_soil(id: u16) -> bool {
 /// leaves 被 trunk 占位时跳过，与世界生成“trunk 可覆盖 leaves、leaves 只盖 air”同口径；
 /// 运行时在此基础上要求目标为空气才放，见 `DropState::tick_saplings`）。
 pub fn sapling_oak_blocks(sx: i32, sy: i32, sz: i32) -> Vec<((i32, i32, i32), u16)> {
-    let top = sy + SAPLING_TRUNK_H as i32 - 1;
-    let mut out = Vec::with_capacity(57);
-    for y in sy..=top {
-        out.push(((sx, y, sz), OAK_LOG_BLOCK_ID));
-    }
-    for dy in -2i32..=1 {
-        let y = top + dy;
-        for dx in -2i32..=2 {
-            for dz in -2i32..=2 {
-                let shape = match dy {
-                    -2 | -1 => !(dx.abs() == 2 && dz.abs() == 2),
-                    0 => dx.abs() <= 1 && dz.abs() <= 1,
-                    _ => dx.abs() + dz.abs() <= 1,
-                };
-                if !shape {
-                    continue;
-                }
-                if dx == 0 && y >= sy && y <= top && dz == 0 {
-                    continue; // 树干柱：trunk 已占，leaves 不重复
-                }
-                out.push(((sx + dx, y, sz + dz), OAK_LEAVES_BLOCK_ID));
-            }
-        }
-    }
-    out
+    crops::tree_blocks(OAK_LOG_BLOCK_ID, OAK_LEAVES_BLOCK_ID, sx, sy, sz)
 }
 
 /// 按 y 分层的地形带：y <= GROUND_LEVEL 石头，61..=63 泥土，64 草方块，其余空气。
