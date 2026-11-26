@@ -2,207 +2,369 @@
 <html lang="zh-CN">
 <head>
 <meta charset="utf-8">
-<title>MC Admin (26.3/777)</title>
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>MC Admin · Vue 3 + Naive UI (26.3/777)</title>
+<!--
+  前端方案：Vue 3 + Naive UI，ESM CDN（esm.sh）+ importmap，零构建步骤。
+  仍然单文件 admin_page.html + include_str!，服务端不新增路由、不新增 Rust 依赖。
+  权衡：浏览器首次打开需联网从 esm.sh 加载前端资源；加载失败时页面给出提示（见 boot catch）。
+  固定版本：vue 3.5.13（esm-browser 完整版，含模板编译器）、naive-ui 2.41.0（?external=vue 共用同一 Vue 实例）。
+  后端 API / 协议语义一字未动；broadcast 仍是 501 stub，这里只展示说明、不发包。
+-->
+<script type="importmap">
+{
+  "imports": {
+    "vue": "https://esm.sh/vue@3.5.13/dist/vue.esm-browser.prod.js",
+    "naive-ui": "https://esm.sh/naive-ui@2.41.0?external=vue"
+  }
+}
+</script>
 <style>
-body { font-family: monospace; max-width: 900px; margin: 1em auto; background: #111; color: #ddd; }
-h2 { border-bottom: 1px solid #444; padding-bottom: 4px; }
-table { border-collapse: collapse; width: 100%; }
-td, th { border: 1px solid #444; padding: 4px 8px; text-align: left; }
-button, input, select { font-family: monospace; background: #222; color: #ddd; border: 1px solid #555; padding: 4px 8px; }
-button:hover { background: #333; cursor: pointer; }
-.card { background: #1a1a1a; padding: 8px 12px; margin-bottom: 1em; }
-.warn { color: #fa0; }
-pre { white-space: pre-wrap; }
-.grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(110px, 1fr)); gap: 4px; margin-top: 6px; }
-.cell { background: #222; border: 1px solid #555; padding: 4px; text-align: center; cursor: pointer; }
-.cell:hover { background: #333; }
-.cell.sel { border-color: #fa0; background: #332d10; }
-.cell small { color: #888; display: block; font-size: 11px; word-break: break-all; }
-.cell.empty { background: #181818; color: #555; cursor: default; }
-.row { margin: 4px 0; }
-.hint { color: #888; font-size: 12px; }
+  html, body { margin: 0; padding: 0; }
+  body { background: #101014; color: #e0e0e0; font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", "Microsoft YaHei", sans-serif; }
+  #app { max-width: 1120px; margin: 0 auto; padding: 16px 12px 48px; }
+  .wrap { display: flex; flex-direction: column; gap: 12px; }
+  .head { display: flex; align-items: center; gap: 12px; flex-wrap: wrap; }
+  .head h1 { font-size: 20px; margin: 0; }
+  .muted { color: #8a8a8a; font-size: 12px; }
+  .kv { margin: 0; padding: 8px 10px; background: #0b0b0e; border: 1px solid #333; border-radius: 6px;
+        max-height: 260px; overflow: auto; font: 12px/1.5 ui-monospace, SFMono-Regular, Consolas, monospace; white-space: pre-wrap; }
+  .row { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; margin: 6px 0; }
+  .label { min-width: 76px; color: #aaa; font-size: 13px; }
+  code { font-family: ui-monospace, SFMono-Regular, Consolas, monospace; color: #f0c070; }
+  .item-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(118px, 1fr)); gap: 6px; margin-top: 8px; }
+  .item-cell { border: 1px solid #3a3a3a; border-radius: 6px; padding: 6px; background: #1c1c20;
+               cursor: pointer; font-size: 12px; line-height: 1.35; user-select: none; }
+  .item-cell:hover { background: #2a2a30; }
+  .item-cell.selected { border-color: #f0a020; background: #332d10; }
+  .item-cell.empty { background: #161619; color: #5c5c5c; cursor: default; border-style: dashed; }
+  .item-cell small { display: block; color: #888; font-size: 10px; word-break: break-all; margin-top: 2px; }
+  .boot-error { padding: 16px; border: 1px solid #a33; border-radius: 8px; background: #2a1414; color: #f8b4b4; }
 </style>
 </head>
 <body>
-<h1>MC Admin 面板（只听本机 · 无鉴权 · 禁止暴露公网）</h1>
-
-<div class="card">
-<h2>世界状态（5s 轮询）</h2>
-<pre id="world">loading…</pre>
-<button onclick="saveNow()">立即存档</button>
-<span id="saveMsg"></span>
-</div>
-
-<div class="card">
-<h2>在线玩家（2s 轮询）</h2>
-<table><thead><tr><th>conn</th><th>用户名</th><th>地址</th><th>位置</th><th>在线(s)</th><th>操作</th></tr></thead>
-<tbody id="online"></tbody></table>
-</div>
-
-<div class="card">
-<h2>发放物品</h2>
-<div class="row">
-<label>玩家 <select id="giveUser"></select></label>
-<label>数量(1-640) <input id="giveCount" type="number" value="64" min="1" max="640"></label>
-</div>
-<div class="row">
-<label>分类 <select id="giveCat" onchange="renderGiveGrid()"><option value="">全部</option></select></label>
-<label>搜索 <input id="giveQ" placeholder="中文名/注册名/id" size="24" oninput="renderGiveGrid()"></label>
-<span class="hint" id="giveCount2"></span>
-</div>
-<div id="giveGrid" class="grid"></div>
-<div class="row">已选：<span id="giveSel">minecraft:cobblestone</span>
-<button onclick="give()">发放</button>
-<span id="giveMsg"></span></div>
-</div>
-
-<div class="card">
-<h2>查看背包</h2>
-<div class="row">
-<label>玩家 <select id="invUser"></select></label>
-<label>分类 <select id="invCat" onchange="renderInvGrid()"><option value="">全部</option></select></label>
-<label>关键词 <input id="invQ" placeholder="中文名/注册名" size="20" oninput="renderInvGrid()"></label>
-<button onclick="showInv()">查询</button>
-<span class="hint" id="invMsg"></span>
-</div>
-<div id="invGrid" class="grid"></div>
-</div>
-
-<div class="card">
-<h2>广播</h2>
-<p class="warn">未实现：777 system_chat 包体无抓包真值，不猜字节（见计划 §6.4）。接口返回 501。</p>
-</div>
-
-<script>
-let CATALOG = [], BYID = {}, SEL = 'minecraft:cobblestone', LASTINV = null;
-async function jget(p) { const r = await fetch(p); return r.json(); }
-async function jpost(p, b) {
-  const r = await fetch(p, {method: 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify(b)});
-  return {status: r.status, body: await r.json()};
-}
-function matchQ(it, q) {
-  q = (q || '').trim().toLowerCase();
-  if (!q) return true;
-  return (it.name_zh || '').toLowerCase().includes(q) || (it.name || '').toLowerCase().includes(q) || String(it.id) === q;
-}
-async function loadItems() {
+<div id="app"></div>
+<script type="module">
+async function boot() {
   try {
-    const v = await jget('/api/items');
-    CATALOG = v.items || []; BYID = {};
-    for (const it of CATALOG) BYID[it.id] = it;
-    for (const id of ['giveCat', 'invCat']) {
-      const sel = document.getElementById(id);
-      const cats = [...new Set(CATALOG.map(i => i.category))].sort();
-      for (const c of cats) { const o = document.createElement('option'); o.value = c; o.textContent = c; sel.appendChild(o); }
+    // 动态 import + importmap：Vue 与 Naive UI 共用同一个 Vue 实例（external=vue）。
+    const { createApp, ref, computed, onMounted, onBeforeUnmount } = await import('vue');
+    const naive = await import('naive-ui');
+    const {
+      NConfigProvider, NMessageProvider, NCard, NTable, NButton, NInput,
+      NInputNumber, NSelect, NTag, NAlert, darkTheme, useMessage,
+    } = naive;
+
+    // 与旧页面一致的极简 fetch 封装（保留服务端单测要求的 fetch( 调用）。
+    async function jget(path) {
+      const r = await fetch(path);
+      return await r.json();
     }
-    renderGiveGrid();
-  } catch (e) { document.getElementById('giveMsg').textContent = 'items load failed: ' + e; }
-}
-function renderGiveGrid() {
-  const cat = document.getElementById('giveCat').value, q = document.getElementById('giveQ').value;
-  const g = document.getElementById('giveGrid'); g.innerHTML = '';
-  const list = CATALOG.filter(it => (!cat || it.category === cat) && matchQ(it, q));
-  const CAP = 240;
-  document.getElementById('giveCount2').textContent = '共 ' + list.length + ' 项' + (list.length > CAP ? '（只显示前' + CAP + '，请加过滤条件）' : '');
-  for (const it of list.slice(0, CAP)) {
-    const d = document.createElement('div');
-    d.className = 'cell' + (it.name === SEL ? ' sel' : '');
-    const b = document.createElement('div'); b.textContent = it.name_zh; d.appendChild(b);
-    const s = document.createElement('small'); s.textContent = it.name + ' #' + it.id; d.appendChild(s);
-    d.onclick = (function(nm) { return function() {
-      SEL = nm; document.getElementById('giveSel').textContent = nm; renderGiveGrid();
-    }; })(it.name);
-    g.appendChild(d);
+    async function jpost(path, body) {
+      const r = await fetch(path, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(body),
+      });
+      return { status: r.status, body: await r.json() };
+    }
+    function matchQ(it, q) {
+      q = (q || '').trim().toLowerCase();
+      if (!q) return true;
+      return (it.name_zh || '').toLowerCase().includes(q)
+        || (it.name || '').toLowerCase().includes(q)
+        || String(it.id) === q;
+    }
+
+    const ITEM_CAP = 240; // 与旧页面一致：完整清单 1658 项，网格最多渲染前 240 项。
+
+    const appTemplate = `
+      <n-config-provider :theme="darkTheme">
+        <n-message-provider>
+          <dashboard />
+        </n-message-provider>
+      </n-config-provider>
+    `;
+
+    const dashboardTemplate = `
+      <div class="wrap">
+        <div class="head">
+          <h1>MC Admin 面板</h1>
+          <n-tag type="warning" size="small" :bordered="false">只听本机 · 无鉴权 · 禁止暴露公网</n-tag>
+          <span class="muted">26.3 / 777 · Vue 3 + Naive UI</span>
+        </div>
+
+        <n-card size="small" title="世界状态（5s 轮询）">
+          <template #header-extra>
+            <n-button size="tiny" :loading="saving" @click="saveNow">立即存档</n-button>
+          </template>
+          <pre class="kv">{{ worldText }}</pre>
+          <div v-if="saveMsg" class="muted">{{ saveMsg }}</div>
+        </n-card>
+
+        <n-card size="small" title="在线玩家（2s 轮询）">
+          <n-table :bordered="true" :single-line="false" size="small">
+            <thead>
+              <tr><th>conn</th><th>用户名</th><th>地址</th><th>位置</th><th>在线(s)</th><th>操作</th></tr>
+            </thead>
+            <tbody>
+              <tr v-for="p in online" :key="p.conn_id">
+                <td>{{ p.conn_id }}</td>
+                <td>{{ p.username }}</td>
+                <td>{{ p.addr }}</td>
+                <td>{{ fmtPos(p.pos) }}</td>
+                <td>{{ p.online_secs }}</td>
+                <td><n-button size="tiny" type="error" secondary @click="kick(p)">踢人</n-button></td>
+              </tr>
+              <tr v-if="!online.length"><td colspan="6" class="muted">当前无在线玩家</td></tr>
+            </tbody>
+          </n-table>
+          <template #footer><span class="muted">在线 {{ online.length }} 人；下方“发放 / 查看背包”的玩家列表取自这里。</span></template>
+        </n-card>
+
+        <n-card size="small" title="发放物品">
+          <div class="row">
+            <span class="label">玩家</span>
+            <n-select v-model:value="giveUser" :options="userOptions" filterable clearable
+                      placeholder="选择在线玩家" size="small" style="width: 220px" />
+            <span class="label">数量(1-640)</span>
+            <n-input-number v-model:value="giveCount" :min="1" :max="640" size="small" style="width: 140px" />
+          </div>
+          <div class="row">
+            <span class="label">分类</span>
+            <n-select v-model:value="giveCat" :options="categoryOptions" size="small" style="width: 170px" />
+            <span class="label">搜索</span>
+            <n-input v-model:value="giveQuery" placeholder="中文名/注册名/id" clearable size="small" style="width: 240px" />
+            <span class="muted">{{ giveHint }}</span>
+          </div>
+          <div class="item-grid">
+            <div v-for="it in visibleItems" :key="it.id" class="item-cell"
+                 :class="{ selected: it.name === selectedItem }" @click="selectedItem = it.name">
+              <div>{{ it.name_zh }}</div>
+              <small>{{ it.name }} #{{ it.id }}</small>
+            </div>
+          </div>
+          <div class="row">
+            <span class="label">已选</span><code>{{ selectedItem }}</code>
+            <n-button type="primary" size="small" :disabled="!giveUser" @click="giveItem">发放</n-button>
+            <span class="muted">{{ giveMsg }}</span>
+          </div>
+        </n-card>
+
+        <n-card size="small" title="查看背包">
+          <div class="row">
+            <span class="label">玩家</span>
+            <n-select v-model:value="invUser" :options="userOptions" filterable clearable
+                      placeholder="选择在线玩家" size="small" style="width: 220px" />
+            <span class="label">分类</span>
+            <n-select v-model:value="invCat" :options="categoryOptions" size="small" style="width: 170px" />
+            <span class="label">关键词</span>
+            <n-input v-model:value="invQuery" placeholder="中文名/注册名" clearable size="small" style="width: 200px" />
+            <n-button size="small" :disabled="!invUser" @click="showInv">查询</n-button>
+          </div>
+          <div class="item-grid">
+            <div v-for="s in invSlots" :key="'s' + s.slot" class="item-cell">
+              <div>{{ s.name_zh }} ×{{ s.count }}</div>
+              <small>[{{ s.slot }}] {{ s.name }}</small>
+            </div>
+            <div v-for="n in invEmptySlots" :key="'e' + n" class="item-cell empty">[{{ n }}] 空</div>
+          </div>
+          <template #footer><span class="muted">{{ invHint }}</span></template>
+        </n-card>
+
+        <n-card size="small" title="广播">
+          <n-alert type="warning" :show-icon="false">
+            未实现：777 system_chat 包体无抓包真值，不猜字节（见计划 §6.4）。接口返回 501。
+          </n-alert>
+        </n-card>
+      </div>
+    `;
+
+    const Dashboard = {
+      template: dashboardTemplate,
+      setup() {
+        const message = useMessage();
+        const world = ref(null);
+        const worldText = computed(() => world.value === null
+          ? 'loading…'
+          : JSON.stringify(world.value, null, 2));
+        const online = ref([]);
+        const saving = ref(false);
+        const saveMsg = ref('');
+
+        const catalog = ref([]);
+        const selectedItem = ref('minecraft:cobblestone');
+        const giveUser = ref(null);
+        const giveCount = ref(64);
+        const giveCat = ref('');
+        const giveQuery = ref('');
+        const giveMsg = ref('');
+
+        const invUser = ref(null);
+        const invCat = ref('');
+        const invQuery = ref('');
+        const invData = ref(null);
+        const invError = ref('');
+
+        const userOptions = computed(() =>
+          online.value.map(p => ({ label: p.username, value: p.username })));
+        const categoryOptions = computed(() => {
+          const cats = [...new Set(catalog.value.map(i => i.category))].sort();
+          return [{ label: '全部', value: '' }, ...cats.map(c => ({ label: c, value: c }))];
+        });
+
+        const filteredItems = computed(() => catalog.value.filter(it =>
+          (!giveCat.value || it.category === giveCat.value) && matchQ(it, giveQuery.value)));
+        const visibleItems = computed(() => filteredItems.value.slice(0, ITEM_CAP));
+        const giveHint = computed(() => {
+          const n = filteredItems.value.length;
+          return '共 ' + n + ' 项' + (n > ITEM_CAP ? '（只显示前' + ITEM_CAP + '，请加过滤条件）' : '');
+        });
+
+        const filteringInv = computed(() => !!(invCat.value || (invQuery.value || '').trim()));
+        const invSlots = computed(() => {
+          const d = invData.value;
+          if (!d || !d.ok) return [];
+          return (d.slots_detail || []).filter(s =>
+            (!invCat.value || s.category === invCat.value) && matchQ(s, invQuery.value));
+        });
+        const invEmptySlots = computed(() => {
+          const d = invData.value;
+          if (!d || !d.ok || filteringInv.value) return [];
+          const used = new Set((d.slots_detail || []).map(s => s.slot));
+          const out = [];
+          for (let i = 0; i < 46; i++) if (!used.has(i)) out.push(i);
+          return out;
+        });
+        const invHint = computed(() => {
+          if (invError.value) return invError.value;
+          const d = invData.value;
+          if (!d) return '尚未查询';
+          if (!d.ok) return '查询失败：' + JSON.stringify(d);
+          const total = (d.slots_detail || []).length;
+          return '非空 ' + total + ' 格' + (filteringInv.value ? '（显示 ' + invSlots.value.length + '）' : '');
+        });
+
+        function fmtPos(pos) {
+          return (pos || []).map(v => Number(v).toFixed(1)).join(',');
+        }
+
+        async function refreshWorld() {
+          try {
+            world.value = await jget('/api/world');
+          } catch (e) {
+            world.value = { ok: false, error: String(e) };
+          }
+        }
+        async function refreshOnline() {
+          try {
+            online.value = (await jget('/api/online')).online || [];
+          } catch (e) { /* 下次轮询重试 */ }
+        }
+        async function loadItems() {
+          try {
+            catalog.value = (await jget('/api/items')).items || [];
+          } catch (e) {
+            giveMsg.value = 'items load failed: ' + e;
+          }
+        }
+        async function saveNow() {
+          saving.value = true;
+          try {
+            const r = await jpost('/api/save', {});
+            saveMsg.value = 'HTTP ' + r.status + ' ' + JSON.stringify(r.body);
+            if (r.status === 200 && r.body.ok) message.success('存档请求完成');
+            else message.error('存档失败：' + JSON.stringify(r.body));
+          } catch (e) {
+            saveMsg.value = 'save failed: ' + e;
+            message.error(saveMsg.value);
+          } finally {
+            saving.value = false;
+            await refreshWorld();
+          }
+        }
+        async function giveItem() {
+          if (!giveUser.value) {
+            message.warning('请先选择在线玩家');
+            return;
+          }
+          try {
+            const r = await jpost('/api/give', {
+              username: giveUser.value,
+              item: selectedItem.value,
+              count: Number(giveCount.value),
+            });
+            giveMsg.value = 'HTTP ' + r.status + ' ' + JSON.stringify(r.body);
+            if (r.status === 200 && r.body.ok) message.success('已发放 ' + selectedItem.value);
+            else message.error('发放失败：' + JSON.stringify(r.body));
+          } catch (e) {
+            giveMsg.value = 'give failed: ' + e;
+            message.error(giveMsg.value);
+          }
+        }
+        async function kick(p) {
+          if (!window.confirm('踢掉 ' + p.username + '？')) return;
+          try {
+            const r = await jpost('/api/kick', { username: p.username });
+            message.info('HTTP ' + r.status + ' ' + JSON.stringify(r.body));
+            await refreshOnline();
+          } catch (e) {
+            message.error('kick failed: ' + e);
+          }
+        }
+        async function showInv() {
+          if (!invUser.value) {
+            message.warning('请先选择在线玩家');
+            return;
+          }
+          invError.value = '';
+          invData.value = null;
+          try {
+            invData.value = await jget('/api/inventory?username=' + encodeURIComponent(invUser.value));
+          } catch (e) {
+            invError.value = 'fetch failed: ' + e;
+          }
+        }
+
+        const timers = [];
+        onMounted(async () => {
+          await Promise.all([loadItems(), refreshWorld(), refreshOnline()]);
+          timers.push(setInterval(refreshWorld, 5000));
+          timers.push(setInterval(refreshOnline, 2000));
+        });
+        onBeforeUnmount(() => timers.forEach(clearInterval));
+
+        return {
+          worldText, online, saving, saveMsg, fmtPos, kick, saveNow,
+          userOptions, giveUser, giveCount, giveCat, giveQuery, categoryOptions,
+          selectedItem, filteredItems, visibleItems, giveHint, giveMsg, giveItem,
+          invUser, invCat, invQuery, invSlots, invEmptySlots, invHint, showInv,
+        };
+      },
+    };
+
+    const App = {
+      template: appTemplate,
+      components: { Dashboard },
+      setup() { return { darkTheme }; },
+    };
+    const app = createApp(App);
+    for (const [name, comp] of Object.entries({
+      NConfigProvider, NMessageProvider, NCard, NTable, NButton,
+      NInput, NInputNumber, NSelect, NTag, NAlert,
+    })) {
+      app.component(name, comp);
+    }
+    app.mount('#app');
+  } catch (e) {
+    // CDN 不可达 / 浏览器不支持 importmap 时的可见降级，而不是白屏。
+    const box = document.createElement('div');
+    box.className = 'boot-error';
+    box.textContent = '前端资源加载失败（需要联网从 esm.sh 加载 Vue 3 / Naive UI）：' + String(e);
+    document.getElementById('app').replaceChildren(box);
   }
 }
-async function give() {
-  const r = await jpost('/api/give', {
-    username: document.getElementById('giveUser').value,
-    item: SEL,
-    count: parseInt(document.getElementById('giveCount').value, 10),
-  });
-  document.getElementById('giveMsg').textContent = 'HTTP ' + r.status + ' ' + JSON.stringify(r.body);
-}
-async function showInv() {
-  const u = document.getElementById('invUser').value;
-  try {
-    LASTINV = await jget('/api/inventory?username=' + encodeURIComponent(u));
-    document.getElementById('invMsg').textContent = '';
-  } catch (e) { document.getElementById('invMsg').textContent = 'fetch failed: ' + e; LASTINV = null; }
-  renderInvGrid();
-}
-function renderInvGrid() {
-  const g = document.getElementById('invGrid'); g.innerHTML = '';
-  if (!LASTINV || !LASTINV.ok) return;
-  const cat = document.getElementById('invCat').value, q = (document.getElementById('invQ').value || '').trim();
-  const filtering = !!cat || !!q;
-  const det = {};
-  for (const d of (LASTINV.slots_detail || [])) det[d.slot] = d;
-  let shown = 0, total = 0;
-  for (let s = 0; s < 46; s++) {
-    const d = det[s];
-    if (d) {
-      total++;
-      if (cat && d.category !== cat) continue;
-      if (q && !matchQ(d, q)) continue;
-      shown++;
-      const c = document.createElement('div'); c.className = 'cell';
-      const b = document.createElement('div'); b.textContent = d.name_zh + ' ×' + d.count; c.appendChild(b);
-      const sm = document.createElement('small'); sm.textContent = '[' + s + '] ' + d.name; c.appendChild(sm);
-      g.appendChild(c);
-    } else if (!filtering) {
-      const c = document.createElement('div'); c.className = 'cell empty';
-      const b = document.createElement('div'); b.textContent = '[' + s + '] 空'; c.appendChild(b);
-      g.appendChild(c);
-    }
-  }
-  document.getElementById('invMsg').textContent = '非空 ' + total + ' 格' + (filtering ? '（显示 ' + shown + '）' : '');
-}
-async function refreshWorld() {
-  try { document.getElementById('world').textContent = JSON.stringify(await jget('/api/world'), null, 1); }
-  catch (e) { document.getElementById('world').textContent = 'fetch failed: ' + e; }
-}
-async function refreshOnline() {
-  try {
-    const o = await jget('/api/online');
-    const tb = document.getElementById('online');
-    tb.innerHTML = '';
-    const users = [];
-    for (const p of o.online) {
-      users.push(p.username);
-      const tr = document.createElement('tr');
-      tr.innerHTML = '<td>' + p.conn_id + '</td><td>' + p.username + '</td><td>' + p.addr +
-        '</td><td>' + p.pos.map(v => v.toFixed(1)).join(',') + '</td><td>' + p.online_secs + '</td>';
-      const td = document.createElement('td');
-      const kb = document.createElement('button');
-      kb.textContent = '踢人';
-      kb.onclick = (function(name) { return async function() {
-        if (!confirm('踢掉 ' + name + '？')) return;
-        const r = await jpost('/api/kick', {username: name});
-        alert(JSON.stringify(r.body));
-        refreshOnline();
-      }; })(p.username);
-      td.appendChild(kb);
-      tr.appendChild(td);
-      tb.appendChild(tr);
-    }
-    for (const id of ['giveUser', 'invUser']) {
-      const sel = document.getElementById(id);
-      const cur = sel.value;
-      sel.innerHTML = '';
-      for (const u of users) { const op = document.createElement('option'); op.value = u; op.textContent = u; sel.appendChild(op); }
-      if (users.includes(cur)) sel.value = cur;
-    }
-  } catch (e) { /* next poll retries */ }
-}
-async function saveNow() {
-  const r = await jpost('/api/save', {});
-  document.getElementById('saveMsg').textContent = JSON.stringify(r.body);
-  refreshWorld();
-}
-loadItems(); refreshWorld(); refreshOnline();
-setInterval(refreshWorld, 5000);
-setInterval(refreshOnline, 2000);
+boot();
 </script>
 </body>
 </html>
