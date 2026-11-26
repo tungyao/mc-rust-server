@@ -77,3 +77,8 @@
 - [2026-11-26 02:06 UTC] agent=subagent-admin-offline task=p35-admin-offline status=done detail=Vite+vite-plugin-singlefile 本地打包 Vue3/NaiveUI 单文件(559KB)，零外网；npm ci复现逐字节一致；Playwright外部请求0；347 passed；merge 48e14bd files=.gitignore,admin-ui/,crates/mc-server/src/admin_page.html
 - [2026-11-26 02:10 UTC] agent=subagent-p33 task=p33-multi-crop-planting status=start detail=claim files=
 - [2026-11-26 02:25 UTC] agent=subagent-p33 task=p33-multi-crop-planting status=done detail=CropSpec通用作物表+胡萝卜/马铃薯/甜菜；复用种植/ticker/骨粉/连带/掉落/广播；小麦行为不变；358 passed；merge见main files=crates/mc-world/src/crops.rs,crates/mc-world/src/drops.rs,crates/mc-world/src/lib.rs,crates/mc-world/src/mutable.rs,crates/mc-network/src/drop_state.rs,crates/mc-network/src/login_route/block_edit.rs,crates/mc-network/src/login_route/mod.rs,crates/mc-network/tests/play_crops.rs
+- [2026-11-26 02:26 UTC] agent=main task=p36-world-storage status=todo detail=研究并实现新世界存储格式（不兼容 Anvil） files=
+- [2026-11-26 02:26 UTC] agent=subagent-storage task=p36-world-storage status=start detail=claim files=
+- [2026-11-26 02:33 UTC] agent=main task=p37-all-crops status=todo detail=全部作物可种 + 作物逻辑拆分为独立模块 files=
+- [2026-11-26 02:33 UTC] agent=subagent-all-crops task=p37-all-crops status=start detail=claim files=
+- [2026-11-26 02:42 UTC] agent=subagent-storage task=p36-world-storage status=done detail=选redb单文件KV(每seed)作真相源+稀疏内存热层;journal/players/timers同事务;P17W/P18I迁移,旧档.bak;明确不做Anvil兼容;原型store.rs不接生产;365 passed;merge f24a0bb files=docs/world-storage-plan.md,crates/mc-world/src/store.rs,crates/mc-world/src/inventory.rs,crates/mc-world/src/lib.rs,Cargo.toml

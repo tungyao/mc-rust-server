@@ -1,0 +1,13 @@
+{
+  "id": "p37-all-crops",
+  "title": "全部作物可种 + 作物逻辑拆分为独立模块",
+  "status": "doing",
+  "owner": "subagent-all-crops",
+  "priority": "p1",
+  "deps": [],
+  "branch": "",
+  "created": "2026-11-26T02:33:38+00:00",
+  "updated": "2026-11-26T02:33:38+00:00",
+  "detail": "",
+  "files": []
+}

@@ -6,7 +6,8 @@
 > P27 种田闭环、P28 Q 扔按视角飞 + 三个补丁（拾取延迟/弹道/选中槽同步）均已合入 main；
 > 但除 P18 早期真机外，上述新增功能均**未做原版客户端真机复验**（见 §5 各条 TODO）。
 > `p31-xp-orbs` 经验球已合入（`2563ebe`，见 §5.26），`p33-multi-crop-planting`
-> 多作物种植已合入（见 §5.24）；当前新方向：**研究并采用新世界存储格式（不做 Anvil 兼容）**；
+> 多作物种植已合入（见 §5.24）；新世界存储格式已完成**方案设计 + 独立原型**
+> （`p36-world-storage` / `f24a0bb`，redb，明确不做 Anvil 兼容，尚未接生产路径，见 §5.27）；
 > `p32-broadcast-chat` 暂缓；
 > 后台管理面板已用 Vue 3 + Naive UI 重写并**完全离线化**合入（`p34-admin-vue` / `53f1016`、
 > `p35-admin-offline` / `48e14bd`，见 §5.25）；当前无进行中的派发任务。
@@ -404,8 +405,8 @@ $natives = 'C:\Users\qwe\AppData\Local\Temp\mc263natives'
 
 ### 本地检查
 
-- `cargo test --workspace`：全部通过（2026-11-26 实跑 **358 passed / 0 failed**；
-  P18 当时 215，之后 P18.1–P33 又追加单测与 play_stream / play_actions / play_crops /
+- `cargo test --workspace`：全部通过（2026-11-26 实跑 **365 passed / 0 failed**；
+  P18 当时 215，之后 P18.1–P36 又追加单测与 play_stream / play_actions / play_crops /
   admin_e2e 集成测试）。
 - `cargo check --workspace --tests`：0 error。
 - `scripts/check_budget.sh`（Windows 用 `C:\Program Files\Git\bin\bash.exe`）：通过（src ≤2000 行软约束）。
@@ -763,6 +764,25 @@ $natives = 'C:\Users\qwe\AppData\Local\Temp\mc263natives'
     后续多轮未复现，需继续观察）。
     未做：经验球合并、原版 7.25 格吸引、击杀/熔炼 XP、真机复验（客户端渲染大小/拾取动画）。
 
+27. **P36 新世界存储格式：方案 + 独立原型（已合入 `f24a0bb`，尚未接生产路径）**：
+    用户明确指示**不做 Anvil 兼容/导出**，直接研究新格式。设计见 `docs/world-storage-plan.md`：
+    选**纯 Rust `redb`**（MVCC/事务/零拷贝，单写多读），每 seed 一个
+    `world/state-<seed>.redb` 作为磁盘真相源；保留 `MutableWorld` 稀疏内存热层，
+    worldgen 确定性使地形不入盘，只存编辑差异。Schema v1：`meta`（schema/seed/
+    journal_seq/tick_offset/generator）、`blocks`（12B 坐标→2B blockstate）、
+    `journal`（u64 seq→33B 操作）、`players`（46 槽+selected+state_id+XP）、
+    `timers`（作物/树苗/树叶增长计时，计划补 §5.18–20 的跨重启续算缺口）。
+    同一 redb 事务写多表 → 崩溃安全；迁移一次性读 `P17W`/`P18I` 写入 redb，
+    旧档改名 `.bak` 保留回退；分阶段：原型 → 生产替换（带 legacy/redb 开关）
+    → 计时持久化 → journal 裁剪 → 热层优化。明确不做的：Anvil 读写/导出、
+    LSM 列式等（文档有评分对比）。
+    原型 `crates/mc-world/src/store.rs` **不接生产路径**（不改 main/persist/协议，
+    旧存档格式不变），闭环覆盖开关库、方块编辑、玩家背包+XP、journal 重放、
+    旧档迁移、schema/seed 守卫；7 个新单测，release 10k 编辑提交 73.6ms / 重放 1.37ms。
+    依赖 `redb = "=2.6.4"`（仓库忽略 `Cargo.lock`，故锁确切版本防上游漂移）。
+    当前 `cargo test --workspace` **365 passed / 0 failed**。
+    下一步待定：P36.2 生产替换 + 开关、P36.3 计时持久化。
+
 ## 6. 关键文件
 
 ```
@@ -792,6 +812,7 @@ crates/mc-world/src/
   drops.rs                   P18 确定性掉落表 + item ID 常量 + 手持→方块映射
   items.rs                   P18 物品实体纯逻辑（生成/合并/重力/拾取/despawn/视距过滤）
   inventory.rs               P18 背包（46 槽/手持/合并/扣减）+ `player-<user>-<seed>.dat` 存档 + P19 throw_held/throw_from_slot
+  store.rs                   P36 redb 新存储原型（不接生产路径；设计见 docs/world-storage-plan.md）
   worldgen/
     mod.rs                   WorldGen、高度/出生保护/biome/洞穴/矿/树、跨 chunk 扫描
     noise.rs                 2D/3D 平滑 value noise + 确定性 hash
@@ -808,6 +829,7 @@ crates/mc-server/src/
   admin.rs / admin_items.rs / admin_page.html   管理面板后端 + 离线 Vue/Naive UI 单文件产物（源码在 admin-ui/）
 docs/packet-map-777.md                 777 包 ID 对照表（权威；§6 挖掘/放置 9 个 ID；§7 P18 掉落/背包 10 个 ID + 物品/实体 ID 表）
 docs/registries-777.md                 注册表清单
+docs/world-storage-plan.md             P36 新世界存储格式方案（redb，不做 Anvil 兼容）
 ```
 
 ## 7. 测试命令
