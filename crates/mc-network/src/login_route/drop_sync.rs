@@ -19,6 +19,8 @@ use std::io;
 //   despawn 清理 known。服务端只维护权威位置用于拾取，不发 Teleport 与客户端物理打架。
 //   despawn/出视距发 Remove(0x4E)，进视距补发 Spawn。
 // - 拾取：delay 到期 + 与脚位置 <1.5 → TakeItem(0x7F)+Remove，入库，全量 Content 同步。
+// - P31 经验球：独立实体池 + 同一全局 ticker 物理；挖矿掉落生成，拾取后 TakeItem
+//   (XP 球 count=1)+Remove + SetExperience(0x69) + XP 存进背包同文件（v2 存档）。
 // - 背包：Join 全量 Content；放置成功 consume_held + 单槽 Slot 同步；C2S 0x36 切手持。
 // - Q 扔物（P19）：C2S PlayerAction(0x29) status 4/5（jar `Action` DROP_ALL/DROP_ITEM）
 //   从手持槽拿走整栈/1 个，脚下生成掉落实体，全量 Content 同步 + 刷盘，恒回 Ack；
@@ -114,6 +116,100 @@ pub(crate) async fn send_remove(
         drops.unmark_known(opts.conn_id, *id);
     }
     Ok(())
+}
+
+// ---- P31 经验球（复用 add_entity/SetData/Remove/TakeItem 已验证包体，ID 全部查生成表） ----
+
+/// 经验球生成：Spawn(0x01，type=50) + SetData(0x65，index 8/VarInt(1)=经验值)。
+pub(crate) async fn send_orb_spawn(
+    stream: &mut TcpStream,
+    opts: &PlayOptions,
+    drops: &DropState,
+    id: i32,
+) -> io::Result<()> {
+    let snap = {
+        let orbs = drops.orbs.lock().unwrap_or_else(|p| p.into_inner());
+        orbs.get(id).map(|o| (o.id, o.uuid, o.pos, o.vel, o.amount))
+    };
+    let Some((id, uuid, (x, y, z), vel, amount)) = snap else { return Ok(()) };
+    let mut body = Vec::new();
+    packets::SpawnExperienceOrb {
+        entity_id: id,
+        uuid,
+        x,
+        y,
+        z,
+        vel: packets::LpVec3 { x: vel.0, y: vel.1, z: vel.2 },
+        pitch: 0,
+        yaw: 0,
+        head_yaw: 0,
+    }
+    .encode_body(&mut body);
+    write_packet_any(stream, packets::PLAY_SPAWN_ENTITY_S2C_ID, &body, opts.threshold).await?;
+    let mut body = Vec::new();
+    packets::XpOrbEntityData { entity_id: id, amount }.encode_body(&mut body);
+    write_packet_any(stream, packets::PLAY_SET_ENTITY_DATA_S2C_ID, &body, opts.threshold).await?;
+    drops.mark_known(opts.conn_id, id);
+    Ok(())
+}
+
+/// P31 经验/等级同步（Join 与拾取后）：Float 进度 + VarInt 等级 + VarInt 总经验。
+pub(crate) async fn send_experience(
+    stream: &mut TcpStream,
+    opts: &PlayOptions,
+    drops: &DropState,
+) -> io::Result<()> {
+    let Some((total, level, progress)) = drops.with_inventory(opts.conn_id, |inv| {
+        (inv.total_xp(), inv.xp_level(), inv.xp_progress())
+    }) else {
+        return Ok(());
+    };
+    let mut body = Vec::new();
+    packets::SetExperience { progress, level, total }.encode_body(&mut body);
+    write_packet_any(stream, packets::PLAY_SET_EXPERIENCE_S2C_ID, &body, opts.threshold).await
+}
+
+/// P21/P31：向视距内其它连接同步单个经验球（未知→Spawn+Data，已知→Data）。
+pub(crate) fn broadcast_orb_to_viewers(
+    opts: &PlayOptions,
+    drops: &DropState,
+    chunk: mc_core::ChunkPos,
+    id: i32,
+) {
+    let Some(hub) = &opts.hub else { return };
+    let viewers = hub.recipients_in_view(opts.conn_id, chunk);
+    if viewers.is_empty() {
+        return;
+    }
+    let snap = {
+        let orbs = drops.orbs.lock().unwrap_or_else(|p| p.into_inner());
+        orbs.get(id).map(|o| (o.id, o.uuid, o.pos, o.vel, o.amount))
+    };
+    let Some((id, uuid, (x, y, z), vel, amount)) = snap else { return };
+    let mut dbody = Vec::new();
+    packets::XpOrbEntityData { entity_id: id, amount }.encode_body(&mut dbody);
+    for viewer in viewers {
+        if drops.is_known(viewer, id) {
+            hub.unicast(viewer, packets::PLAY_SET_ENTITY_DATA_S2C_ID, dbody.clone());
+            continue;
+        }
+        let mut sbody = Vec::new();
+        packets::SpawnExperienceOrb {
+            entity_id: id,
+            uuid,
+            x,
+            y,
+            z,
+            vel: packets::LpVec3 { x: vel.0, y: vel.1, z: vel.2 },
+            pitch: 0,
+            yaw: 0,
+            head_yaw: 0,
+        }
+        .encode_body(&mut sbody);
+        hub.unicast(viewer, packets::PLAY_SPAWN_ENTITY_S2C_ID, sbody);
+        hub.unicast(viewer, packets::PLAY_SET_ENTITY_DATA_S2C_ID, dbody.clone());
+        drops.mark_known(viewer, id);
+    }
 }
 
 /// P21：向事件区块视距内的其它连接同步单个掉落实体（Spawn 或 Data）。
@@ -274,7 +370,8 @@ pub(crate) async fn send_held_slot(
     write_packet_any(stream, packets::PLAY_SET_CONTAINER_SLOT_S2C_ID, &body, opts.threshold).await
 }
 
-/// 挖掘掉落生成：每种 drop 一个实体（同位合并由 ItemEntities 处理）。
+/// 挖掘掉落生成：每种 drop 一个物品实体（同位合并由 ItemEntities 处理），
+/// 同一次挖掘按方块类型额外生成经验球（P31，共用挖掘路径与 fan-out）。
 pub(crate) async fn spawn_drops(
     stream: &mut TcpStream,
     opts: &PlayOptions,
@@ -282,13 +379,18 @@ pub(crate) async fn spawn_drops(
     world: &MutableWorld,
     outcome: &BlockEditOutcome,
 ) -> io::Result<()> {
-    if outcome.drops.is_empty() || outcome.changes.is_empty() {
+    if outcome.changes.is_empty() {
         return Ok(());
     }
-    let (bx, by, bz) = {
+    let (bx, by, bz, old_id) = {
         let c = &outcome.changes[0];
-        (c.x, c.y, c.z)
+        (c.x, c.y, c.z, c.old_id)
     };
+    // XP 由被破坏方块的 old_id 查确定性表（与物品掉落同源，CAS 失败/回滚时 old=air→空）。
+    let xp_orbs = mc_world::drops::xp_orbs_for_block(old_id, bx, by, bz, world.seed());
+    if outcome.drops.is_empty() && xp_orbs.is_empty() {
+        return Ok(());
+    }
     let chunk = mc_world::chunk_of_block(bx, bz);
     for d in &outcome.drops {
         let id = drops.alloc_id();
@@ -326,6 +428,29 @@ pub(crate) async fn spawn_drops(
             // P21：同视距其它连接实时看到掉落（Spawn/Data + known 维护）。
             broadcast_entity_to_viewers(opts, drops, chunk, tid);
         }
+    }
+    // P31：每个经验值一个球（同物合并未做，见模块取舍），与物品掉落同点/同支撑/同广播。
+    for amount in xp_orbs {
+        let id = drops.alloc_id();
+        let rest = world.drop_rest_y(bx, bz, by) as f64;
+        let spawned = {
+            let mut orbs = drops.orbs.lock().unwrap_or_else(|p| p.into_inner());
+            orbs.spawn(
+                id,
+                amount,
+                bx as f64 + 0.5,
+                by as f64 + 0.5,
+                bz as f64 + 0.5,
+                rest,
+            )
+            .is_ok()
+        };
+        if !spawned {
+            debug!("xp orb spawn failed id={id}");
+            continue;
+        }
+        send_orb_spawn(stream, opts, drops, id).await?;
+        broadcast_orb_to_viewers(opts, drops, chunk, id);
     }
     Ok(())
 }
@@ -506,39 +631,103 @@ pub(crate) async fn tick_drops(
         send_full_inventory(stream, opts, drops).await?;
         drops.save_inventory(opts.conn_id, conn_user);
     }
+    // P31 拾取经验球：delay 到期 + 距离 <1.5 → TakeItem(count=1，wiki 777 口径)
+    // + Remove + 累加 XP + SetExperience + 刷盘。与物品拾取同一把 orbs 锁先到先得。
+    let picked_orbs: Vec<(i32, i32, mc_core::ChunkPos)> = {
+        let mut orbs = drops.orbs.lock().unwrap_or_else(|p| p.into_inner());
+        let ids = orbs.pickable(last_pos);
+        let mut out = Vec::new();
+        for id in ids {
+            if let Some(o) = orbs.remove(id) {
+                out.push((id, o.amount, o.chunk));
+            }
+        }
+        out
+    };
+    if !picked_orbs.is_empty() {
+        for (id, _, _) in &picked_orbs {
+            let mut body = Vec::new();
+            packets::TakeItemEntity {
+                collected_id: *id,
+                collector_id: PLAYER_ENTITY_ID,
+                count: 1, // wiki take_item_entity：XP 球恒为 1
+            }
+            .encode_body(&mut body);
+            write_packet_any(stream, packets::PLAY_PICKUP_ITEM_S2C_ID, &body, opts.threshold).await?;
+        }
+        let gone: Vec<i32> = picked_orbs.iter().map(|(id, _, _)| *id).collect();
+        send_remove(stream, opts, drops, &gone).await?;
+        for (id, _, chunk) in &picked_orbs {
+            broadcast_takeitem_to_viewers(opts, *chunk, *id, 1);
+            broadcast_remove_to_viewers(opts, drops, *chunk, &[*id]);
+        }
+        let gained: i32 = picked_orbs.iter().map(|(_, amount, _)| *amount).sum();
+        drops.with_inventory(opts.conn_id, |inv| {
+            inv.add_experience(gained);
+        });
+        send_experience(stream, opts, drops).await?;
+        drops.save_inventory(opts.conn_id, conn_user);
+    }
     // despawn 清理放在拾取之后：全局 ticker 移除的过期实体、以及其它连接刚捡走的
     // 实体，本连接都能在同一 tick 按 known 差集补发 Remove（拾取自己发的已 unmark，
-    // 不会重复）。
+    // 不会重复）。id 全局唯一，故两张池都要查（只查 items 会误删仍存在的经验球）。
     let known = drops.known_ids(opts.conn_id);
     let gone: Vec<i32> = {
         let items = drops.items.lock().unwrap_or_else(|p| p.into_inner());
-        known.into_iter().filter(|id| items.get(*id).is_none()).collect()
+        let orbs = drops.orbs.lock().unwrap_or_else(|p| p.into_inner());
+        known
+            .into_iter()
+            .filter(|id| items.get(*id).is_none() && orbs.get(*id).is_none())
+            .collect()
     };
     send_remove(stream, opts, drops, &gone).await?;
     Ok(())
 }
 
 /// 视距变化时补/卸实体：出视距的发 Remove，进视距的补发 Spawn。
+/// P31：同一 `known` 集同时跟踪物品与经验球（id 全局唯一，不会混淆；按类型发对应 Spawn）。
+#[derive(Clone, Copy)]
+enum SyncKind {
+    Item,
+    Orb,
+}
+
 pub(crate) async fn sync_view_entities(
     stream: &mut TcpStream,
     opts: &PlayOptions,
     drops: &DropState,
     view: &ChunkView,
 ) -> io::Result<()> {
-    let snap: Vec<(i32, mc_core::ChunkPos)> = {
+    let snap: Vec<(i32, mc_core::ChunkPos, SyncKind)> = {
+        // 锁顺序恒为 items → orbs（与全局 ticker 一致，避免死锁）。
         let items = drops.items.lock().unwrap_or_else(|p| p.into_inner());
-        items.ids().iter().filter_map(|id| items.get(*id).map(|e| (*id, e.chunk))).collect()
+        let orbs = drops.orbs.lock().unwrap_or_else(|p| p.into_inner());
+        let mut out = Vec::new();
+        for id in items.ids() {
+            if let Some(e) = items.get(id) {
+                out.push((id, e.chunk, SyncKind::Item));
+            }
+        }
+        for id in orbs.ids() {
+            if let Some(o) = orbs.get(id) {
+                out.push((id, o.chunk, SyncKind::Orb));
+            }
+        }
+        out
     };
     let mut gone = Vec::new();
-    for (id, chunk) in &snap {
+    for (id, chunk, _) in &snap {
         if !drop_in_view(view.center(), view.radius(), *chunk) && drops.is_known(opts.conn_id, *id) {
             gone.push(*id);
         }
     }
     send_remove(stream, opts, drops, &gone).await?;
-    for (id, chunk) in &snap {
+    for (id, chunk, kind) in &snap {
         if drop_in_view(view.center(), view.radius(), *chunk) && !drops.is_known(opts.conn_id, *id) {
-            send_spawn(stream, opts, drops, *id).await?;
+            match kind {
+                SyncKind::Item => send_spawn(stream, opts, drops, *id).await?,
+                SyncKind::Orb => send_orb_spawn(stream, opts, drops, *id).await?,
+            }
         }
     }
     Ok(())

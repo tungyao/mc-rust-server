@@ -25,8 +25,10 @@ pub const HOTBAR_START: usize = 36;
 pub const HOTBAR_END: usize = 44;
 
 /// 存档魔数 + 版本（自有格式，与 P17 overrides 存档同目录、seed 隔离）。
+/// v2 = v1 + 尾部 4 字节总经验（P31）；v1 文件仍可读，XP 缺省 0（向后兼容）。
 const SAVE_MAGIC: [u8; 4] = *b"P18I";
-const SAVE_VERSION: u8 = 1;
+const SAVE_VERSION: u8 = 2;
+const LEGACY_SAVE_VERSION: u8 = 1;
 /// 新背包开局石头数（hotbar 槽 36）。
 pub const STARTER_COUNT: i32 = 64;
 
@@ -38,11 +40,13 @@ pub struct PlayerInventory {
     state_id: i32,
     /// 鼠标手持栈（ContainerClick 拖拽中转；不存盘，断线时 `stow_cursor` 收回）。
     cursor: Option<(i32, i32)>,
+    /// P31 总经验值（与背包同文件存盘；旧存档缺省 0）。
+    total_xp: i32,
 }
 
 impl Default for PlayerInventory {
     fn default() -> Self {
-        Self { slots: [None; SLOT_COUNT], selected: 0, state_id: 1, cursor: None }
+        Self { slots: [None; SLOT_COUNT], selected: 0, state_id: 1, cursor: None, total_xp: 0 }
     }
 }
 
@@ -234,6 +238,34 @@ impl PlayerInventory {
         self.state_id
     }
 
+    // ---- P31 经验（与背包同存档；SetExperience 三字段由 xp 模块换算） ----
+
+    /// 当前总经验值。
+    pub fn total_xp(&self) -> i32 {
+        self.total_xp
+    }
+
+    /// 拾取经验球后累加（返回新的总值；溢出钳制到 i32::MAX）。
+    pub fn add_experience(&mut self, amount: i32) -> i32 {
+        self.total_xp = (self.total_xp as i64 + amount.max(0) as i64).clamp(0, i32::MAX as i64) as i32;
+        self.total_xp
+    }
+
+    /// 直接覆盖总经验（读盘/测试用；负值归零）。
+    pub fn set_total_xp(&mut self, total: i32) {
+        self.total_xp = total.max(0);
+    }
+
+    /// 当前经验等级。
+    pub fn xp_level(&self) -> i32 {
+        crate::xp::level_for_xp(self.total_xp)
+    }
+
+    /// 当前等级的经验条进度 0.0..=1.0。
+    pub fn xp_progress(&self) -> f32 {
+        crate::xp::xp_progress(self.total_xp)
+    }
+
     pub fn get(&self, idx: usize) -> Option<(i32, i32)> {
         self.slots.get(idx).copied().flatten()
     }
@@ -378,7 +410,8 @@ impl PlayerInventory {
         dir.join(format!("player-{user_tag}-{seed}.dat"))
     }
 
-    /// 落盘（tmp+rename 原子替换）：魔数/版本/selected/state/条目(槽u8+物品i32+数量i32)。
+    /// 落盘（tmp+rename 原子替换）：魔数/版本/selected/state/条目(槽u8+物品i32+数量i32)
+    /// + 尾部 4 字节总经验（P31 v2）。
     pub fn save_to_dir(&self, dir: &Path, user_tag: &str, seed: i64) -> std::io::Result<usize> {
         std::fs::create_dir_all(dir)?;
         let mut entries = Vec::new();
@@ -389,7 +422,7 @@ impl PlayerInventory {
         }
         let path = Self::save_path(dir, user_tag, seed);
         let tmp = path.with_extension("tmp");
-        let mut buf = Vec::with_capacity(8 + entries.len() * 9);
+        let mut buf = Vec::with_capacity(12 + entries.len() * 9 + 4);
         buf.extend_from_slice(&SAVE_MAGIC);
         buf.push(SAVE_VERSION);
         buf.push(self.selected);
@@ -400,6 +433,8 @@ impl PlayerInventory {
             buf.extend_from_slice(&id.to_be_bytes());
             buf.extend_from_slice(&count.to_be_bytes());
         }
+        // v2：尾部追加总经验（i32 BE）；旧版本文件无此字段，读盘按 0 处理。
+        buf.extend_from_slice(&self.total_xp.to_be_bytes());
         {
             let mut f = std::fs::File::create(&tmp)?;
             f.write_all(&buf)?;
@@ -427,7 +462,7 @@ impl PlayerInventory {
                 format!("{}: 魔数不符（非 P18 背包存档）", path.display()),
             ));
         }
-        if head[4] != SAVE_VERSION {
+        if head[4] != SAVE_VERSION && head[4] != LEGACY_SAVE_VERSION {
             return Err(std::io::Error::new(
                 std::io::ErrorKind::InvalidData,
                 format!("{}: 版本 {} 不支持", path.display(), head[4]),
@@ -454,6 +489,14 @@ impl PlayerInventory {
             if slot < SLOT_COUNT && id > 0 && c > 0 && c <= MAX_STACK {
                 inv.slots[slot] = Some((id, c));
             }
+        }
+        // v2 尾部 4 字节总经验；v1 无此字段，XP 缺省 0（向后兼容旧存档）。
+        if head[4] == SAVE_VERSION {
+            let mut xp = [0u8; 4];
+            f.read_exact(&mut xp).map_err(|e| {
+                std::io::Error::new(e.kind(), format!("{}: 经验字段截断 ({e})", path.display()))
+            })?;
+            inv.total_xp = i32::from_be_bytes(xp).max(0);
         }
         let mut tail = [0u8; 1];
         if f.read(&mut tail)? != 0 {
@@ -589,6 +632,33 @@ mod tests {
         std::fs::create_dir_all(&dir).unwrap();
         std::fs::write(PlayerInventory::save_path(&dir, "u", 9), b"NOPE").unwrap();
         assert!(PlayerInventory::load_from_dir(&dir, "u", 9).is_err());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// P31：XP 与背包同文件 roundtrip；v1 旧存档没有 XP 字段，读回缺省 0。
+    #[test]
+    fn xp_save_load_roundtrip_and_legacy_version() {
+        let dir = std::env::temp_dir().join(format!("mc-p31-xp-{}-rt", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let mut inv = PlayerInventory::new();
+        inv.add_item(55, 3);
+        assert_eq!(inv.add_experience(5), 5);
+        assert_eq!(inv.add_experience(3), 8);
+        assert_eq!(inv.xp_level(), 1, "level 1 starts at 7 total XP");
+        inv.save_to_dir(&dir, "xp-user", 77).unwrap();
+        let (back, is_new) = PlayerInventory::load_from_dir(&dir, "xp-user", 77).unwrap();
+        assert!(!is_new);
+        assert_eq!(back.total_xp(), 8);
+        assert_eq!(back.get(36), Some((55, 3)), "add_item fills the hotbar first");
+        // 手写一份 v1 文件（魔数/版本1/selected/state/0 条目，无 XP 尾字段）。
+        let mut legacy = b"P18I".to_vec();
+        legacy.push(1);
+        legacy.push(0);
+        legacy.extend_from_slice(&1i32.to_be_bytes());
+        legacy.extend_from_slice(&0u16.to_be_bytes());
+        std::fs::write(PlayerInventory::save_path(&dir, "legacy", 77), &legacy).unwrap();
+        let (old, is_new) = PlayerInventory::load_from_dir(&dir, "legacy", 77).unwrap();
+        assert!(!is_new && old.total_xp() == 0, "legacy v1 save must default XP to 0");
         let _ = std::fs::remove_dir_all(&dir);
     }
 

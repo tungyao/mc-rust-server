@@ -91,6 +91,37 @@ pub fn leaf_decay_drops(x: i32, y: i32, z: i32, seed: i64) -> Vec<Drop> {
     out
 }
 
+/// P31 挖矿经验球掉落：按确定性表产出经验值（每元素一个经验球的价值）。
+///
+/// - 煤矿石：0~2 点（`hash_pos` 的独立盐，不扰动物品掉落分支；与原版「煤矿 0–2」一致）；
+/// - 铁矿石：1 点（任务要求矿物给经验；原版挖铁矿不给经验、熔炼才给，见 HANDOFF §5 取舍）；
+/// - 其它方块：无经验球。
+///
+/// 经验值 ≤11 时直接产出一个同值球（原版小经验球允许 1–11）；更大值按原版基础面额
+/// 2477/1237/617/307/149/73/37/17/7/3/1 贪心拆分（当前表用不到，留作扩展）。
+pub fn xp_orbs_for_block(block_id: u16, x: i32, y: i32, z: i32, seed: i64) -> Vec<i32> {
+    let total = match block_id {
+        COAL_ORE_BLOCK_ID => (hash_pos(seed ^ 0x5850, x, y, z) % 3) as i32,
+        IRON_ORE_BLOCK_ID => 1,
+        _ => 0,
+    };
+    if total <= 0 {
+        return Vec::new();
+    }
+    if total <= 11 {
+        return vec![total];
+    }
+    let mut out = Vec::new();
+    let mut left = total;
+    for base in [2477, 1237, 617, 307, 149, 73, 37, 17, 7, 3, 1] {
+        while left >= base {
+            out.push(base);
+            left -= base;
+        }
+    }
+    out
+}
+
 /// 单种掉落：物品 + 数量。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Drop {
@@ -419,6 +450,32 @@ mod tests {
             for d in drops_for_block(crate::OAK_LEAVES_BLOCK_ID, x, 70, 0, seed) {
                 assert_ne!(d.item_id, ITEM_APPLE, "hand dig must never drop apples");
             }
+        }
+    }
+
+    #[test]
+    fn p31_ore_xp_table_is_deterministic_and_bounded() {
+        // 煤矿 0~2（确定性，与物品掉落互不干扰），铁矿恒 1，其它方块无经验。
+        let mut saw_zero = false;
+        let mut saw_two = false;
+        for x in 0..64 {
+            let orb = xp_orbs_for_block(COAL_ORE_BLOCK_ID, x, 70, 381, 123456789);
+            assert!(orb.len() <= 1);
+            if orb.is_empty() {
+                saw_zero = true;
+            } else {
+                assert!((1..=2).contains(&orb[0]), "coal orb must be 1~2, got {orb:?}");
+                if orb[0] == 2 {
+                    saw_two = true;
+                }
+            }
+            assert_eq!(orb, xp_orbs_for_block(COAL_ORE_BLOCK_ID, x, 70, 381, 123456789));
+        }
+        assert!(saw_zero && saw_two, "coal XP must cover both 0 and 2 branches");
+        assert_eq!(xp_orbs_for_block(IRON_ORE_BLOCK_ID, 0, 10, 0, 1), vec![1]);
+        assert_eq!(xp_orbs_for_block(IRON_ORE_BLOCK_ID, 369, 12, 381, 42), vec![1]);
+        for id in [STONE_BLOCK_ID, DIRT_BLOCK_ID, OAK_LOG_BLOCK_ID, crate::AIR_BLOCK_ID] {
+            assert!(xp_orbs_for_block(id, 0, 70, 0, 1).is_empty());
         }
     }
 }

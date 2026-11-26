@@ -7,12 +7,14 @@
 //!
 //! - `items`：全服唯一的 `ItemEntities`（entity_id 全局自增，`next_id` 从 1000 起，
 //!   与 LoginPlay entity_id=1 不冲突，永不复用，重启后从 1000 重新开始）。
+//! - `orbs`（P31）：独立的 `XpOrbEntities` 经验球池，共用上面的全局 id 分配；
+//!   物理与 items 同在全服唯一 ticker 推进，拾取/视距同步在连接侧做。
 //! - `inventories`：conn_id → 背包；Join 时按用户名读盘（缺文件=新背包+石头开局），
 //!   拾取/放置/断线时刷盘（`player-<user>-<seed>.dat`，seed 隔离；键用用户名而非 uuid，
 //!   因离线模式 uuid 每次随机，见 `mc_world::inventory` 文档）。
 //! - `known`：conn_id → 该连接已见实体（视距过滤：离开视距发 Remove，进入补发）。
 
-use mc_world::{ItemEntities, MutableWorld, PlayerInventory};
+use mc_world::{ItemEntities, MutableWorld, PlayerInventory, XpOrbEntities};
 use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
 use std::sync::{
@@ -51,6 +53,9 @@ struct CropEntry {
 #[derive(Debug)]
 pub struct DropState {
     pub items: Mutex<ItemEntities>,
+    /// P31 经验球独立实体池（entity_id 与物品共用 `alloc_id`，不会冲突）。
+    /// 物理只由 [`Self::physics_tick`] 推进，连接侧绝不 tick（P18.1 R1）。
+    pub orbs: Mutex<XpOrbEntities>,
     inventories: Mutex<HashMap<u64, PlayerInventory>>,
     known: Mutex<HashMap<u64, HashSet<i32>>>,
     next_id: AtomicI32,
@@ -90,6 +95,7 @@ impl DropState {
     pub fn new(save_dir: PathBuf, seed: i64) -> Self {
         Self {
             items: Mutex::new(ItemEntities::new()),
+            orbs: Mutex::new(XpOrbEntities::new()),
             inventories: Mutex::new(HashMap::new()),
             known: Mutex::new(HashMap::new()),
             next_id: AtomicI32::new(FIRST_DROP_ENTITY_ID),
@@ -223,6 +229,17 @@ impl DropState {
         self.tick_saplings(world);
         // P27 树叶 decay：同一 ticker 内推进，连接侧绝不碰。
         self.tick_leaves(world);
+        // P31 经验球物理：与掉落物同一全服 ticker、同一节拍（50ms），连接侧绝不 tick。
+        // 放在原有作物/树苗/树叶之后，保持旧行为时序不变；锁顺序恒为 items → orbs
+        //（连接侧不同时持两把锁），避免死锁。
+        let mut orbs = self.orbs.lock().unwrap_or_else(|p| p.into_inner());
+        let unsupported =
+            orbs.find_unsupported(|s| world.get(s.0, s.1, s.2) != mc_world::AIR_BLOCK_ID);
+        for (id, s) in unsupported {
+            let new_rest = world.drop_rest_y(s.0, s.2, s.1) as f64;
+            orbs.resume_fall(id, new_rest);
+        }
+        orbs.tick();
     }
 
     /// P22：按 `(now - planted) / interval` 算应处 age，到阶段即
@@ -728,6 +745,36 @@ mod tests {
         let e = snap.get(id).unwrap();
         assert_eq!(e.rest_y, 68.0, "rest_y must follow the next support down");
         assert!(!e.on_ground);
+    }
+
+    /// P31：经验球物理只随全服 ticker 推进；XP 经 per-conn 背包累计并落盘。
+    #[test]
+    fn orb_physics_and_xp_persist_through_inventory() {
+        use mc_world::MutableWorld;
+        let dir = std::env::temp_dir().join(format!("mc-p31-state-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let world = MutableWorld::new(1);
+        let st = DropState::new(dir.clone(), 1);
+        st.load_inventory(7, "xp-user");
+        let id = st.alloc_id();
+        {
+            let mut orbs = st.orbs.lock().unwrap();
+            orbs.spawn(id, 3, 0.5, 70.0, 0.5, 69.0).unwrap();
+        }
+        for _ in 0..20 {
+            st.physics_tick(&world);
+        }
+        assert_eq!(st.tick_count(), 20);
+        let delay = st.orbs.lock().unwrap().get(id).unwrap().pickup_delay;
+        assert_eq!(delay, 0, "pickup delay must decay on the global ticker");
+        let picked = st.orbs.lock().unwrap().remove(id).unwrap();
+        st.with_inventory(7, |inv| {
+            inv.add_experience(picked.amount);
+        });
+        st.save_inventory(7, "xp-user");
+        let (back, _) = PlayerInventory::load_from_dir(&dir, "xp-user", 1).unwrap();
+        assert_eq!(back.total_xp(), 3);
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]
