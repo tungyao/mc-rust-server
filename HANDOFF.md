@@ -10,7 +10,7 @@
 > 新世界存储格式已完成**方案设计 + 原型 + 生产核心 + 增长计时持久化**
 > （`p36-world-storage` / `f24a0bb`、`p38-store-core`、`p39-timer-persist`，redb，
 > 明确不做 Anvil 兼容，**默认 `world_storage = "redb"`**，见 §5.27）；
-> `p32-broadcast-chat` 暂缓；下一批 `p40-survival`（合成 + 生存基础）待派发；
+> `p40-survival` 合成 + 生存基础已合入（见 §5.28）；`p32-broadcast-chat` 暂缓；
 > 后台管理面板已用 Vue 3 + Naive UI 重写并**完全离线化**合入（`p34-admin-vue` / `53f1016`、
 > `p35-admin-offline` / `48e14bd`，见 §5.25）；当前无进行中的派发任务。
 
@@ -408,9 +408,9 @@ $natives = 'C:\Users\qwe\AppData\Local\Temp\mc263natives'
 
 ### 本地检查
 
-- `cargo test --workspace`：全部通过（2026-11-26 实跑 **403 passed / 0 failed**；
-  P18 当时 215，之后 P18.1–P39 又追加单测与 play_stream / play_actions / play_crops /
-  play_all_crops / timer_persist / admin_e2e 集成测试）。
+- `cargo test --workspace`：全部通过（2026-11-26 实跑 **424 passed / 0 failed**；
+  P18 当时 215，之后 P18.1–P40 又追加单测与 play_stream / play_actions / play_crops /
+  play_all_crops / timer_persist / play_survival / admin_e2e 集成测试）。
 - redb 生产核心真机进程冒烟（2026-11-26）：临时 `server.toml` 设 `world_storage="redb"`、
   独立端口与 world_dir，启动后日志 `redb world opened seed=... / world loaded storage=Redb`
   → `listening` → ticker/keepalive 正常，目录下生成 `state-<seed>.redb` 与 `migration-<seed>.json`，
@@ -629,7 +629,8 @@ $natives = 'C:\Users\qwe\AppData\Local\Temp\mc263natives'
       遗留 TODO：原版真机复验（种植手感/生长可见/砍树拾取）；光照/净空校验；
       大树/多变种；树叶 decay/苹果；生长跨重启精确计时。
 20. **P27 种田闭环（已合入 main，未真机）**：锄头耕地 + 耕地加速 + 骨粉催熟 + 树叶 decay。
-    - **获得途径（无合成系统，缺货源先行；全部零侵入，均走管理面板 `/api/give` 领取，
+    - **获得途径（P40 已有 2×2 玩家合成，但锄头/骨粉/苹果无配方，仍走管理面板 `/api/give` 领取；
+      本条当时的“无合成系统”已过时，见 §5.28；
       `resolve_item` 本就接受短名/全名，无需改 admin 代码；
       e2e `admin_give_farming_kit_hoe_bonemeal_apple` 覆盖）**：
       锄头（7 系任一：wooden/stone/copper/golden/iron/diamond/netherite_hoe，
@@ -662,10 +663,10 @@ $natives = 'C:\Users\qwe\AppData\Local\Temp\mc263natives'
       原木被挖登记 decay 观察。之前版本挖土只摘跟踪、作物块悬空。
     - **与原版差异（有意 MVP，均记 TODO）**：固定时长生长（原版随机 tick）；
       无水源/光照/水分加速（耕地只有干燥一态，无踩回、无水合）；
-      锄头/骨粉无合成、无掉落来源（管理面板发）；骨粉对草地无长草/长花效果；
+      锄头/骨粉无合成配方（P40 配方表未含）、无掉落来源（管理面板发）；骨粉对草地无长草/长花效果；
       decay 是到原木直接距离 ≤3（原版树叶 distance 属性逐格传播 7 格）且延迟固定 5s；
       decay 苹果率 1/200（原版橡树叶一致量级）但徒手挖树叶不掉苹果（旧单测锁定）；
-      无饥饿/进食（苹果只能看/囤）；~~生长 planted 与 decay scheduled 均不持久化~~
+      ~~无饥饿/进食~~ **已由 P40 实现（§5.28）**；~~生长 planted 与 decay scheduled 均不持久化~~
       **已由 §5.27 P39 修正（redb 模式跨重启续算）**；树苗可种在耕地上（原版不行，P27 简化）。
     - 测试：`drops` 单测（ID/hoe 表/耕地掉泥/骨粉 1~2 双分支/decay 苹果臂存在且前缀=徒手表）+
       `lib` 单测（farmland=6875/土壤集合/半径 3）+ `mutable` 单测（耕后高度图不动）+
@@ -824,6 +825,23 @@ $natives = 'C:\Users\qwe\AppData\Local\Temp\mc263natives'
     **仍待**：journal 裁剪/运维、net 调用点逐连接 `actor` 标注（已有 `set_with_context`
     API，当前 actor=0）、每个 tick 都写 tick_offset（目前仅登记/推进/60s 刷新）。
 
+28. **P40 2×2 合成 + 生存基础（已合入）**：`mc-world/src/crafting.rs` 无序精确匹配配方表，
+    物品 ID 全部编译期查 `data/777/items.json` 生成表：原木→4 木板、2 木板→4 木棍、
+    4 木板→工作台、3 木板+2 木棍→木镐、3 圆石+2 木棍→石镐、3 小麦→面包、
+    煤+木棍→4 火把。背包槽 1–4 为合成格、0 为结果槽（服务端权威判定 + 扣料 + 全量
+    Content 同步），9–45 的 PICKUP/SWAP/QUICK_MOVE/THROW 语义不变；合成格随背包/redb
+    持久化。`mc-world/src/survival.rs` + `drop_state/survival.rs`：per-conn
+    health/food/saturation（初始 20/20/5.0），饱和优先衰减、饥饿归零周期扣血、
+    落差 >3 格每格 1 点坠落伤害，**全部只在全服唯一 50ms ticker 推进**（连接侧只判定/发包）；
+    死亡 = 背包全槽按现有掉落路径生成 ItemEntity 并广播 → 清空背包 → 满状态复活 →
+    `PlayerPositionSync 0x49` + SetHealth + 全量 Content 回出生点。手持食物右键扣 1 补饥饿。
+    协议：S2C `set_health` ID 查生成表为 106（0x6A），包体 Float+VarInt+Float 按 wiki
+    已验证口径；Join 新玩家用客户端默认满值故不发包（保持旧包序），读盘非满值必发。
+    存档：`.dat` v3 = v2 + 12B 生存字段；redb `players` v2 = v1 + 生存字段，v1/v2 旧档可读。
+    **未做**：3×3 工作台/block entity；CB Respawn 0x54（包体需 dimension_type/hashed seed
+    等十余字段且无抓包验证，不猜字节，死亡界面留后续）；锄头/骨粉/苹果无配方。
+    新增 21 项测试（含 `play_survival.rs` 5 个 e2e），合计见 §4。
+
 ## 6. 关键文件
 
 ```
@@ -841,8 +859,10 @@ crates/mc-protocol/src/packets/
 crates/mc-network/src/
   login_route/               Play 接线目录：login.rs（登录/Join序列）+ mod.rs（play_loop）+ block_edit.rs（decide_dig/decide_place + BlockUpdate/Ack）+ crops.rs（P37 作物路由/种植/骨粉/挖掘副作用）+ drop_sync.rs（掉落生成/50ms tick/拾取/背包同步 + P19 Q扔）+ view_sync.rs（视距节流/flush）
   broadcast.rs               P21 per-player 写通道 hub（conn_id → 队列 + 位置/视距快照，BlockUpdate/Spawn/Data/Remove/TakeItem 视距广播）
-  drop_state.rs / drop_state/timer_io.rs / timer_spec.rs   DropState：ItemEntities + 背包 + 视距集 + 存档；P39 timer IO 与 spec 字节映射
+  drop_state.rs / drop_state/{timer_io,survival}.rs / timer_spec.rs   DropState：ItemEntities + 背包 + 视距集 + 存档 + P39 timer IO + P40 生存 ticker
+  login_route/survival_sync.rs SetHealth/位置同步/进食发包
   tests/timer_persist.rs      P39 真实 redb + ticker 跨重启续算集成测试
+  tests/play_survival.rs      P40 合成/饥饿/死亡掉落/重生 e2e
   chunk_view.rs              clamp_view_radius/view_chunk_count、per-connection 视距集合/去重/跨区块 add/remove 规划
   chunk_cache.rs             共享已编码 ChunkData 0x2E 包体缓存（Mutex+HashMap+FIFO，默认 1024；`bodies` rayon 并行批量；P17 `with_mutable` + `invalidate`）
   play_events.rs             net 线程 → ECS 的移动/KeepAlive/Disconnect/BlockEdit 事件（conn_id 实体键）
@@ -855,7 +875,9 @@ crates/mc-world/src/
   crops/{mod,growth,drops}.rs P33/P37 通用作物规格表 + 各生长模型（Age/Tree/Vertical/Side/Fruit）+ 掉落规则
   items.rs                   P18 物品实体纯逻辑（生成/合并/重力/拾取/despawn/视距过滤）
   inventory.rs               P18 背包（46 槽/手持/合并/扣减）+ `player-<user>-<seed>.dat` 存档 + P19 throw_held/throw_from_slot
-  store.rs                   P36 redb 新存储原型（不接生产路径；设计见 docs/world-storage-plan.md）
+  crafting.rs                P40 2×2 合成配方表 + 无序匹配/消耗
+  survival.rs                P40 生存状态（health/food/saturation）与食物表纯逻辑
+  store.rs                   P36/P38/P39 redb 存储（生产核心 + 计时）
   worldgen/
     mod.rs                   WorldGen、高度/出生保护/biome/洞穴/矿/树、跨 chunk 扫描
     noise.rs                 2D/3D 平滑 value noise + 确定性 hash

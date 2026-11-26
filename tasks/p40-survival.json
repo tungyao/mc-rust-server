@@ -1,13 +1,20 @@
 {
   "id": "p40-survival",
   "title": "合成系统 + 生存基础（饥饿/生命/伤害/死亡掉落/重生）",
-  "status": "todo",
-  "owner": "",
+  "status": "done",
+  "owner": "subagent-survival",
   "priority": "p1",
   "deps": [],
   "branch": "",
   "created": "2026-11-26T03:27:37+00:00",
-  "updated": "2026-11-26T03:27:37+00:00",
-  "detail": "",
-  "files": []
+  "updated": "2026-11-26T04:28:21+00:00",
+  "detail": "2x2合成7配方+生存health/food/saturation+坠落/饥饿伤害+死亡掉落重生+存档v3/players v2; SetHealth0x6A; 未做3x3工作台与Respawn0x54; 424 passed; merge见main",
+  "files": [
+    "crates/mc-world/src/crafting.rs",
+    "crates/mc-world/src/survival.rs",
+    "crates/mc-network/src/drop_state/survival.rs",
+    "crates/mc-network/src/login_route/survival_sync.rs",
+    "crates/mc-network/tests/play_survival.rs",
+    "crates/mc-protocol/src/packets/play_sync.rs"
+  ]
 }
