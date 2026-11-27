@@ -9,12 +9,12 @@
 //! 宁可不猜；死亡闭环改用已验证的 PlayerPositionSync 0x49 + SetHealth + 全量 Content。
 //! 客户端死亡界面/Respawn 按钮的真实体验留待后续抓包后补齐。
 
+use tokio::io::{AsyncRead, AsyncWrite};
 use super::login::{write_packet_any, PlayOptions};
 use crate::drop_state::DropState;
 use mc_protocol::packets;
 use mc_world::SurvivalState;
 use std::io;
-use tokio::net::TcpStream;
 use tracing::debug;
 
 /// 组 SetHealth 包体（纯函数；发包线程/全局 ticker 共用）。
@@ -26,8 +26,8 @@ pub fn build_set_health_body(s: &SurvivalState) -> Vec<u8> {
 }
 
 /// 把当前生存状态同步给本连接（Join 读盘非满值 / 受伤 / 进食 / 复活）。
-pub(crate) async fn send_set_health(
-    stream: &mut TcpStream,
+pub(crate) async fn send_set_health<S: AsyncRead + AsyncWrite + Unpin>(
+    stream: &mut S,
     opts: &PlayOptions,
     drops: &DropState,
     conn_id: u64,
@@ -58,8 +58,8 @@ pub fn build_respawn_position_body(spawn: (i32, i32, i32), teleport_id: i32) -> 
 
 /// 移动包落地检测 → 权威扣血 + 本连接 SetHealth 同步（连接侧只做判定，不推进 tick）。
 /// 返回是否实际扣血（死亡由下一个全局 ticker tick 统一处理掉落/复活）。
-pub(crate) async fn apply_fall_and_sync(
-    stream: &mut TcpStream,
+pub(crate) async fn apply_fall_and_sync<S: AsyncRead + AsyncWrite + Unpin>(
+    stream: &mut S,
     opts: &PlayOptions,
     drops: &DropState,
     blocks: f64,
@@ -76,8 +76,8 @@ pub(crate) async fn apply_fall_and_sync(
 
 /// 手持食物右键：权威确认是食物 → 扣 1 个 + 补饥饿/饱和 + SetHealth + 单槽同步 + 刷盘。
 /// 返回 `Ok(true)` 表示真的吃了；`Ok(false)` = 不是食物/空手（调用方照常只 ack）。
-pub(crate) async fn eat_held(
-    stream: &mut TcpStream,
+pub(crate) async fn eat_held<S: AsyncRead + AsyncWrite + Unpin>(
+    stream: &mut S,
     opts: &PlayOptions,
     drops: &DropState,
 ) -> io::Result<bool> {

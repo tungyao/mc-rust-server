@@ -29,6 +29,19 @@ use serde::Deserialize;
 
 use crate::admin_items;
 
+/// P52：`/api/world` 只读展示的 socket 归属（启动期由 main 设置一次）。
+/// 用 OnceLock 而非 AdminState 新字段：保持既有测试的结构体字面量与 API 形状不变。
+static SOCKET_MODE: std::sync::OnceLock<mc_network::SocketMode> = std::sync::OnceLock::new();
+
+/// main 在完成配置解析后调用；重复调用只保留第一次（启动期唯一）。
+pub fn set_socket_mode(mode: mc_network::SocketMode) {
+    let _ = SOCKET_MODE.set(mode);
+}
+
+fn socket_mode() -> mc_network::SocketMode {
+    SOCKET_MODE.get().copied().unwrap_or(mc_network::SocketMode::Net)
+}
+
 /// 管理线程共享状态（与游戏线程共享的 `Arc`，`main.rs` 组装）。
 #[derive(Debug, Clone)]
 pub struct AdminState {
@@ -426,6 +439,8 @@ fn handle_world(state: &AdminState) -> AdminResponse {
             "drop_tick": state.drops.tick_count(),
             "world_dir": state.world_dir.display().to_string(),
             "view_distance": state.view_distance,
+            // P52：只读，不新增 POST；面板世界状态卡 <pre> 自动显示。
+            "socket_mode": socket_mode().as_str(),
         }),
     )
 }
@@ -770,6 +785,19 @@ mod tests {
         let index = route(&get("/"), &st);
         assert_eq!(index.status, 200);
         assert!(index.body.windows(6).any(|w| w == b"fetch("), "page must drive the API with fetch");
+    }
+
+    #[test]
+    fn world_endpoint_exposes_readonly_socket_mode() {
+        let st = test_state();
+        let w = route(&get("/api/world"), &st);
+        let v = body_json(&w);
+        let mode = v["socket_mode"].as_str().expect("socket_mode must be a read-only string");
+        assert!(matches!(mode, "net" | "ecs"), "mode must be a known value: {mode}");
+        // 旧字段全部保留，API 形状不破坏。
+        assert_eq!(v["view_distance"], 2);
+        assert_eq!(v["seed"], 777);
+        assert_eq!(route(&post("/api/world", ""), &st).status, 404, "no write endpoint added");
     }
 
     #[test]

@@ -1,4 +1,5 @@
 //! handshake_route: 首包Handshake + 777校验 + 分流 Status/Login
+use tokio::io::{AsyncRead, AsyncWrite};
 use super::config::NetConfig;
 use super::framing::{read_packet, to_io_invalid};
 use super::login_route::{handle_login_with_options, PlayOptions};
@@ -8,13 +9,12 @@ use crossbeam_channel::Sender;
 use mc_protocol::packets::{Handshake, HandshakeNextState, HANDSHAKE_PACKET_ID};
 use std::io;
 use std::net::SocketAddr;
-use tokio::net::TcpStream;
 use tracing::{debug, warn};
 
 /// 首包必须是 Handshake 0x00；只认 26.3/777；Status用&mut，Login拿走所有权。
 /// `conn_id` 来自 accept，作为 ECS 实体键一路透传到 PlayEvent。
-pub async fn handle_connection(
-    mut stream: TcpStream,
+pub async fn handle_connection<S: AsyncRead + AsyncWrite + Unpin>(
+    mut stream: S,
     addr: SocketAddr,
     conn_id: u64,
     tx: Sender<NewConnection>,

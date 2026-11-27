@@ -8,15 +8,10 @@ pub fn run_net_thread(
     tx: crossbeam_channel::Sender<mc_network::NewConnection>,
     shutdown: Arc<AtomicBool>,
     net_config: mc_network::NetConfig,
+    rt: tokio::runtime::Runtime,
 ) {
-    let rt = match tokio::runtime::Builder::new_multi_thread().enable_all().thread_name("mc-net").build() {
-        Ok(rt) => rt,
-        Err(e) => {
-            error!("tokio runtime build failed: {e}");
-            shutdown.store(true, Ordering::SeqCst);
-            return;
-        }
-    };
+    // P52：runtime 由 main 创建并把 Handle 交给 ECS SocketEcsRuntime；
+    // 本线程只跑 accept 循环，连接任务的 spawn/句柄/写队列归 ECS 资源。
     rt.block_on(async move {
         let listener = match tokio::net::TcpListener::bind(&bind).await {
             Ok(l) => l,

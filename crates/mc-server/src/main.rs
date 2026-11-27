@@ -13,7 +13,7 @@ mod systems;
 use bevy_app::{App, Startup, Update};
 use bevy_ecs::schedule::IntoSystemConfigs;
 use crossbeam_channel::unbounded;
-use resources::{NetReceiver, PlayEventReceiver, PlayersOnline, TickCounter};
+use resources::{NetReceiver, PlayEventReceiver, PlayersOnline, SocketEcs, TickCounter};
 use std::sync::{Arc, atomic::{AtomicBool, Ordering}};
 use std::time::{Duration, Instant};
 use tracing::{info, warn};
@@ -28,6 +28,10 @@ fn main() {
         }
     };
     let bind = cfg.bind.clone();
+    // P52：socket 归属启动期锁定（默认 ecs，server.toml 可回退 net）。
+    let socket_mode = config::load_socket_mode("server.toml");
+    info!("socket_mode={} (ecs=full ECS ownership, net=emergency fallback)", socket_mode.as_str());
+    admin::set_socket_mode(socket_mode);
     let online = PlayersOnline::default();
     let (play_tx, play_rx) = unbounded::<mc_network::PlayEvent>();
     // P36.2：启动时按 seed 打开 redb（必要时一次性迁移旧档），把 blocks 注入内存热层。
@@ -137,12 +141,23 @@ fn main() {
         // P47：生产入口开启挖掘进度 0x05 广播（旧 e2e 默认关闭，包流不变）。
         .with_destroy_stage(true)
         // P47：生产入口开启工具等级/时运/精准采集（旧 e2e 默认关闭，掉落口径不变）。
-        .with_tool_rules(true);
+        .with_tool_rules(true)
+        // P52：生产默认 ecs；net 仅在 server.toml 显式配置时作为紧急回退。
+        .with_socket_mode(socket_mode);
     info!(
         "config view_distance={} effective_view_radius={} seed={} compression_threshold={}",
         cfg.view_distance, cfg.effective_view_distance(), cfg.seed, cfg.compression_threshold
     );
     let (tx, rx) = unbounded::<mc_network::NewConnection>();
+    // P52 方案 B：mc-net runtime 的 Handle 交给 ECS 资源；ECS 在该 runtime 上 spawn
+    // 每连接的 reader/writer/logic 任务并持有句柄/队列。net_thread 只跑 accept。
+    let rt = tokio::runtime::Builder::new_multi_thread()
+        .enable_all()
+        .thread_name("mc-net")
+        .build()
+        .expect("tokio runtime build failed");
+    let socket_ecs = mc_network::SocketEcsRuntime::new(rt.handle().clone(), net_config.clone(), tx.clone());
+    let net_config = net_config.with_socket_accept(socket_ecs.incoming_sender());
     let mut app = App::new();
     // P25：cfg 进 Resource 前先把管理面板要的字段拷出来（`cfg` move 后不可再借）。
     let admin_bind = cfg.admin_bind.clone();
@@ -153,6 +168,7 @@ fn main() {
     app.insert_resource(online);
     app.insert_resource(NetReceiver(rx));
     app.insert_resource(PlayEventReceiver(play_rx));
+    app.insert_resource(SocketEcs(socket_ecs));
     app.insert_resource(play::PlayScaffold::default());
     app.insert_resource(movement::MovementQueue::default());
     app.insert_resource(movement::PendingPlayerRemoval::default());
@@ -165,6 +181,8 @@ fn main() {
         Update,
         (
             systems::tick_system,
+            // P52：连接登记先于 NewConnection 消费；只 try_recv + spawn，不阻塞 Update。
+            systems::socket_ecs_system,
             systems::handle_new_connections,
             movement::movement_ingest_system,
             play::login_join_system,
@@ -182,7 +200,7 @@ fn main() {
     );
     let shutdown = Arc::new(AtomicBool::new(false));
     let shutdown_net = Arc::clone(&shutdown);
-    std::thread::spawn(move || net_thread::run_net_thread(bind, tx, shutdown_net, net_config));
+    std::thread::spawn(move || net_thread::run_net_thread(bind, tx, shutdown_net, net_config, rt));
     // P25 管理面板：独立线程 + 独立监听（默认 127.0.0.1:25566），故障隔离：
     // admin 线程崩了/端口被占都不影响 25565 游戏线程。
     let admin_state = admin::AdminState {

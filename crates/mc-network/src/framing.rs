@@ -1,9 +1,9 @@
 //! framing: VarInt帧读写 + 压缩帧(zlib) + 超时/上限，只兼容26.3
+use tokio::io::{AsyncRead, AsyncWrite};
 use mc_protocol::{read_varint, write_varint};
 use std::io;
 use std::time::Duration;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
-use tokio::net::TcpStream;
 
 /// 单次读包超时：防半开连接长期占任务。
 pub const READ_TIMEOUT: Duration = Duration::from_secs(10);
@@ -11,14 +11,14 @@ pub const READ_TIMEOUT: Duration = Duration::from_secs(10);
 pub const MAX_PACKET_LEN: usize = 2_097_152;
 
 /// 读一帧：`VarInt(length) + VarInt(packet_id) + payload`（压缩禁用路径）。
-pub async fn read_packet(stream: &mut TcpStream) -> io::Result<(i32, Vec<u8>)> {
+pub async fn read_packet<S: AsyncRead + AsyncWrite + Unpin>(stream: &mut S) -> io::Result<(i32, Vec<u8>)> {
     match tokio::time::timeout(READ_TIMEOUT, read_packet_inner(stream)).await {
         Ok(r) => r,
         Err(_) => Err(io::Error::new(io::ErrorKind::TimedOut, "read packet timed out")),
     }
 }
 
-async fn read_packet_inner(stream: &mut TcpStream) -> io::Result<(i32, Vec<u8>)> {
+async fn read_packet_inner<S: AsyncRead + AsyncWrite + Unpin>(stream: &mut S) -> io::Result<(i32, Vec<u8>)> {
     let len = read_varint_async(stream).await?;
     if len < 0 { return Err(to_io_invalid(format!("negative packet length {len}"))); }
     if len as usize > MAX_PACKET_LEN { return Err(to_io_invalid(format!("packet too large: {len}"))); }
@@ -28,7 +28,7 @@ async fn read_packet_inner(stream: &mut TcpStream) -> io::Result<(i32, Vec<u8>)>
     Ok((id, buf[n..].to_vec()))
 }
 
-async fn read_varint_async(stream: &mut TcpStream) -> io::Result<i32> {
+async fn read_varint_async<S: AsyncRead + AsyncWrite + Unpin>(stream: &mut S) -> io::Result<i32> {
     let mut num = 0i32;
     let mut shift = 0u32;
     for _ in 0..5 {
@@ -42,7 +42,7 @@ async fn read_varint_async(stream: &mut TcpStream) -> io::Result<i32> {
 }
 
 /// 写一帧（组帧复用 `packets::encode_packet`，压缩禁用路径）。
-pub async fn write_packet(stream: &mut TcpStream, packet_id: i32, payload: &[u8]) -> io::Result<()> {
+pub async fn write_packet<S: AsyncRead + AsyncWrite + Unpin>(stream: &mut S, packet_id: i32, payload: &[u8]) -> io::Result<()> {
     let mut buf = Vec::new();
     mc_protocol::packets::encode_packet(packet_id, payload, &mut buf);
     stream.write_all(&buf).await
@@ -85,7 +85,7 @@ pub fn decode_compressed_frame(frame: &[u8]) -> io::Result<(i32, Vec<u8>)> {
 }
 
 /// 写一帧（压缩感知）：threshold>=0 走压缩帧，否则普通帧。
-pub async fn write_packet_framed(stream: &mut TcpStream, packet_id: i32, payload: &[u8], threshold: i32) -> io::Result<()> {
+pub async fn write_packet_framed<S: AsyncRead + AsyncWrite + Unpin>(stream: &mut S, packet_id: i32, payload: &[u8], threshold: i32) -> io::Result<()> {
     if threshold < 0 { return write_packet(stream, packet_id, payload).await; }
     let frame = encode_compressed_frame(packet_id, payload, threshold);
     if frame.len() > MAX_PACKET_LEN { return Err(to_io_invalid(format!("compressed frame too large: {}", frame.len()))); }
@@ -96,7 +96,7 @@ pub async fn write_packet_framed(stream: &mut TcpStream, packet_id: i32, payload
 }
 
 /// 读一帧（压缩感知）：threshold>=0 按压缩帧解析，否则普通帧。
-pub async fn read_packet_framed(stream: &mut TcpStream, threshold: i32) -> io::Result<(i32, Vec<u8>)> {
+pub async fn read_packet_framed<S: AsyncRead + AsyncWrite + Unpin>(stream: &mut S, threshold: i32) -> io::Result<(i32, Vec<u8>)> {
     if threshold < 0 { return read_packet(stream).await; }
     match tokio::time::timeout(READ_TIMEOUT, read_packet_compressed_inner(stream)).await {
         Ok(r) => r,
@@ -104,7 +104,7 @@ pub async fn read_packet_framed(stream: &mut TcpStream, threshold: i32) -> io::R
     }
 }
 
-async fn read_packet_compressed_inner(stream: &mut TcpStream) -> io::Result<(i32, Vec<u8>)> {
+async fn read_packet_compressed_inner<S: AsyncRead + AsyncWrite + Unpin>(stream: &mut S) -> io::Result<(i32, Vec<u8>)> {
     let len = read_varint_async(stream).await?;
     if len < 0 { return Err(to_io_invalid(format!("negative packet length {len}"))); }
     if len as usize > MAX_PACKET_LEN { return Err(to_io_invalid(format!("packet too large: {len}"))); }

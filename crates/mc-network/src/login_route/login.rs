@@ -1,5 +1,6 @@
 //! login: PlayOptions + login handshake / config / join sequence (moved from login_route.rs, no logic change).
 //! Shared small helpers (compression-aware IO, event emit, user_tag, chunk batches) reused by sibling modules.
+use tokio::io::{AsyncRead, AsyncWrite};
 use super::drop_sync::{send_experience, send_full_inventory};
 use super::play_loop;
 use crate::broadcast::{BroadcastHub, QueuedPacket};
@@ -14,7 +15,6 @@ use mc_protocol::packets;
 use mc_world::{MutableWorld, WorldGen, DEFAULT_SEED};
 use std::net::SocketAddr;
 use std::sync::Arc;
-use tokio::net::TcpStream;
 use tracing::{debug, info, warn};
 use std::io;
 use crate::NewConnection;
@@ -133,7 +133,7 @@ impl PlayOptions {
 }
 
 /// 默认压缩禁用（阈值 -1，原行为）。
-pub async fn handle_login(stream: TcpStream, addr: SocketAddr, tx: &Sender<NewConnection>) -> io::Result<()> {
+pub async fn handle_login<S: AsyncRead + AsyncWrite + Unpin>(stream: S, addr: SocketAddr, tx: &Sender<NewConnection>) -> io::Result<()> {
     handle_login_configured(
         stream,
         addr,
@@ -146,13 +146,13 @@ pub async fn handle_login(stream: TcpStream, addr: SocketAddr, tx: &Sender<NewCo
 }
 
 /// 阈值可配：threshold>=0 时 Success 前先发 SetCompression，其后走压缩帧。
-pub async fn handle_login_with_threshold(stream: TcpStream, addr: SocketAddr, tx: &Sender<NewConnection>, threshold: i32) -> io::Result<()> {
+pub async fn handle_login_with_threshold<S: AsyncRead + AsyncWrite + Unpin>(stream: S, addr: SocketAddr, tx: &Sender<NewConnection>, threshold: i32) -> io::Result<()> {
     handle_login_configured(stream, addr, tx, threshold, DEFAULT_SEED, None).await
 }
 
 /// 旧登录入口（无缓存/默认 radius=4）：保留给旧测试与调用点，委托到 options 实现。
-pub async fn handle_login_configured(
-    stream: TcpStream,
+pub async fn handle_login_configured<S: AsyncRead + AsyncWrite + Unpin>(
+    stream: S,
     addr: SocketAddr,
     tx: &Sender<NewConnection>,
     threshold: i32,
@@ -165,8 +165,8 @@ pub async fn handle_login_configured(
 
 /// 完整登录入口（Serve 从 NetConfig 透传 PlayOptions：压缩阈值 + seed + 有效视距 +
 /// conn_id + Play 事件通道 + 共享区块缓存）。
-pub async fn handle_login_with_options(
-    mut stream: TcpStream,
+pub async fn handle_login_with_options<S: AsyncRead + AsyncWrite + Unpin>(
+    mut stream: S,
     addr: SocketAddr,
     tx: &Sender<NewConnection>,
     opts: PlayOptions,
@@ -231,7 +231,7 @@ pub async fn handle_login_with_options(
 /// 容忍度：真机在 Configuration 会穿插 ClientInformation(0x00)/PluginMessage/Pong/KeepAlive 等，
 /// 这些与进服无关，先 debug 忽略，只认 KnownPacks 回包与 Finish Ack；规定步数内收不齐才 Err。
 /// threshold 透传（压缩开启后 Configuration 包同样走压缩帧）。
-pub async fn config_finish(stream: &mut TcpStream, threshold: i32) -> io::Result<()> {
+pub async fn config_finish<S: AsyncRead + AsyncWrite + Unpin>(stream: &mut S, threshold: i32) -> io::Result<()> {
     use tokio::time::{timeout, Duration};
     let compressed = packets::compression_enabled(threshold);
     // 1. Known Packs S2C（单vanilla包）。
@@ -322,13 +322,13 @@ pub fn notify_login_success(
 
 /// 进入 Play：拿住 socket，按序真下发后进循环。threshold透传，压缩开启后Play包走压缩帧。
 /// 旧签名保留（无 ECS 事件通道/默认 seed/视距 radius=4）；Serve 走 [`enter_play_with_options`]。
-pub async fn enter_play(stream: TcpStream, addr: SocketAddr, profile: mc_core::PlayerProfile, threshold: i32) -> io::Result<()> {
+pub async fn enter_play<S: AsyncRead + AsyncWrite + Unpin>(stream: S, addr: SocketAddr, profile: mc_core::PlayerProfile, threshold: i32) -> io::Result<()> {
     enter_play_with_options(stream, addr, profile, PlayOptions::new(threshold, DEFAULT_SEED, PLAY_VIEW_RADIUS)).await
 }
 
 /// 旧入口（带 seed + Play 事件通道，默认 radius=4、无缓存）。
-pub async fn enter_play_with_events(
-    stream: TcpStream,
+pub async fn enter_play_with_events<S: AsyncRead + AsyncWrite + Unpin>(
+    stream: S,
     addr: SocketAddr,
     profile: mc_core::PlayerProfile,
     threshold: i32,
@@ -345,8 +345,8 @@ pub async fn enter_play_with_events(
 }
 
 /// 进入 Play（完整 options）：Join 序列 + Play 循环；退出时恰好投递一次 Disconnect。
-pub async fn enter_play_with_options(
-    mut stream: TcpStream,
+pub async fn enter_play_with_options<S: AsyncRead + AsyncWrite + Unpin>(
+    mut stream: S,
     addr: SocketAddr,
     profile: mc_core::PlayerProfile,
     opts: PlayOptions,
@@ -373,8 +373,8 @@ pub async fn enter_play_with_options(
     result
 }
 
-async fn enter_play_inner(
-    stream: &mut TcpStream,
+async fn enter_play_inner<S: AsyncRead + AsyncWrite + Unpin>(
+    stream: &mut S,
     addr: SocketAddr,
     profile: &mc_core::PlayerProfile,
     opts: &PlayOptions,
@@ -463,8 +463,8 @@ async fn enter_play_inner(
 
 /// P18 Join 背包同步：读盘（缺文件=新背包+石头开局）→ 全量 Content。
 /// 失败只记 debug，不阻断 Join（背包下次拾取/重进再同步）。
-async fn send_join_inventory(
-    stream: &mut TcpStream,
+async fn send_join_inventory<S: AsyncRead + AsyncWrite + Unpin>(
+    stream: &mut S,
     profile: &mc_core::PlayerProfile,
     opts: &PlayOptions,
 ) {
@@ -510,7 +510,7 @@ async fn send_join_inventory(
 }
 
 /// 压缩感知写包：threshold>=0 走压缩帧，否则普通帧。
-pub(crate) async fn write_packet_any(stream: &mut TcpStream, packet_id: i32, payload: &[u8], threshold: i32) -> io::Result<()> {
+pub(crate) async fn write_packet_any<S: AsyncRead + AsyncWrite + Unpin>(stream: &mut S, packet_id: i32, payload: &[u8], threshold: i32) -> io::Result<()> {
     if packets::compression_enabled(threshold) {
         write_packet_framed(stream, packet_id, payload, threshold).await
     } else {
@@ -539,8 +539,8 @@ fn play_chunk_body(
 /// 空批次不发（客户端 ChunkBatchSizeCalculator 只接受正 batch_size）。
 /// 命中共享缓存时用 `ChunkCache::bodies` 并行生成缺失区块（初始 441 块的主要开销），
 /// 无缓存旧入口仍逐个生成。
-pub(crate) async fn send_chunk_batch(
-    stream: &mut TcpStream,
+pub(crate) async fn send_chunk_batch<S: AsyncRead + AsyncWrite + Unpin>(
+    stream: &mut S,
     world: &WorldGen,
     add: &[mc_core::ChunkPos],
     threshold: i32,
@@ -564,7 +564,7 @@ pub(crate) async fn send_chunk_batch(
 }
 
 /// 逐个发 UnloadChunk（0x26 forget_level_chunk）。
-pub(crate) async fn send_unload_chunks(stream: &mut TcpStream, remove: &[mc_core::ChunkPos], threshold: i32) -> io::Result<()> {
+pub(crate) async fn send_unload_chunks<S: AsyncRead + AsyncWrite + Unpin>(stream: &mut S, remove: &[mc_core::ChunkPos], threshold: i32) -> io::Result<()> {
     for pos in remove {
         let mut body = Vec::new();
         packets::UnloadChunk { chunk_x: pos.0, chunk_z: pos.1 }.encode_body(&mut body);
@@ -573,8 +573,8 @@ pub(crate) async fn send_unload_chunks(stream: &mut TcpStream, remove: &[mc_core
     Ok(())
 }
 
-async fn send_join_sequence(
-    stream: &mut TcpStream,
+async fn send_join_sequence<S: AsyncRead + AsyncWrite + Unpin>(
+    stream: &mut S,
     profile: &mc_core::PlayerProfile,
     opts: &PlayOptions,
     view: &mut ChunkView,
@@ -638,7 +638,7 @@ async fn send_join_sequence(
 }
 
 /// 压缩感知读包：threshold>=0 按压缩帧解析，否则普通帧。
-pub(crate) async fn read_packet_any(stream: &mut TcpStream, threshold: i32) -> io::Result<(i32, Vec<u8>)> {
+pub(crate) async fn read_packet_any<S: AsyncRead + AsyncWrite + Unpin>(stream: &mut S, threshold: i32) -> io::Result<(i32, Vec<u8>)> {
     if packets::compression_enabled(threshold) {
         read_packet_framed(stream, threshold).await
     } else {

@@ -1,11 +1,11 @@
 //! drop_sync: drop spawn / Spawn / Data / Remove + inventory sync + pickup tick (moved from login_route.rs P18/P19 section, no logic change).
+use tokio::io::{AsyncRead, AsyncWrite};
 use super::block_edit::BlockEditOutcome;
 use super::login::{write_packet_any, PlayOptions};
 use crate::chunk_view::ChunkView;
 use crate::drop_state::{DropState, PLAYER_ENTITY_ID};
 use mc_protocol::packets;
 use mc_world::MutableWorld;
-use tokio::net::TcpStream;
 use tracing::debug;
 use std::io;
 
@@ -42,8 +42,8 @@ fn drop_in_view(center: mc_core::ChunkPos, radius: i32, chunk: mc_core::ChunkPos
     (chunk.0 - center.0).abs() <= radius && (chunk.1 - center.1).abs() <= radius
 }
 
-pub(crate) async fn send_spawn(
-    stream: &mut TcpStream,
+pub(crate) async fn send_spawn<S: AsyncRead + AsyncWrite + Unpin>(
+    stream: &mut S,
     opts: &PlayOptions,
     drops: &DropState,
     id: i32,
@@ -80,8 +80,8 @@ pub(crate) async fn send_spawn(
     Ok(())
 }
 
-pub(crate) async fn send_data(
-    stream: &mut TcpStream,
+pub(crate) async fn send_data<S: AsyncRead + AsyncWrite + Unpin>(
+    stream: &mut S,
     opts: &PlayOptions,
     drops: &DropState,
     id: i32,
@@ -100,8 +100,8 @@ pub(crate) async fn send_data(
     write_packet_any(stream, packets::PLAY_SET_ENTITY_DATA_S2C_ID, &body, opts.threshold).await
 }
 
-pub(crate) async fn send_remove(
-    stream: &mut TcpStream,
+pub(crate) async fn send_remove<S: AsyncRead + AsyncWrite + Unpin>(
+    stream: &mut S,
     opts: &PlayOptions,
     drops: &DropState,
     ids: &[i32],
@@ -121,8 +121,8 @@ pub(crate) async fn send_remove(
 // ---- P31 经验球（复用 add_entity/SetData/Remove/TakeItem 已验证包体，ID 全部查生成表） ----
 
 /// 经验球生成：Spawn(0x01，type=50) + SetData(0x65，index 8/VarInt(1)=经验值)。
-pub(crate) async fn send_orb_spawn(
-    stream: &mut TcpStream,
+pub(crate) async fn send_orb_spawn<S: AsyncRead + AsyncWrite + Unpin>(
+    stream: &mut S,
     opts: &PlayOptions,
     drops: &DropState,
     id: i32,
@@ -154,8 +154,8 @@ pub(crate) async fn send_orb_spawn(
 }
 
 /// P31 经验/等级同步（Join 与拾取后）：Float 进度 + VarInt 等级 + VarInt 总经验。
-pub(crate) async fn send_experience(
-    stream: &mut TcpStream,
+pub(crate) async fn send_experience<S: AsyncRead + AsyncWrite + Unpin>(
+    stream: &mut S,
     opts: &PlayOptions,
     drops: &DropState,
 ) -> io::Result<()> {
@@ -309,8 +309,8 @@ pub(crate) fn broadcast_takeitem_to_viewers(
 }
 
 /// 全量背包同步（Join/拾取后）。
-pub(crate) async fn send_full_inventory(
-    stream: &mut TcpStream,
+pub(crate) async fn send_full_inventory<S: AsyncRead + AsyncWrite + Unpin>(
+    stream: &mut S,
     opts: &PlayOptions,
     drops: &DropState,
 ) -> io::Result<()> {
@@ -348,8 +348,8 @@ pub fn build_full_inventory_body(drops: &DropState, conn_id: u64) -> Option<Vec<
 }
 
 /// 单槽同步（放置消耗后）。
-pub(crate) async fn send_held_slot(
-    stream: &mut TcpStream,
+pub(crate) async fn send_held_slot<S: AsyncRead + AsyncWrite + Unpin>(
+    stream: &mut S,
     opts: &PlayOptions,
     drops: &DropState,
 ) -> io::Result<()> {
@@ -372,8 +372,8 @@ pub(crate) async fn send_held_slot(
 
 /// 挖掘掉落生成：每种 drop 一个物品实体（同位合并由 ItemEntities 处理），
 /// 同一次挖掘按方块类型额外生成经验球（P31，共用挖掘路径与 fan-out）。
-pub(crate) async fn spawn_drops(
-    stream: &mut TcpStream,
+pub(crate) async fn spawn_drops<S: AsyncRead + AsyncWrite + Unpin>(
+    stream: &mut S,
     opts: &PlayOptions,
     drops: &DropState,
     world: &MutableWorld,
@@ -456,7 +456,7 @@ pub(crate) async fn spawn_drops(
 }
 
 /// 只回 Ack（无世界影响的操作：空手 Q/空手放/UseItem；对齐客户端序列预测）。
-pub(crate) async fn send_ack_only(stream: &mut TcpStream, threshold: i32, sequence: i32) -> io::Result<()> {
+pub(crate) async fn send_ack_only<S: AsyncRead + AsyncWrite + Unpin>(stream: &mut S, threshold: i32, sequence: i32) -> io::Result<()> {
     let mut ack = Vec::new();
     mc_protocol::write_varint(sequence, &mut ack);
     write_packet_any(stream, packets::PLAY_BLOCK_CHANGED_ACK_S2C_ID, &ack, threshold).await
@@ -493,8 +493,8 @@ pub(crate) const THROW_UP_BIAS: f64 = 0.1;
 /// DROP_ALL_ITEMS=4（Ctrl+Q，扔整栈），`ServerPlayer.drop` 从手持槽拿走；
 /// 背包打开时按 Q 走 ContainerClick THROW（`ContainerInput` id=4，button 0/1），
 /// 要求光标为空（`doClick` THROW 分支先查 carried，手持栈时无操作）。
-pub(crate) async fn spawn_thrown_items(
-    stream: &mut TcpStream,
+pub(crate) async fn spawn_thrown_items<S: AsyncRead + AsyncWrite + Unpin>(
+    stream: &mut S,
     opts: &PlayOptions,
     drops: &DropState,
     world: &MutableWorld,
@@ -556,8 +556,8 @@ pub(crate) async fn spawn_thrown_items(
 /// Q 扔手持（P19）：DROP_ITEM=5 扔 1 个，DROP_ALL_ITEMS=4 扔整组；
 /// 空手/无世界只回 Ack（无变化不断连）。成功时按 P28 朝向生成掉落实体 +
 /// 全量背包同步 + 刷盘，最后恒回 Ack 对齐客户端预测。
-pub(crate) async fn handle_throw_action(
-    stream: &mut TcpStream,
+pub(crate) async fn handle_throw_action<S: AsyncRead + AsyncWrite + Unpin>(
+    stream: &mut S,
     opts: &PlayOptions,
     conn_user: &str,
     mutable: Option<&MutableWorld>,
@@ -581,8 +581,8 @@ pub(crate) async fn handle_throw_action(
 
 /// 每 50ms 连接侧同步（**不是**物理 tick）：视距补/卸 + despawn 清理 + 拾取 + 入库同步。
 /// 物理（下落/age/despawn/支撑重算）只由全服唯一 ticker 跑，本函数绝不调用 items.tick()。
-pub(crate) async fn tick_drops(
-    stream: &mut TcpStream,
+pub(crate) async fn tick_drops<S: AsyncRead + AsyncWrite + Unpin>(
+    stream: &mut S,
     opts: &PlayOptions,
     drops: &DropState,
     conn_user: &str,
@@ -692,8 +692,8 @@ enum SyncKind {
     Orb,
 }
 
-pub(crate) async fn sync_view_entities(
-    stream: &mut TcpStream,
+pub(crate) async fn sync_view_entities<S: AsyncRead + AsyncWrite + Unpin>(
+    stream: &mut S,
     opts: &PlayOptions,
     drops: &DropState,
     view: &ChunkView,

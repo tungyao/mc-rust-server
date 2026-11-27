@@ -1,15 +1,15 @@
 //! status_route: Status Request→Response→Ping→Pong，随后断开，不计数
+use tokio::io::{AsyncRead, AsyncWrite};
 use super::config::NetConfig;
 use super::framing::{read_packet, to_io_invalid, write_packet};
 use mc_protocol::packets::{self, PING_PACKET_ID, STATUS_REQUEST_PACKET_ID, STATUS_RESPONSE_PACKET_ID};
 use std::net::SocketAddr;
 use std::sync::atomic::Ordering;
-use tokio::net::TcpStream;
 use tracing::{debug, warn};
 use std::io;
 
 /// Status 流程：Request → Response → (可选) Ping → Pong，随后由客户端断开。
-pub async fn handle_status(stream: &mut TcpStream, addr: SocketAddr, config: &NetConfig) -> io::Result<()> {
+pub async fn handle_status<S: AsyncRead + AsyncWrite + Unpin>(stream: &mut S, addr: SocketAddr, config: &NetConfig) -> io::Result<()> {
     let (id, payload) = read_packet(stream).await?;
     if id != STATUS_REQUEST_PACKET_ID {
         warn!("{addr} status: expected request 0x00, got {id:#04x}, disconnect");

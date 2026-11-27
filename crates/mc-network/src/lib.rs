@@ -11,6 +11,7 @@ pub mod handshake_route;
 pub mod login_route;
 pub mod play_events;
 pub mod player_visibility;
+pub mod socket_ecs;
 pub mod status_route;
 mod timer_spec;
 
@@ -33,12 +34,13 @@ pub use login_route::{
 };
 pub use play_events::PlayEvent;
 pub use player_visibility::{next_player_entity_id, FIRST_PLAYER_ENTITY_ID};
+pub use socket_ecs::{handoff_to_ecs, AcceptedSocket, EcsSocket, SocketEcsRuntime, SocketMode};
 
 use crossbeam_channel::Sender;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 use tokio::net::TcpListener;
-use tracing::{debug, info};
+use tracing::{debug, info, warn};
 
 /// accept 时分配的单连接身份：ECS 实体键，避免仅用 addr 时旧断线误删重连新实体。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -58,6 +60,8 @@ pub fn next_conn_id() -> u64 {
 pub enum NetError {
     #[error("io: {0}")]
     Io(#[from] std::io::Error),
+    #[error("socket_ecs handoff: {0}")]
+    EcsHandoff(String),
 }
 
 /// 监听入口：全服唯一掉落物理 ticker 在此启动一次（启动逻辑保持不变）。
@@ -104,6 +108,20 @@ pub async fn serve(listener: TcpListener, tx: Sender<NewConnection>, config: Net
         let (socket, addr) = listener.accept().await?;
         let conn_id = next_conn_id();
         info!("accept {addr} conn_id={conn_id}");
+        if config.socket_mode == SocketMode::Ecs {
+            // 方案 B：serve 只 accept + 分配身份；连接任务/队列/写权归 ECS 运行时。
+            // 缺失 handoff 通道时 fail-fast 关连接，绝不静默退回 net 路径（双生产者风险）。
+            match &config.socket_accept {
+                Some(acceptor) => {
+                    let accepted = AcceptedSocket { addr, conn_id, stream: socket };
+                    if let Err(e) = handoff_to_ecs(acceptor, accepted) {
+                        warn!("socket_ecs handoff failed conn_id={conn_id}: {e}");
+                    }
+                }
+                None => warn!("socket_mode=ecs without socket_accept channel, dropping conn_id={conn_id}"),
+            }
+            continue;
+        }
         let tx = tx.clone();
         let config = config.clone();
         tokio::spawn(async move {
