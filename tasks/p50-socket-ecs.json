@@ -1,0 +1,13 @@
+{
+  "id": "p50-socket-ecs",
+  "title": "批次4立项评估：socket→ECS 架构设计（仅调研）",
+  "status": "doing",
+  "owner": "subagent-socket-ecs",
+  "priority": "p1",
+  "deps": [],
+  "branch": "",
+  "created": "2026-11-27T01:50:19+00:00",
+  "updated": "2026-11-27T01:50:19+00:00",
+  "detail": "",
+  "files": []
+}

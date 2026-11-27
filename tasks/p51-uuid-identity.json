@@ -1,0 +1,13 @@
+{
+  "id": "p51-uuid-identity",
+  "title": "UUID 稳定化 + 玩家存档/后台迁移",
+  "status": "todo",
+  "owner": "",
+  "priority": "p1",
+  "deps": [],
+  "branch": "",
+  "created": "2026-11-27T01:50:19+00:00",
+  "updated": "2026-11-27T01:50:19+00:00",
+  "detail": "",
+  "files": []
+}

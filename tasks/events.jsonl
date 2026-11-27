@@ -98,3 +98,6 @@
 {"ts": "2026-11-27 01:36 UTC", "agent": "main", "task": "p49-gameplay-gaps", "status": "todo", "detail": "研究接下来的玩法缺口（含后台联动要求）", "files": ""}
 {"ts": "2026-11-27 01:36 UTC", "agent": "subagent-gap-research", "task": "p49-gameplay-gaps", "status": "start", "detail": "claim", "files": ""}
 {"ts": "2026-11-27 01:41 UTC", "agent": "subagent-gap-research", "task": "p49-gameplay-gaps", "status": "done", "detail": "docs/gameplay-gaps-plan.md:28项缺口A/B/C分类+每缺口包来源/状态/ticker/存档/后台API联动+批次0-4+12决策点;仅文档", "files": "docs/gameplay-gaps-plan.md"}
+{"ts": "2026-11-27 01:50 UTC", "agent": "main", "task": "p50-socket-ecs", "status": "todo", "detail": "批次4立项评估：socket→ECS 架构设计（仅调研）", "files": ""}
+{"ts": "2026-11-27 01:50 UTC", "agent": "main", "task": "p51-uuid-identity", "status": "todo", "detail": "UUID 稳定化 + 玩家存档/后台迁移", "files": ""}
+{"ts": "2026-11-27 01:50 UTC", "agent": "subagent-socket-ecs", "task": "p50-socket-ecs", "status": "start", "detail": "claim", "files": ""}
