@@ -265,23 +265,14 @@ const dashboardTemplate = `
       <template #footer><span class="muted">{{ selectedRecipeDetail }}</span></template>
     </n-card>
 
-    <n-card size="small" title="工作台会话（P54 A8 落盘 / P55 B6 GUI）">
-      <n-alert type="warning" :show-icon="false">
-        B6 GUI 骨架：菜单类型 12 取自 wiki 推导，<b>未抓包校准</b>。默认关；开启后才可能断线，请用真机 A/B 验证。
-      </n-alert>
+    <n-card size="small" title="工作台会话（落盘恒开 / GUI 常开）">
       <div class="row">
         <span class="label">落盘</span>
         <n-tag :type="craft9?.persist_enabled ? 'success' : 'default'" size="small" :bordered="false">
           {{ craft9?.persist_enabled ? '已启用' : '未启用' }}
         </n-tag>
-        <span class="label">GUI 开关</span>
-        <n-select v-model:value="guiEnabled" :options="boolOptions" size="small" style="width: 90px" />
-        <n-button size="tiny" type="primary" secondary @click="applyGuiToggle">应用</n-button>
-        <span class="label">打开 GUI</span>
-        <n-select v-model:value="screenUser" :options="userOptions" filterable clearable
-                  placeholder="选择在线玩家" size="small" style="width: 220px" />
-        <n-button size="tiny" :disabled="!screenUser" @click="openGuiNow">打开 GUI</n-button>
-        <span class="muted">{{ screenMsg }}</span>
+        <span class="label">GUI</span>
+        <n-tag type="success" size="small" :bordered="false">常开（右键工作台即开）</n-tag>
       </div>
       <div class="row">
         <span class="label">清空会话</span>
@@ -422,10 +413,6 @@ export const Dashboard = {
     const throttleMsg = ref('');
     const craftClearUser = ref(null);
     const craftMsg = ref('');
-    // P55 B6：GUI 运行时开关 + 后台触发打开（默认从 /api/craft9 同步）。
-    const guiEnabled = ref(false);
-    const screenUser = ref(null);
-    const screenMsg = ref('');
     const worldSynced = ref(false);
 
     // P53：经验发放 / 生存调试 / 本地统计（在线玩家身份仍以稳定 UUID 为准）。
@@ -521,32 +508,7 @@ export const Dashboard = {
     async function loadCraft9() {
       try {
         craft9.value = await jget('/api/craft9');
-        if (typeof craft9.value?.screen_open === 'boolean') {
-          guiEnabled.value = craft9.value.screen_open;
-        }
       } catch (e) { /* 下次轮询重试 */ }
-    }
-    async function applyGuiToggle() {
-      try {
-        const r = await jpost('/api/workbench-gui', { enabled: !!guiEnabled.value });
-        screenMsg.value = r.body.ok ? `GUI ${r.body.enabled ? '开' : '关'}（menu #${r.body.menu_id}，未校准）`
-          : JSON.stringify(r.body);
-        if (!r.body.ok) message.error(screenMsg.value);
-      } catch (e) { screenMsg.value = 'workbench-gui failed: ' + e; message.error(screenMsg.value); }
-      await loadCraft9();
-    }
-    async function openGuiNow() {
-      if (!screenUser.value) { message.warning('请选择在线玩家'); return; }
-      try {
-        const id = screenUser.value;
-        const isUuid = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(id);
-        const r = await jpost('/api/screen-open', isUuid ? { uuid: id } : { username: id });
-        screenMsg.value = r.body.ok ? `已打开 GUI（conn ${r.body.conn_id}，menu #${r.body.menu_id}）`
-          : JSON.stringify(r.body);
-        if (!r.body.ok) message.error(screenMsg.value);
-        else message.success('已向玩家发送工作台 GUI');
-      } catch (e) { screenMsg.value = 'screen-open failed: ' + e; message.error(screenMsg.value); }
-      await loadCraft9();
     }
     async function setTimePreset(preset) {
       try {
@@ -785,7 +747,6 @@ export const Dashboard = {
       journalKeep, journalMsg, trimming, trimNow,
       throttleEnabled, throttleMax, boolOptions, throttleMsg, applyThrottle,
       craftClearUser, craftMsg, clearCraft9,
-      guiEnabled, screenUser, screenMsg, applyGuiToggle, openGuiNow,
       xpUser, xpAmount, xpMsg, grantXp,
       foodUser, foodValue, satValue, foodMsg, setFood,
       statUser, statFrom, statTo, statRows, statMsg, loadStats,

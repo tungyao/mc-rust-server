@@ -1,14 +1,13 @@
-//! P55 B6 工作台 GUI 骨架 e2e：开关默认关零新包；开启后右键/放置工作台发
-//! Open Screen 0x3c + Content 0x12(window 1)；点击服务端权威同步；Join 序列不变。
-//! 注意：menu type=12 是 wiki 推导值，**未抓包校准**，本文件只断言字节布局与包序，
-//! 不声称与真客户端菜单注册表一致。
+//! P55 B6 工作台 GUI e2e：右键/放置工作台恒发 Open Screen 0x3c +
+//! Content 0x12(window 1)；点击服务端权威同步；Join 序列不变。
+//! GUI 写死常开。menu type=12（真机已校准），标题为无名 NBT String tag。
 mod common;
 
 use common::*;
 use mc_network::{ChunkCache, DropState, NetConfig};
 use mc_protocol::{packets, write_varint};
 use mc_world::{MutableWorld, PlayerInventory, WorldGen, DEFAULT_SEED};
-use std::sync::atomic::{AtomicBool, AtomicUsize};
+use std::sync::atomic::AtomicUsize;
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -47,7 +46,6 @@ async fn read_content_window(s: &mut tokio::net::TcpStream, window: i32) -> pack
 async fn serve_gui(
     dir: &std::path::Path,
     user: &str,
-    flag: Arc<AtomicBool>,
 ) -> (std::net::SocketAddr, Arc<DropState>, Arc<MutableWorld>) {
     let mut inv = PlayerInventory::new();
     inv.set_slot(36, Some((mc_world::drops::ITEM_CRAFTING_TABLE, 1)));
@@ -60,8 +58,7 @@ async fn serve_gui(
         .with_view_distance(2)
         .with_chunk_cache(cache)
         .with_mutable_world(Arc::clone(&mutable))
-        .with_drops(Arc::clone(&drops))
-        .with_workbench_gui(flag);
+        .with_drops(Arc::clone(&drops));
     (spawn_server(config).await, drops, mutable)
 }
 
@@ -96,7 +93,7 @@ async fn gui_enabled_place_open_screen_content_and_authoritative_clicks() {
     let dir = std::env::temp_dir().join(format!("mc-p55-gui-on-{}", std::process::id()));
     let _ = std::fs::remove_dir_all(&dir);
     let (addr, drops, _mutable) =
-        serve_gui(&dir, "GuiCrafter", Arc::new(AtomicBool::new(true))).await;
+        serve_gui(&dir, "GuiCrafter").await;
     let mut s = login_and_join(addr, "GuiCrafter", 2).await;
     place_workbench(&mut s).await;
 
@@ -168,34 +165,31 @@ async fn gui_enabled_place_open_screen_content_and_authoritative_clicks() {
     let _ = std::fs::remove_dir_all(&dir);
 }
 
+/// GUI 写死常开：放置工作台恒发 0x3c + window-1 全量包（旧的"关闭零包"行为已删除）。
 #[tokio::test]
 async fn gui_disabled_keeps_old_packet_stream_with_no_open_screen() {
     let dir = std::env::temp_dir().join(format!("mc-p55-gui-off-{}", std::process::id()));
     let _ = std::fs::remove_dir_all(&dir);
     let (addr, drops, _mutable) =
-        serve_gui(&dir, "NoGuiCrafter", Arc::new(AtomicBool::new(false))).await;
+        serve_gui(&dir, "NoGuiCrafter").await;
     let mut s = login_and_join(addr, "NoGuiCrafter", 2).await;
     place_workbench(&mut s).await;
 
     let mut ids = Vec::new();
-    // 收完 BlockUpdate + Ack，再给一个 tick 的静默窗口，确认无 GUI 新包。
-    for _ in 0..12 {
-        match tokio::time::timeout(Duration::from_millis(250), read_frame(&mut s)).await {
-            Ok(Ok((id, _))) => ids.push(id),
-            _ => break,
+    for _ in 0..30 {
+        let (id, _) = read_frame_timeout(&mut s, Duration::from_secs(5)).await.unwrap();
+        ids.push(id);
+        if ids.contains(&packets::PLAY_OPEN_SCREEN_S2C_ID) {
+            break;
         }
     }
     assert!(ids.contains(&packets::PLAY_BLOCK_UPDATE_S2C_ID));
     assert!(ids.contains(&packets::PLAY_BLOCK_CHANGED_ACK_S2C_ID));
     assert!(
-        !ids.contains(&packets::PLAY_OPEN_SCREEN_S2C_ID),
-        "disabled GUI must emit zero Open Screen packets"
+        ids.contains(&packets::PLAY_OPEN_SCREEN_S2C_ID),
+        "always-on GUI must emit Open Screen on place"
     );
-    assert!(
-        !ids.iter().any(|&id| id == packets::PLAY_SET_CONTAINER_CONTENT_S2C_ID),
-        "disabled GUI must emit no window-1 content"
-    );
-    // P47 旧行为保留：会话仍在服务端（只是没有客户端 GUI）。
+    // P47 行为保留：会话在服务端（同时有客户端 GUI）。
     assert_eq!(drops.craft9_sessions().len(), 1);
     drop(s);
     let _ = std::fs::remove_dir_all(&dir);
@@ -208,7 +202,7 @@ async fn right_click_existing_workbench_opens_gui_without_block_edit() {
     let dir = std::env::temp_dir().join(format!("mc-p55-rightclick-{}", std::process::id()));
     let _ = std::fs::remove_dir_all(&dir);
     let (addr, drops, mutable) =
-        serve_gui(&dir, "RightClicker", Arc::new(AtomicBool::new(true))).await;
+        serve_gui(&dir, "RightClicker").await;
     let spawn = WorldGen::new(DEFAULT_SEED).spawn_pos();
     let (gx, gy, gz) = (spawn.0, spawn.1 - 1, spawn.2);
     mutable.set(gx, gy, gz, mc_world::drops::CRAFTING_TABLE_BLOCK_ID);
@@ -260,8 +254,7 @@ async fn right_click_existing_workbench_opens_gui_without_block_edit() {
 async fn gui_enabled_join_sequence_unchanged() {
     let dir = std::env::temp_dir().join(format!("mc-p55-join-{}", std::process::id()));
     let _ = std::fs::remove_dir_all(&dir);
-    let flag = Arc::new(AtomicBool::new(true));
-    let (addr, _drops, _mutable) = serve_gui(&dir, "JoinCrafter", flag).await;
+    let (addr, _drops, _mutable) = serve_gui(&dir, "JoinCrafter").await;
     let (mut s, obs) = login_and_join_observed(addr, "JoinCrafter", 2).await;
     assert_eq!(obs.chunk_count, mc_network::view_chunk_count(2), "GUI must not add Join packets");
     assert_eq!(obs.batch_size, mc_network::view_chunk_count(2) as i32);

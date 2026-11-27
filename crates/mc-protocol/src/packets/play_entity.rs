@@ -57,10 +57,9 @@ pub const PLAY_OPEN_SCREEN_S2C_ID: i32 = super::packet_id("clientbound.play", "o
 /// - `ClientboundOpenScreenPacket.STREAM_CODEC` = `CONTAINER_ID`(VarInt) +
 ///   `ByteBufCodecs.registry(Registries.MENU)`(VarInt) + `ComponentSerialization.TRUSTED_STREAM_CODEC`，
 ///   **只有三个字段，无 menu 附加 NBT**。
-/// - 标题：`ComponentSerialization.CODEC` 对纯文本 component 经 `tryCollapseToString()`
-///   折叠成 StringTag；`ByteBufCodecs.tagCodec` 用 `FriendlyByteBuf.writeNbt` →
-///   `NbtIo.writeAnyTag`，即写完整 tag（类型字节 + 空根名 + payload），
-///   **不是裸 payload**（骨架初版曾写错，已按 jar 校准）。
+/// - 标题：纯文本 component；**2026-11-27 真机校准**：客户端对具名写法报
+///   `open_screen ... found 10 bytes extra`，故标题是**无名** StringTag
+///  （`0x08` + payload 直写，无空根名），不是 `writeNbt` 具名形式。
 /// `server.toml::workbench_menu_id` 仍可覆盖以便 A/B；真机抓包可作为最终复核。
 pub const CRAFTING_MENU_TYPE_ID: i32 = 12;
 /// C2S Set Held Item / Click Container 的 ID 见 `play_block`
@@ -926,15 +925,18 @@ pub fn encode_set_experience_packet(v: &SetExperience, out: &mut Vec<u8>) {
 // Open Screen（S2C 0x3c）：B6 工作台 GUI 骨架（包 ID 是数据表真值，菜单 ID 推导）。
 // ---------------------------------------------------------------------------
 
-/// 打开客户端容器界面。线格式（**26.3 客户端 jar 逆向确认**）：
-/// VarInt window_id + VarInt menu_type + 完整 NBT Tag 的 Text Component title，
+/// 打开客户端容器界面。线格式（**2026-11-27 真机抓包校准**：客户端
+/// `PacketDecoder` 报 `open_screen ... found 10 bytes extra`，证明标题是
+/// **无名 NBT tag**——`0x08` 后直接跟 payload（u16be 长度 + UTF-8），
+/// **没有**具名根的 2 字节空名；之前按 `writeNbt` 具名写多 2 字节是错的）：
+/// VarInt window_id + VarInt menu_type + 无名 StringTag title，
 /// **无 menu 附加字段**（`StreamCodec.composite` 只有三项）。
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct OpenScreen {
     pub window_id: i32,
     pub menu_type: i32,
-    /// 纯文本标题：component 折叠成 StringTag，按 `NbtIo.writeAnyTag` 写完整 tag
-    /// （tag id `0x08` + u16be 空根名 + u16be 长度 + UTF-8），无样式/事件。
+    /// 纯文本标题：无名 StringTag（tag id `0x08` + payload 直写，
+    /// 无空根名；真机 `10 bytes extra` 证明具名写法多 2 字节）。
     pub title: String,
 }
 
@@ -942,9 +944,8 @@ impl OpenScreen {
     pub fn encode_body(&self, out: &mut Vec<u8>) {
         write_varint(self.window_id, out);
         write_varint(self.menu_type, out);
-        // FriendlyByteBuf.writeNbt → NbtIo.writeAnyTag：类型字节 + 空根名 + payload。
+        // 无名 tag：类型字节 + payload（u16be 长度 + UTF-8），无根名。
         out.push(crate::packets::nbt::TAG_STRING);
-        out.extend_from_slice(&0u16.to_be_bytes());
         crate::packets::nbt::NbtTag::String(self.title.clone()).write_payload(out);
     }
 
@@ -954,12 +955,10 @@ impl OpenScreen {
         off += n;
         let (menu_type, n) = read_varint(&buf[off..])?;
         off += n;
-        if buf.get(off) != Some(&crate::packets::nbt::TAG_STRING)
-            || buf.get(off + 1..off + 3) != Some(&[0, 0])
-        {
+        if buf.get(off) != Some(&crate::packets::nbt::TAG_STRING) {
             return Err(ProtocolError::UnexpectedEof);
         }
-        off += 3;
+        off += 1;
         match crate::packets::nbt::read_nbt_payload(crate::packets::nbt::TAG_STRING, &buf[off..]) {
             Ok((crate::packets::nbt::NbtTag::String(title), n)) => {
                 Ok((Self { window_id, menu_type, title }, off + n))
@@ -1216,10 +1215,12 @@ mod tests {
         assert_eq!(EXPERIENCE_ORB_ENTITY_TYPE_ID, 50);
     }
 
-    /// P55 B6：`open_screen` 包体按官方 26.3 客户端 jar 逆向断言（菜单 ID / NBT 形式已确认）。
+    /// P55 B6：`open_screen` 包体按官方 26.3 客户端 jar 逆向断言（菜单 ID 已确认；
+    /// 2026-11-27 真机 `10 bytes extra` 校准标题为**无名** StringTag）。
     #[test]
     fn open_screen_body_layout_verified_from_26_3_jar() {
-        // 包 ID 来自 data/777/packets.json；菜单 ID / 标题 tag 形式来自客户端 jar 逆向。
+        // 包 ID 来自 data/777/packets.json；菜单 ID 来自客户端 jar 逆向；
+        // 标题形式由真机 DecoderException（10 bytes extra）校准：无名 tag。
         assert_eq!(PLAY_OPEN_SCREEN_S2C_ID, 0x3c);
         assert_eq!(CRAFTING_MENU_TYPE_ID, 12, "MenuType.CRAFTING is 13th builtin menu (0-based 12)");
         let pkt = OpenScreen {
@@ -1229,11 +1230,11 @@ mod tests {
         };
         let mut body = Vec::new();
         pkt.encode_body(&mut body);
-        // 1 (window) + 12 (menu) + full NBT String tag:
-        //   0x08 (TAG_String) + 0x00 0x00 (empty root name) + 0x00 0x08 (len) + "Crafting"
+        // 1 (window) + 12 (menu) + unnamed NBT String tag:
+        //   0x08 (TAG_String) + 0x00 0x08 (len) + "Crafting"（无空根名）
         assert_eq!(
             body,
-            [0x01, 0x0c, 0x08, 0x00, 0x00, 0x00, 0x08, b'C', b'r', b'a', b'f', b't', b'i', b'n', b'g']
+            [0x01, 0x0c, 0x08, 0x00, 0x08, b'C', b'r', b'a', b'f', b't', b'i', b'n', b'g']
         );
         let (decoded, used) = OpenScreen::decode_body(&body).unwrap();
         assert_eq!(decoded, pkt);

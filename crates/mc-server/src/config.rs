@@ -146,82 +146,30 @@ fn load_bool_key(path: &Path, key: &str, default: bool, comment: &str) -> bool {
     value.unwrap_or(default)
 }
 
-/// 读取四项 P53 开关：旧 server.toml 缺键时逐项补默认值（全开）。
+/// 读取 P53/P54 开关：**基本玩法已写死常开**（工作台/合成/XP/饥饿/设置持久/统计/
+//// journal/天气状态/工作台落盘，全部恒为真，不再读 toml，不再接受后台拨动）；
+/// 唯一保留可配的是 P54 A3 `broadcast_throttle`（未验证的包序优化，默认关）。
 pub fn load_feature_toggles(path: impl AsRef<Path>) -> FeatureToggles {
     let path = path.as_ref();
     FeatureToggles {
-        xp_merge: load_bool_key(path, "xp_merge", true, "P53 A1: XP orb attraction/merge (default true)"),
-        hunger_detail: load_bool_key(path, "hunger_detail", true, "P53 A2: sprint/jump/swim exhaustion (default true)"),
-        settings_persist: load_bool_key(path, "settings_persist", true, "P53 A4: persist gamemode/tool_enchant across reconnect (default true)"),
-        stats: load_bool_key(path, "stats", true, "P53 A7: local stats accumulation (default true, no packets)"),
-        // P54：A3 默认关；A5/A6 时间/A8 默认开；天气广播默认关。
+        xp_merge: true,
+        hunger_detail: true,
+        settings_persist: true,
+        stats: true,
+        // P54：A3 默认关（改包序有风险，等真机双开包流确认后再决定）。
         broadcast_throttle: load_bool_key(path, "broadcast_throttle", false, "P54 A3: broadcast merge/throttle (default false, packet order risk)"),
-        journal_trim: load_bool_key(path, "journal_trim", true, "P54 A5: journal seq window trim (default true)"),
-        journal_keep: load_u64_key(path, "journal_keep", 10_000, "P54 A5: journal retained record count"),
-        weather_broadcast: load_bool_key(path, "weather_broadcast", false, "P54 A6: weather game_event (default false; 0x27 type unconfirmed, not sent yet)"),
-        craft_session_persist: load_bool_key(path, "craft_session_persist", true, "P54 A8: workbench session redb persistence (default true)"),
+        journal_trim: true,
+        journal_keep: 10_000,
+        weather_broadcast: false,
+        craft_session_persist: true,
     }
 }
 
-/// P55 B6：工作台 GUI 总开关，独立 toml 键（不塞进 `FeatureToggles`/`ServerConfig`，
-/// 保住 P53/P54 的穷举字面量测试）。**默认 false**：包体菜单 ID 是 wiki 推导值，
-/// 未抓包校准，开启后才可能断线；后台 `/api/workbench-gui` 可运行时热切。
-pub const DEFAULT_WORKBENCH_GUI: bool = false;
-
-/// P55 B6：菜单类型 ID 的配置覆盖键；wiki 推导值 12，**待抓包校准**。
+/// P55 B6：工作台 GUI 已写死常开（基本功能，不再是配置）。
+/// 右键工作台恒发 Open Screen 0x3c + 全量 0x12；菜单类型恒为 12
+///（`CRAFTING_MENU_TYPE_ID`，真机 `open_screen 10 bytes extra` 已校准标题为无名 tag）。
+/// 旧 toml 若残留 `workbench_gui` / `workbench_menu_id` 键会被忽略（未知键不报错）。
 pub const DEFAULT_WORKBENCH_MENU_ID: i32 = mc_protocol::packets::CRAFTING_MENU_TYPE_ID;
-
-/// 读工作台 GUI 开关（旧 server.toml 缺键时补 `workbench_gui = false`）。
-pub fn load_workbench_gui(path: impl AsRef<Path>) -> bool {
-    load_bool_key(
-        path.as_ref(),
-        "workbench_gui",
-        DEFAULT_WORKBENCH_GUI,
-        "P55 B6: workbench GUI (open_screen 0x3c), menu id wiki-derived, capture required before enabling",
-    )
-}
-
-/// 读菜单类型 ID（缺键补 12；非法/越界值警告后回退 12）。
-pub fn load_workbench_menu_id(path: impl AsRef<Path>) -> i32 {
-    let path = path.as_ref();
-    let Ok(text) = std::fs::read_to_string(path) else { return DEFAULT_WORKBENCH_MENU_ID };
-    let value = toml::from_str::<toml::Value>(&text)
-        .ok()
-        .and_then(|v| v.get("workbench_menu_id").and_then(|x| x.as_integer()))
-        .and_then(|n| i32::try_from(n).ok())
-        .filter(|n| *n >= 0);
-
-    if value.is_none() && !text.contains("workbench_menu_id") {
-        let mut updated = text;
-        if !updated.ends_with('\n') {
-            updated.push('\n');
-        }
-        updated.push_str(&format!(
-            "\n# P55 B6: menu type id for crafting GUI (wiki-derived 12, capture-calibrate before use)\nworkbench_menu_id = {}\n",
-            DEFAULT_WORKBENCH_MENU_ID
-        ));
-        let _ = std::fs::write(path, updated);
-    }
-    value.unwrap_or(DEFAULT_WORKBENCH_MENU_ID)
-}
-
-/// 数值 toml 键：缺键补默认值；非法值警告后回退默认。
-fn load_u64_key(path: &Path, key: &str, default: u64, comment: &str) -> u64 {
-    let Ok(text) = std::fs::read_to_string(path) else { return default };
-    let value = toml::from_str::<toml::Value>(&text)
-        .ok()
-        .and_then(|v| v.get(key).and_then(|x| x.as_integer()))
-        .and_then(|n| u64::try_from(n).ok());
-    if value.is_none() && !text.contains(key) {
-        let mut updated = text;
-        if !updated.ends_with('\n') {
-            updated.push('\n');
-        }
-        updated.push_str(&format!("\n# {comment}\n{key} = {default}\n"));
-        let _ = std::fs::write(path, updated);
-    }
-    value.unwrap_or(default)
-}
 
 /// 生成器版本默认值：v1=legacy 永久冻结；v2 只对新 seed / 显式配置启用。
 pub const DEFAULT_GENERATOR_VERSION: u32 = 1;
@@ -496,46 +444,53 @@ mod tests {
         let _ = std::fs::remove_file(&p);
     }
 
-    /// P53：旧 toml 缺键补四项默认开；显式 false 可单独关闭任一项。
+    /// P53/P54：基本玩法已写死——旧 toml 里残留的开关值一律忽略，恒返回全开
+    ///（A3 broadcast_throttle 除外：仍从文件读，默认关）。
     #[test]
     fn p53_feature_toggles_default_on_and_allow_off() {
         let p = tmp_toml();
         let _ = std::fs::remove_file(&p);
         std::fs::write(&p, "seed = 42\n").unwrap();
-        assert_eq!(load_feature_toggles(&p), FeatureToggles::default());
-        let filled = std::fs::read_to_string(&p).unwrap();
-        for key in ["xp_merge", "hunger_detail", "settings_persist", "stats"] {
-            assert!(filled.contains(&format!("{key} = true")), "old toml gains {key}");
-        }
+        let t = load_feature_toggles(&p);
+        assert!(t.xp_merge && t.hunger_detail && t.settings_persist && t.stats);
+        assert!(t.journal_trim && t.craft_session_persist);
+        assert_eq!(t.journal_keep, 10_000);
+        assert!(!t.weather_broadcast && !t.broadcast_throttle);
+        // 残留旧键也不再补写、不再生效。
         std::fs::write(
             &p,
-            "seed = 42\nxp_merge = false\nhunger_detail = true\nsettings_persist = false\nstats = true\n",
+            "seed = 42\nxp_merge = false\nhunger_detail = false\nsettings_persist = false\nstats = false\njournal_trim = false\ncraft_session_persist = false\nweather_broadcast = true\n",
         )
         .unwrap();
         let toggles = load_feature_toggles(&p);
-        assert!(!toggles.xp_merge && toggles.hunger_detail && !toggles.settings_persist && toggles.stats);
+        assert!(toggles.xp_merge && toggles.hunger_detail && toggles.settings_persist && toggles.stats);
+        assert!(toggles.journal_trim && toggles.craft_session_persist);
+        assert!(!toggles.weather_broadcast);
+        // 写死的键永不补写（只有 A3 会补自己的键）。
+        let expect = "seed = 42\nxp_merge = false\nhunger_detail = false\nsettings_persist = false\nstats = false\njournal_trim = false\ncraft_session_persist = false\nweather_broadcast = true\n";
+        let filled = std::fs::read_to_string(&p).unwrap();
+        let tail = "\n# P54 A3: broadcast merge/throttle (default false, packet order risk)\nbroadcast_throttle = false\n";
+        assert_eq!(filled, format!("{expect}{tail}"), "only A3 may auto-append");
+        // A3 仍可配：默认关，显式 true 生效。
+        assert!(!load_feature_toggles(&p).broadcast_throttle);
+        std::fs::write(&p, "seed = 42\nbroadcast_throttle = true\n").unwrap();
+        assert!(load_feature_toggles(&p).broadcast_throttle);
         let _ = std::fs::remove_file(&p);
     }
 
-    /// P55：GUI 默认关（未校准字节不能默认发），菜单 ID 默认 12 且可覆盖。
+    /// P55：工作台 GUI 已写死常开，不再读配置；菜单 ID 恒为 12。
     #[test]
     fn p55_workbench_gui_defaults_off_with_calibration_override() {
         let p = tmp_toml();
         let _ = std::fs::remove_file(&p);
-        std::fs::write(&p, "seed = 42\n").unwrap();
-        assert!(!load_workbench_gui(&p));
-        assert_eq!(load_workbench_menu_id(&p), 12);
+        std::fs::write(&p, "seed = 42\nworkbench_gui = false\nworkbench_menu_id = 7\n").unwrap();
+        // 残留键被忽略且永不补写：文件与写入内容逐字节一致。
+        assert_eq!(DEFAULT_WORKBENCH_MENU_ID, 12);
+        let expect = "seed = 42\nworkbench_gui = false\nworkbench_menu_id = 7\n";
         let filled = std::fs::read_to_string(&p).unwrap();
-        assert!(filled.contains("workbench_gui = false"));
-        assert!(filled.contains("workbench_menu_id = 12"));
+        assert_eq!(filled, expect, "no auto-append for hardcoded GUI");
         // 旧 ServerConfig 穷举字面量仍能解析（不给它加字段）。
         assert_eq!(ServerConfig::load_or_create(&p).unwrap().seed, 42);
-
-        std::fs::write(&p, "seed = 42\nworkbench_gui = true\nworkbench_menu_id = 7\n").unwrap();
-        assert!(load_workbench_gui(&p));
-        assert_eq!(load_workbench_menu_id(&p), 7);
-        std::fs::write(&p, "seed = 42\nworkbench_menu_id = -3\n").unwrap();
-        assert_eq!(load_workbench_menu_id(&p), 12, "negative id falls back to derived default");
         let _ = std::fs::remove_file(&p);
     }
 

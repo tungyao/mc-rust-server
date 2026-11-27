@@ -186,6 +186,22 @@ async fn workbench_grid9_and_quick_move_are_authoritative() {
     let session = sessions.first().cloned().expect("placing a workbench opens a 3×3 session");
     assert_eq!((session.x, session.y, session.z), (gx, gy + 1, gz));
 
+    // GUI 写死常开：放置后依次收到 Ack → 0x3c → 0x12(window 1)；先排空，
+    // 后续点击与全量同步才一一对应（旧"零新包"行为已删除）。
+    let mut saw_ack = false;
+    let mut saw_open = false;
+    for _ in 0..10 {
+        let (id, _) = read_frame_timeout(&mut s, Duration::from_secs(5)).await.unwrap();
+        if id == packets::PLAY_BLOCK_CHANGED_ACK_S2C_ID {
+            saw_ack = true;
+        } else if id == packets::PLAY_OPEN_SCREEN_S2C_ID {
+            saw_open = true;
+        } else if id == packets::PLAY_SET_CONTAINER_CONTENT_S2C_ID {
+            break;
+        }
+    }
+    assert!(saw_ack && saw_open, "place must ack then open GUI");
+
     // 窗口 1：背包槽 9（窗口 10）拿 9 小麦 → 合成格 1 → 结果槽 SHIFT 整理入包。
     let window = mc_world::crafting::CRAFT9_WINDOW_ID;
     send_click(&mut s, window, 1, 10, 0, packets::CLICK_PICKUP).await;

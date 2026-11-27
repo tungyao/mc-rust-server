@@ -1,14 +1,14 @@
 //! P56 完整合成端到端：背包 2×2 的 SHIFT/SWAP/格内 SHIFT，工作台 3×3 的
 //! 背包 SHIFT 补料，以及两种网格共用同一张 283 条配方表。
 //! 所有包序断言沿用既有契约：点击后主同步包是 0x12（window 0/1），
-//! `workbench_gui` 默认关时不产生任何 0x3c / window-1 包。
+//! 工作台右键恒发 0x3c + window-1 全量包（GUI 写死常开）。
 mod common;
 
 use common::*;
 use mc_network::{ChunkCache, DropState, NetConfig};
 use mc_protocol::{packets, write_varint};
 use mc_world::{MutableWorld, PlayerInventory, WorldGen, DEFAULT_SEED};
-use std::sync::atomic::{AtomicBool, AtomicUsize};
+use std::sync::atomic::AtomicUsize;
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -61,7 +61,6 @@ async fn serve(
     dir: &std::path::Path,
     user: &str,
     inv: PlayerInventory,
-    gui: bool,
 ) -> std::net::SocketAddr {
     inv.save_to_dir(dir, user, DEFAULT_SEED).unwrap();
     let mutable = Arc::new(MutableWorld::new(DEFAULT_SEED));
@@ -71,8 +70,7 @@ async fn serve(
         .with_view_distance(2)
         .with_chunk_cache(cache)
         .with_mutable_world(mutable)
-        .with_drops(drops)
-        .with_workbench_gui(Arc::new(AtomicBool::new(gui)));
+        .with_drops(drops);
     spawn_server(config).await
 }
 
@@ -93,7 +91,7 @@ async fn window0_shift_result_crafts_into_inventory_with_no_new_packets() {
     let mut inv = PlayerInventory::new();
     inv.set_slot(9, Some((planks, 1)));
     inv.set_slot(10, Some((planks, 1)));
-    let addr = serve(&dir, "P56Shift", inv, false).await;
+    let addr = serve(&dir, "P56Shift", inv).await;
     let mut s = login_and_join(addr, "P56Shift", 2).await;
     let _ = read_content_window(&mut s, 0).await.0;
 
@@ -138,7 +136,7 @@ async fn window0_grid_shift_moves_stack_into_backpack() {
     let log = mc_world::drops::ITEM_OAK_LOG;
     let mut inv = PlayerInventory::new();
     inv.set_slot(9, Some((log, 3)));
-    let addr = serve(&dir, "P56Grid", inv, false).await;
+    let addr = serve(&dir, "P56Grid", inv).await;
     let mut s = login_and_join(addr, "P56Grid", 2).await;
     let _ = read_content_window(&mut s, 0).await.0;
 
@@ -167,7 +165,7 @@ async fn gui_workbench_shift_fills_grid_and_shares_recipe_table() {
     inv.set_slot(36, Some((mc_world::drops::ITEM_CRAFTING_TABLE, 1)));
     inv.set_slot(9, Some((wheat, 9)));
     inv.set_slot(10, Some((wheat, 3)));
-    let addr = serve(&dir, "P56Gui", inv, true).await;
+    let addr = serve(&dir, "P56Gui", inv).await;
     let mut s = login_and_join(addr, "P56Gui", 2).await;
     let _ = read_content_window(&mut s, 0).await.0;
 

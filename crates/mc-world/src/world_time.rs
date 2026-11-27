@@ -72,8 +72,7 @@ pub struct WorldTimeState {
     weather: AtomicU64,
     ///  absolut long tick；到达后天气回晴（0 = 永久）。
     weather_until: AtomicI64,
-    /// 天气广播开关（默认关；真机未确认 0x27 type 值，当前只做服务端状态）。
-    weather_broadcast: AtomicBool,
+    /// 天气只有服务端状态（不发包：0x27 type 真机未确认），无广播开关。
     /// 是否自动推进 tick（生产开；旧测试入口关可保持逐字节包流）。
     advance: AtomicBool,
 }
@@ -84,7 +83,6 @@ impl Default for WorldTimeState {
             tick: AtomicI64::new(DEFAULT_DAY_TICK),
             weather: AtomicU64::new(Weather::Clear.code() as u64),
             weather_until: AtomicI64::new(0),
-            weather_broadcast: AtomicBool::new(false),
             advance: AtomicBool::new(true),
         }
     }
@@ -158,14 +156,6 @@ impl WorldTimeState {
         self.weather_until.load(Ordering::Relaxed)
     }
 
-    pub fn weather_broadcast(&self) -> bool {
-        self.weather_broadcast.load(Ordering::Relaxed)
-    }
-
-    pub fn set_weather_broadcast(&self, enabled: bool) {
-        self.weather_broadcast.store(enabled, Ordering::Relaxed);
-    }
-
     /// 存档快照（由 ticker  periodic 或 API 显式调用写 meta）。
     pub fn snapshot(&self) -> (i64, u8) {
         (self.tick.load(Ordering::Relaxed), self.weather().code())
@@ -181,7 +171,6 @@ mod tests {
         let state = WorldTimeState::default();
         assert_eq!(state.tick(), DEFAULT_DAY_TICK);
         assert_eq!(state.weather(), Weather::Clear);
-        assert!(!state.weather_broadcast());
         assert_eq!(Weather::parse("thunderstorm"), Some(Weather::Thunder));
     }
 

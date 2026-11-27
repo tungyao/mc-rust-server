@@ -193,14 +193,14 @@ $natives = 'C:\Users\qwe\AppData\Local\Temp\mc263natives'
 - [ ] `POST /api/journal-trim` 在 redb 落盘后裁剪；`/api/world.journal_seq/bytes/oldest_kept` 合理。
 - [ ] `craft_session_persist=true`：3×3 会话放原料 → 断线重进 → 服务端会话仍在内存（**客户端 GUI 暂不补发**）。
 
-**P55/P56 GUI 与合成**
-- [ ] 面板「工作台会话」卡打开开关（`POST /api/workbench-gui {"enabled":true}`），
-      `/api/craft9.menu_id_verified` 应为 `true`、`menu_id=12`。
+**P55/P56 GUI 与合成（写死常开，无开关）**
 - [ ] 客户端右键工作台（或手持工作台放置）：弹出真 3×3 界面，不断线、无 `DecoderException`；截图。
-      若断线/界面错：关开关，把 `workbench_menu_id` 改成其它值 A/B 并抓包给我。
+      若仍断线：把 `debug/disconnect-*-client.txt` 的 `found N bytes extra` 发回来。
+      （2026-11-27 已修一次：标题无名 tag，13 字节整包。）
 - [ ] 3×3：格内放小麦 → 结果槽显示干草捆；结果 SHIFT 连续合成；背包格 SHIFT 优先补合成格。
 - [ ] 2×2（背包按 E 的原生界面）：结果槽不能手放；SHIFT 连续合成产物入包；SWAP 进空快捷栏/副手；格 1–4 SHIFT 入包。
-- [ ] 关闭 `workbench_gui` 后重连：不出现任何 `0x3c` 包，Join 包序与旧版一致。
+- [ ] 后台面板「工作台会话」卡显示"常开（右键工作台即开）"，无开关无按钮；
+      `/api/workbench-gui` 与 `/api/screen-open` 已删除（应 404）。
 
 ---
 

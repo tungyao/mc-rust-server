@@ -4,22 +4,13 @@ max_players = 100
 view_distance = 10
 seed = 123456789
 compression_threshold = -1
-# P38 世界存储后端："redb"（默认，world/state-<seed>.redb）或 "legacy"（旧 overrides/player .dat）
+# 世界存储后端："redb"（默认，world/state-<seed>.redb）或 "legacy"（旧 overrides/player .dat）
 world_storage = "redb"
-# P44 生成器版本：1=legacy（冻结默认，老 seed 必须保持），2=仅新 seed/显式启用的低风险视觉增强
+# 生成器版本：1=legacy（冻结默认，老 seed 必须保持），2=仅新 seed/显式启用
 generator_version = 1
-# P53 批次 1：四项玩法开关（默认开；按需改 false 即关闭，无需改代码）
-xp_merge = true
-hunger_detail = true
-settings_persist = true
-stats = true
-# P54 批次 1：基础设施开关（默认与库一致；天气广播即使打开也暂不发包，0x27 type 未确认）
-broadcast_throttle = false # A3：BlockUpdate 同 tick 合并（改包序，待真机双开确认后再开）
-journal_trim = true        # A5：journal 按 seq 保留窗口，只在落盘后裁剪
-journal_keep = 10000       # A5：保留记录数
-weather_broadcast = false  # A6：天气 game_event 保留开关，当前只更新服务端状态与面板
-craft_session_persist = true # A8：工作台会话断线落盘、重进恢复（仅服务端内存）
-# P55 B6：工作台 GUI；默认关。菜单 ID 12 与标题完整 NBT tag 已由官方 26.3 客户端 jar 逆向确认，
-# 仍建议真机复核；可运行时 POST /api/workbench-gui 热切 A/B（改 menu id 后 API 标为未校准）。
-workbench_gui = false
-workbench_menu_id = 12
+# socket 归属："ecs"（默认，全量 ECS I/O）或 "net"（紧急回退）
+socket_mode = "ecs"
+# 唯一可配的玩法项：A3 BlockUpdate 合并（改包序，待真机双开确认后再开，默认关）。
+# 其余基本玩法（工作台 GUI/XP/饥饿/设置持久/统计/journal/天气状态/工作台落盘）
+# 已全部写死常开，不再是配置。
+broadcast_throttle = false

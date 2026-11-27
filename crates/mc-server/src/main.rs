@@ -28,25 +28,15 @@ fn main() {
         }
     };
     let bind = cfg.bind.clone();
-    // P53：四项玩法开关（生产默认全开，server.toml 可单独关闭）。
+    // P53/P54：基本玩法已写死全开（唯一可配的是 A3 broadcast_throttle）。
     let features = config::load_feature_toggles("server.toml");
     info!(
-        "p53 features xp_merge={} hunger_detail={} settings_persist={} stats={}",
-        features.xp_merge, features.hunger_detail, features.settings_persist, features.stats
+        "features all-on (hardcoded): xp_merge hunger_detail settings_persist stats journal_trim/10000 craft_persist; broadcast_throttle={} (only tunable)",
+        features.broadcast_throttle
     );
-    info!(
-        "p54 features broadcast_throttle={} journal_trim={}/{} weather_broadcast={} craft_persist={}",
-        features.broadcast_throttle, features.journal_trim, features.journal_keep,
-        features.weather_broadcast, features.craft_session_persist
-    );
-    // P55 B6：工作台 GUI 默认关（menu ID 未抓包校准，开启后才可能断线）；
-    // 与后台/各连接共享同一 Arc，POST /api/workbench-gui 可运行时热切。
-    let workbench_gui = Arc::new(AtomicBool::new(config::load_workbench_gui("server.toml")));
-    let workbench_menu_id = config::load_workbench_menu_id("server.toml");
-    info!(
-        "p55 workbench_gui={} menu_id={} (wiki-derived, capture-calibrate before enabling)",
-        workbench_gui.load(Ordering::SeqCst), workbench_menu_id
-    );
+    // P55 B6：工作台 GUI 写死常开（基本功能，不再是配置）；菜单恒为 12。
+    // 右键工作台恒发 Open Screen 0x3c + 全量 0x12。
+    info!("workbench gui always-on (hardcoded; 26.3 client jar verified)");
     // P52：socket 归属启动期锁定（默认 ecs，server.toml 可回退 net）。
     let socket_mode = config::load_socket_mode("server.toml");
     info!("socket_mode={} (ecs=full ECS ownership, net=emergency fallback)", socket_mode.as_str());
@@ -177,20 +167,16 @@ fn main() {
         // P52：生产默认 ecs；net 仅在 server.toml 显式配置时作为紧急回退。
         .with_socket_mode(socket_mode)
         // P53：生产默认全开；旧 e2e 入口的 NetConfig::default() 仍全关（包流不变）。
-        .with_xp_merge(features.xp_merge)
-        .with_hunger_detail(features.hunger_detail)
-        .with_settings_persist(features.settings_persist)
-        .with_stats(features.stats)
-        // P54：四项独立开关（A3 默认关；A5/A6 时间/A8 默认开；天气广播默认关）。
+        // P53/P54：基本玩法写死全开；A3 仍是唯一可配项。
+        .with_xp_merge(true)
+        .with_hunger_detail(true)
+        .with_settings_persist(true)
+        .with_stats(true)
         .with_broadcast_throttle(features.broadcast_throttle)
-        .with_journal_trim(features.journal_trim)
-        .with_journal_keep(features.journal_keep)
+        .with_journal_trim(true)
+        .with_journal_keep(10_000)
         .with_world_time(Arc::clone(&world_time))
-        .with_weather_broadcast(features.weather_broadcast)
-        .with_craft_session_persist(features.craft_session_persist)
-        // P55：GUI 总开关与菜单类型 ID（推导值，待抓包校准）。
-        .with_workbench_gui(Arc::clone(&workbench_gui))
-        .with_workbench_menu_id(workbench_menu_id);
+        .with_craft_session_persist(true);
     info!(
         "config view_distance={} effective_view_radius={} seed={} compression_threshold={}",
         cfg.view_distance, cfg.effective_view_distance(), cfg.seed, cfg.compression_threshold
@@ -223,8 +209,8 @@ fn main() {
     app.insert_resource(persist::WorldSaveDir(world_dir.clone().into()));
     app.insert_resource(persist::SharedStore(shared_store.clone()));
     app.insert_resource(persist::JournalTrimConfig {
-        enabled: features.journal_trim,
-        keep: features.journal_keep,
+        enabled: true,
+        keep: 10_000,
     });
     app.insert_resource(persist::SharedDropState(Arc::clone(&drop_state)));
     app.add_systems(Startup, systems::startup_system);
@@ -258,12 +244,10 @@ fn main() {
     admin::set_admin_extras(
         shared_store.clone(),
         Arc::clone(&world_time),
-        features.journal_trim,
-        features.journal_keep,
-        features.craft_session_persist,
+        true,
+        10_000,
+        true,
     );
-    // P55：后台线程复用同一开关与菜单 ID（运行时切换即时影响所有在线连接）。
-    admin::set_workbench_gui(Arc::clone(&workbench_gui), workbench_menu_id);
     let admin_state = admin::AdminState {
         hub: Arc::clone(&hub),
         drops: Arc::clone(&drop_state),

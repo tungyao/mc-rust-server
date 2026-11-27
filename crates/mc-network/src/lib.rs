@@ -77,8 +77,7 @@ pub async fn serve(listener: TcpListener, tx: Sender<NewConnection>, config: Net
     if let Some(hub) = &config.hub {
         hub.set_throttle(config.broadcast_throttle);
     }
-    // P54 A6：唯一物理 ticker 同时推进全局时间/天气；天气广播默认关且不猜 0x27 type。
-    config.world_time.set_weather_broadcast(config.weather_broadcast);
+    // P54 A6：唯一物理 ticker 同时推进全局时间/天气；天气只有服务端状态，从不发包。
     // P18 掉落物理：全服唯一 ticker 在这里启动一次（50ms）。各连接的 play_loop
     // 只做拾取/视距同步，绝不调用 ItemEntities::tick()，否则 N 连接 = N 倍速物理。
     // 独立 std::thread，不依赖 tokio runtime；DropState::new 在单测里依然无副作用。

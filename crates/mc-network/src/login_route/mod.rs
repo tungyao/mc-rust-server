@@ -73,8 +73,8 @@ async fn drain_outbox<S: AsyncRead + AsyncWrite + Unpin>(
     Ok(())
 }
 
-/// P55 B6：开启工作台 GUI（默认关 → 零新包）。按 `Open Screen 0x3c` → `Content 0x12`
-/// 顺序写给自己连接；菜单 ID 来自配置（wiki 推导值，待抓包校准）。
+/// P55 B6：开启工作台 GUI（写死常开，基本功能）。按 `Open Screen 0x3c` → `Content 0x12`
+/// 顺序写给自己连接；菜单恒为 12（`CRAFTING_MENU_TYPE_ID`，真机已校准）。
 /// 仅在 use_item_on 判定路径调用，Join/ChunkData/Ack 契约完全不受影响。
 async fn open_workbench_gui_for<S: AsyncRead + AsyncWrite + Unpin>(
     stream: &mut S,
@@ -84,11 +84,8 @@ async fn open_workbench_gui_for<S: AsyncRead + AsyncWrite + Unpin>(
     y: i32,
     z: i32,
 ) -> io::Result<bool> {
-    if !opts.workbench_gui_enabled() {
-        return Ok(false);
-    }
     let Some(packets_to_send) =
-        craft9::open_workbench_gui(ds, opts.conn_id, x, y, z, opts.workbench_menu_id)
+        craft9::open_workbench_gui(ds, opts.conn_id, x, y, z, mc_protocol::packets::CRAFTING_MENU_TYPE_ID)
     else {
         return Ok(false);
     };
@@ -540,30 +537,28 @@ async fn play_loop<S: AsyncRead + AsyncWrite + Unpin>(
                 }
                 match packets::UseItemOn::decode_body(&payload) {
                     Ok((act, _)) => {
-                        // P55 B6：右键已存在的工作台方块 → 打开 3×3 GUI。开关默认关，
-                        // 旧包流不变；开启时不改世界、不额外 Ack（客户端对交互无预测），
-                        // 只依次发 0x3c + 0x12。视距/距离检查沿用方块交互口径。
-                        if opts.workbench_gui_enabled() {
-                            if let (Some(ds), Some(world)) = (&opts.drops, mutable) {
-                                let in_reach = (mc_world::MIN_Y..=mc_world::WORLD_TOP_Y).contains(&act.y)
-                                    && block_edit::in_view(view.center(), view.radius(), act.x, act.z)
-                                    && block_edit::eye_block_dist(eye_of(last_pos), act.x, act.y, act.z)
-                                        <= mc_world::MAX_REACH;
-                                if in_reach
-                                    && world.get(act.x, act.y, act.z)
-                                        == mc_world::drops::CRAFTING_TABLE_BLOCK_ID
+                        // P55 B6：右键已存在的工作台方块 → 打开 3×3 GUI（写死常开）。
+                        // 不改世界、不额外 Ack（客户端对交互无预测），只依次发 0x3c + 0x12。
+                        // 视距/距离检查沿用方块交互口径。
+                        if let (Some(ds), Some(world)) = (&opts.drops, mutable) {
+                            let in_reach = (mc_world::MIN_Y..=mc_world::WORLD_TOP_Y).contains(&act.y)
+                                && block_edit::in_view(view.center(), view.radius(), act.x, act.z)
+                                && block_edit::eye_block_dist(eye_of(last_pos), act.x, act.y, act.z)
+                                    <= mc_world::MAX_REACH;
+                            if in_reach
+                                && world.get(act.x, act.y, act.z)
+                                    == mc_world::drops::CRAFTING_TABLE_BLOCK_ID
+                            {
+                                match open_workbench_gui_for(
+                                    stream, opts, ds, act.x, act.y, act.z,
+                                )
+                                .await
                                 {
-                                    match open_workbench_gui_for(
-                                        stream, opts, ds, act.x, act.y, act.z,
-                                    )
-                                    .await
-                                    {
-                                        Ok(true) => continue,
-                                        Ok(false) => {}
-                                        Err(e) => {
-                                            debug!("play uuid={} workbench gui open failed ({e}), closing", profile.uuid);
-                                            break;
-                                        }
+                                    Ok(true) => continue,
+                                    Ok(false) => {}
+                                    Err(e) => {
+                                        debug!("play uuid={} workbench gui open failed ({e}), closing", profile.uuid);
+                                        break;
                                     }
                                 }
                             }
@@ -1076,17 +1071,16 @@ async fn play_loop<S: AsyncRead + AsyncWrite + Unpin>(
                                         {
                                             let (px, py, pz) = (act.x + dx, act.y + dy, act.z + dz);
                                             if let Some(ds) = &opts.drops {
-                                                if opts.workbench_gui_enabled() {
-                                                    if let Err(e) = open_workbench_gui_for(
-                                                        stream, opts, ds, px, py, pz,
-                                                    )
-                                                    .await
-                                                    {
+                                                // 工作台 GUI 写死常开：放置成功即开界面（无背包时回退只登记会话）。
+                                                match open_workbench_gui_for(stream, opts, ds, px, py, pz).await {
+                                                    Err(e) => {
                                                         debug!("play uuid={} workbench gui after place failed ({e}), closing", profile.uuid);
                                                         break;
                                                     }
-                                                } else {
-                                                    ds.open_craft9(opts.conn_id, px, py, pz);
+                                                    Ok(false) => {
+                                                        ds.open_craft9(opts.conn_id, px, py, pz);
+                                                    }
+                                                    Ok(true) => {}
                                                 }
                                             }
                                         }
@@ -1178,6 +1172,16 @@ async fn play_loop<S: AsyncRead + AsyncWrite + Unpin>(
                         // P47：工作台窗口 1 走独立会话，绝不改写玩家背包窗口 0 的 2×2 语义。
                         if click.container_id == mc_world::crafting::CRAFT9_WINDOW_ID {
                             if let Some(ds) = &opts.drops {
+                                // 真机排障：工作台每次点击记格子快照 + 配方命中（RUST_LOG=debug 才可见）。
+                                debug!(
+                                    "play uuid={} craft9 click win={} slot={} button={} type={} state={}",
+                                    profile.uuid,
+                                    click.container_id,
+                                    click.slot,
+                                    click.button,
+                                    click.click_type,
+                                    click.state_id
+                                );
                                 if craft9::apply_click(ds, opts.conn_id, &click) {
                                     if let Some(body) =
                                         craft9::build_craft9_content_body(ds, opts.conn_id)
@@ -1195,6 +1199,25 @@ async fn play_loop<S: AsyncRead + AsyncWrite + Unpin>(
                                         }
                                     }
                                     ds.save_inventory(opts.conn_id, &conn_user);
+                                    if let Some(session) = ds.craft9_session(opts.conn_id) {
+                                        let matched = mc_world::crafting::match_recipe_9(session.grid)
+                                            .map(|r| r.name)
+                                            .unwrap_or("<none>");
+                                        debug!(
+                                            "play uuid={} craft9 after grid={:?} match={}",
+                                            profile.uuid, session.grid, matched
+                                        );
+                                    } else {
+                                        debug!(
+                                            "play uuid={} craft9 click with NO session (clicks swallowed)",
+                                            profile.uuid
+                                        );
+                                    }
+                                } else {
+                                    debug!(
+                                        "play uuid={} craft9 apply_click=false (no session?)",
+                                        profile.uuid
+                                    );
                                 }
                             }
                             continue;

@@ -9,7 +9,6 @@ use crossbeam_channel::Sender;
 use mc_protocol::packets::{Handshake, HandshakeNextState, HANDSHAKE_PACKET_ID};
 use std::io;
 use std::net::SocketAddr;
-use std::sync::Arc;
 use tracing::{debug, warn};
 
 /// 首包必须是 Handshake 0x00；只认 26.3/777；Status用&mut，Login拿走所有权。
@@ -58,8 +57,6 @@ pub async fn handle_connection<S: AsyncRead + AsyncWrite + Unpin>(
                 settings_persist: config.settings_persist,
                 stats: config.stats,
                 craft_session_persist: config.craft_session_persist,
-                workbench_gui: Arc::clone(&config.workbench_gui),
-                workbench_menu_id: config.workbench_menu_id,
             };
             handle_login_with_options(stream, addr, &tx, opts).await?;
         }

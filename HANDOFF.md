@@ -1,6 +1,9 @@
 # 交接文档：Rust 自研 MC 服务器（只兼容 Java 26.3 / protocol 777 / data 5023）
 
 > 更新日期：2026-11-27；分支 `main` @ `862c69e`（P56 完整合成；`cargo test --workspace` **588 passed / 0 failed**）。
+> **2026-11-27 夜 Windows 真机联调（未提交）：`open_screen` 标题改无名 tag（真机 `10 bytes extra` 校准）、
+> 工作台 GUI 写死常开、后台工作台控制面删除、P53/P54 玩法开关写死（仅 A3 throttle 可配），
+> `cargo test --workspace` 仍 **588 passed / 0 failed**，见 §5.40。**
 > **交接快照见 §1.1（当前能力 / 开关 / 真机优先级 / 未完成项），真机清单见 `docs/real-machine-checklist.md`。**
 > `tasks/` + `tasks/events.jsonl` 已是任务真相源（见 `tasks/README.md`），本文件保留能力/验证记录。
 > P19 Q 扔、P20 `login_route` 拆目录、P21 多人广播、P22 种植、P25 管理面板、P26 树苗长树、
@@ -1303,8 +1306,42 @@ cargo test --workspace
 bash scripts/check_budget.sh     # Windows 可用 C:\Program Files\Git\bin\bash.exe
 ```
 
+## 5.40 P57 基本功能写死（2026-11-27 夜，Windows 真机联调，未提交）
+
+用户指令：工作台/合成等基本功能不许做成配置，写死；后台不许再控制工作台。
+
+1. **`open_screen` 断线根因（真机抓到实锤）**：客户端 `debug/disconnect-*.txt` 报
+   `ClientboundOpenScreenPacket was larger than I expected, found 10 bytes extra`。
+   对账：我们发 `01 0c 08 00 00 + u16(8) + "Crafting"` 共 15 字节；客户端按**无名 tag**
+   读（`0x08` 后直接 u16 长度），把我们的空根名 `00 00` 当成长度 0，只消耗 5 字节、
+   剩下 10 字节报 extra。结论：之前 jar 逆向把 `writeNbt`（具名）与 stream 用的
+   `writeAnyTag`（无名）搞混了。已改：标题 = `0x08` + payload 直写（13 字节整包），
+   `open_screen_body_layout_verified_from_26_3_jar` 断言已按真值更新。
+2. **工作台 GUI 写死常开**：删 `NetConfig/PlayOptions.workbench_gui/menu_id`、
+   `load_workbench_gui/menu_id`、`admin::set_workbench_gui`；右键/放置恒发 0x3c + 0x12，
+   菜单恒 12；`server.toml` 相关键已删（残留被忽略）。
+3. **后台工作台控制面删除**：删 `POST /api/workbench-gui`、`POST /api/screen-open`
+   与面板卡片开关（面板已重建离线单文件，`check-offline.mjs` 过）；`GET /api/craft9`
+   只剩只读快照（`screen_open` 恒 true）。
+4. **玩法开关写死**：P53 四项/XP/饥饿/设置/统计、journal（恒开/窗口 10000）、
+   天气状态、工作台落盘全部恒开；`load_feature_toggles` 只剩 A3
+   `broadcast_throttle` 可配（默认关，未验证的包序优化，唯一保留项）；
+   天气广播 flag 删除（本来就不发包）。`server.toml` 只剩建服/世界/传输项。
+5. 测试：`play_tools` 补放置后 Ack→0x3c→0x12 排空（包序变了）；`workbench_gui_e2e`
+   的"关闭零包"用例改为"恒发包"；`p56` 去 gui 参数；`admin` 去拨动用例；
+   `mc-server config` 断言写死行为。全量 **588 passed / 0 failed**，与 P56 总数一致。
+
+### 5.41 真机待复验（P57 之后）
+
+- 右键工作台不再断线、界面正常弹出（`10 bytes extra` 应消失）。
+- 放 1 橡木原木 → 结果槽 4 木板可取出（服务端权威链路之前 e2e 已绿，真机第一次走通）。
+- 后台面板工作台卡应显示"常开"，无开关；`/api/workbench-gui` 与 `/api/screen-open`
+  应 404。
+
 ## 8. Git 状态 / 提交注意
 
+- **P57（本轮未提交）**：`open_screen` 标题无名 tag 修复 + 工作台写死常开 + 后台控制面删除 +
+  玩法开关写死（见 §5.40），`cargo test --workspace` 588 passed / 0 failed，已在真机服上运行待复验。
 - 当前分支 `main` @ `862c69e`（P56 完整合成；588 passed）；P19–P56 均已合入并 push，历史提交见
   `git log` / `tasks/events.jsonl`；任务真相源是 `tasks/*.json` + `events.jsonl`（见 `tasks/README.md`）。
   近期关键提交：P52 `72436e0`、P51 `826f5b3`、P53 `51ba63f`、P54 `93a8996`、P55 `90323e9` +

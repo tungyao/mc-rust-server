@@ -3,10 +3,9 @@
 //! 窗口 1 = 工作台：槽 0 结果、1..=9 合成格、10..=45 玩家背包（main/hotbar）。
 //! 所有点击经 C2S ContainerClick(0x12) 解析结果进入这里，服务端权威修改后发全量
 //! ContainerSetContent 回滚客户端预测。
-//! P55 B6 起提供可选 GUI：`workbench_gui` 默认关（旧包流不变），开启后右键工作台
-//! 发 Open Screen(0x3c) + 全量 Content(0x12)。P55 已按官方 26.3 客户端 jar 校准：
+//! P55 B6 起右键工作台恒发 Open Screen(0x3c) + 全量 Content(0x12)（GUI 写死常开）。
 //! `ClientboundOpenScreenPacket.STREAM_CODEC` 仅 CONTAINER_ID + menu VarInt + 标题组件，
-//! `MenuType.CRAFTING = 12`，裸 String Tag 标题（见 `CRAFTING_MENU_TYPE_ID`）。
+//! `MenuType.CRAFTING = 12`，无名 StringTag 标题（真机 `10 bytes extra` 已校准）。
 //! P56 按 jar `CraftingMenu.quickMoveStack` / `AbstractContainerMenu.doClick` 对齐
 //! SHIFT 搬运与 state id 口径。
 
@@ -15,8 +14,7 @@ use crate::drop_state::{Craft9Session, DropState};
 use mc_protocol::packets;
 use mc_world::crafting::{self, CRAFT9_RESULT_SLOT, CRAFT9_WINDOW_ID};
 
-/// P55：工作台界面标题。纯文本 → Text Component 的 String Tag 裸 payload
-/// （26.3 jar `ClientboundOpenScreenPacket.STREAM_CODEC`，已校准）。
+/// P55：工作台界面标题。纯文本 → 无名 NBT StringTag payload（真机已校准）。
 pub const WORKBENCH_GUI_TITLE: &str = "Crafting";
 
 /// 窗口槽 → 玩家背包槽（10..=36 主包 9..=35；37..=45 快捷栏 36..=44）。

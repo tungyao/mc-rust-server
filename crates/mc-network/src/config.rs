@@ -10,7 +10,7 @@ use crossbeam_channel::Sender;
 use mc_world::{MutableWorld, world_time::WorldTimeState};
 use std::sync::{
     Arc,
-    atomic::{AtomicBool, AtomicUsize, Ordering},
+    atomic::AtomicUsize,
 };
 
 /// Status 回包默认配置；`NetConfig::default()` 的回退值。
@@ -77,17 +77,12 @@ pub struct NetConfig {
     pub journal_trim: bool,
     /// A5：journal 保留窗口（条数；默认 10000）。
     pub journal_keep: u64,
-    /// A6：全局时间/天气状态（时间默认推进，天气广播默认关）。
+    /// A6：全局时间/天气状态（时间恒推进；天气只有服务端状态，从不发包）。
     pub world_time: Arc<WorldTimeState>,
-    /// A6：天气事件 0x27 广播（默认关且**当前不发包**：type 值真机未确认）。
-    pub weather_broadcast: bool,
-    /// A8：工作台会话跨重连落盘（默认开，仅在 redb 模式下真正写表）。
+    /// A8：工作台会话跨重连落盘（恒开，仅在 redb 模式下真正写表）。
     pub craft_session_persist: bool,
-    /// P55 B6：工作台 GUI（Open Screen 0x3c）总开关。**库默认关**，保住既有 565 个
-    /// 测试的逐字节包流；生产入口与后台 `/api/workbench-gui` 共享同一 Arc 做运行时切换。
-    pub workbench_gui: Arc<AtomicBool>,
-    /// P55 B6：菜单类型 ID，wiki 推导值 12，**待抓包校准**；server.toml 可覆盖。
-    pub workbench_menu_id: i32,
+    // P55 B6：工作台 GUI 写死常开（基本功能）。菜单恒为 12
+    //（`CRAFTING_MENU_TYPE_ID`，真机已校准标题为无名 tag）。
 }
 
 impl Default for NetConfig {
@@ -118,10 +113,7 @@ impl Default for NetConfig {
             journal_trim: true,
             journal_keep: DEFAULT_JOURNAL_KEEP,
             world_time: Arc::new(WorldTimeState::default()),
-            weather_broadcast: false,
             craft_session_persist: true,
-            workbench_gui: Arc::new(AtomicBool::new(false)),
-            workbench_menu_id: mc_protocol::packets::CRAFTING_MENU_TYPE_ID,
         }
     }
 }
@@ -159,10 +151,7 @@ impl NetConfig {
             journal_trim: true,
             journal_keep: DEFAULT_JOURNAL_KEEP,
             world_time: Arc::new(WorldTimeState::default()),
-            weather_broadcast: false,
             craft_session_persist: true,
-            workbench_gui: Arc::new(AtomicBool::new(false)),
-            workbench_menu_id: mc_protocol::packets::CRAFTING_MENU_TYPE_ID,
         }
     }
 
@@ -303,33 +292,10 @@ impl NetConfig {
         self
     }
 
-    /// P54 A6：天气广播（默认关；0x27 type 值未真机确认，当前不发包）。
-    pub fn with_weather_broadcast(mut self, enabled: bool) -> Self {
-        self.weather_broadcast = enabled;
-        self
-    }
-
-    /// P54 A8：工作台会话落盘（默认开，仅 redb 模式有实际存档）。
+    /// P54 A8：工作台会话落盘（恒开，仅 redb 模式有实际存档）。
     pub fn with_craft_session_persist(mut self, enabled: bool) -> Self {
         self.craft_session_persist = enabled;
         self
-    }
-
-    /// P55：注入工作台 GUI 运行时开关（与 admin 共享同一 Arc，POST /api/workbench-gui 可热切）。
-    pub fn with_workbench_gui(mut self, flag: Arc<AtomicBool>) -> Self {
-        self.workbench_gui = flag;
-        self
-    }
-
-    /// P55：覆盖菜单类型 ID（wiki 推导值 12，待抓包校准；从 server.toml 透传）。
-    pub fn with_workbench_menu_id(mut self, menu_id: i32) -> Self {
-        self.workbench_menu_id = menu_id;
-        self
-    }
-
-    /// P55：当前是否发送 Open Screen（每次读取原子值，支持后台热切）。
-    pub fn workbench_gui_enabled(&self) -> bool {
-        self.workbench_gui.load(Ordering::SeqCst)
     }
 }
 
@@ -399,44 +365,28 @@ mod tests {
         assert_eq!(EXHAUSTION_THRESHOLD, 4.0);
     }
 
-    /// P54：A3 默认关、A5/A6 时间/A8 默认开、天气广播默认关；四项独立可切。
+    /// P54：A3 默认关（唯一可配项）；journal/工作台落盘恒开、天气恒不广播。
     #[test]
     fn p54_feature_switches_have_independent_defaults() {
         let base = NetConfig::default();
         assert!(!base.broadcast_throttle, "A3 changes packet order → opt-in only");
         assert!(base.journal_trim && base.craft_session_persist);
-        assert!(!base.weather_broadcast, "0x27 weather type is not confirmed");
         assert_eq!(base.journal_keep, DEFAULT_JOURNAL_KEEP);
         assert_eq!(base.world_time.tick(), mc_world::world_time::DEFAULT_DAY_TICK);
         let cfg = base
             .with_broadcast_throttle(true)
             .with_journal_trim(false)
             .with_journal_keep(7)
-            .with_weather_broadcast(true)
             .with_craft_session_persist(false);
         assert!(cfg.broadcast_throttle && !cfg.journal_trim && !cfg.craft_session_persist);
-        assert!(cfg.weather_broadcast);
         assert_eq!(cfg.journal_keep, 7);
     }
 
-    /// P55 B6：GUI 总开关库默认关（旧包流逐字节不变），菜单 ID 为 wiki 推导值；
-    /// 共享 Arc 的运行时切换对 clone 出的每连接配置同时生效。
+    /// P55 B6：工作台 GUI 已写死常开——右键恒发 0x3c + 0x12，菜单恒 12。
+    /// 本测试只锁定菜单 ID 常量（真机已校准标题为无名 tag）。
     #[test]
     fn p55_workbench_gui_is_opt_in_and_runtime_toggle_shared() {
-        let base = NetConfig::default();
-        assert!(!base.workbench_gui_enabled());
-        assert_eq!(base.workbench_menu_id, mc_protocol::packets::CRAFTING_MENU_TYPE_ID);
-        assert_eq!(base.workbench_menu_id, 12, "wiki-derived, pending capture calibration");
-        let flag = Arc::new(AtomicBool::new(false));
-        let cfg = NetConfig::new(1, "x".into(), Arc::new(AtomicUsize::new(0)))
-            .with_workbench_gui(Arc::clone(&flag))
-            .with_workbench_menu_id(99);
-        let cloned = cfg.clone();
-        assert!(!cfg.workbench_gui_enabled());
-        flag.store(true, Ordering::SeqCst);
-        assert!(cfg.workbench_gui_enabled() && cloned.workbench_gui_enabled());
-        assert_eq!(cfg.workbench_menu_id, 99);
-        assert!(!NetConfig::new(1, "x".into(), Arc::new(AtomicUsize::new(0))).workbench_gui_enabled());
+        assert_eq!(mc_protocol::packets::CRAFTING_MENU_TYPE_ID, 12);
     }
 
     #[test]

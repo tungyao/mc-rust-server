@@ -14,7 +14,7 @@ use crossbeam_channel::Sender;
 use mc_protocol::packets;
 use mc_world::{MutableWorld, WorldGen, DEFAULT_SEED};
 use std::net::SocketAddr;
-use std::sync::{Arc, atomic::{AtomicBool, Ordering}};
+use std::sync::Arc;
 use tracing::{debug, info, warn};
 use std::io;
 use crate::NewConnection;
@@ -56,13 +56,10 @@ pub struct PlayOptions {
     pub hunger_detail: bool,
     pub settings_persist: bool,
     pub stats: bool,
-    /// P54 A8：工作台会话断开写盘/重连恢复（默认开；仅 redb 模式生效）。
+    /// P54 A8：工作台会话断开写盘/重连恢复（恒开；仅 redb 模式生效）。
     pub craft_session_persist: bool,
-    /// P55 B6：工作台 GUI 总开关（与 NetConfig/admin 共享同一 Arc，默认关）。
-    /// 每次 use_item_on 判定前读取，后台 `/api/workbench-gui` 热切即时生效。
-    pub workbench_gui: Arc<AtomicBool>,
-    /// P55 B6：菜单类型 ID（wiki 推导值 12，待抓包校准；server.toml 可覆盖）。
-    pub workbench_menu_id: i32,
+    // P55 B6：工作台 GUI 写死常开（基本功能）。菜单恒为 12
+    //（`CRAFTING_MENU_TYPE_ID`，真机已校准标题为无名 tag）。
 }
 
 impl PlayOptions {
@@ -86,8 +83,6 @@ impl PlayOptions {
             settings_persist: false,
             stats: false,
             craft_session_persist: true,
-            workbench_gui: Arc::new(AtomicBool::new(false)),
-            workbench_menu_id: mc_protocol::packets::CRAFTING_MENU_TYPE_ID,
         }
     }
 
@@ -150,30 +145,13 @@ impl PlayOptions {
         self
     }
 
-    /// P54 A8：透传工作台会话落盘开关。
+    /// P54 A8：透传工作台会话落盘开关（生产恒开）。
     pub fn with_craft_session_persist(mut self, enabled: bool) -> Self {
         self.craft_session_persist = enabled;
         self
     }
 
-    /// P55：注入工作台 GUI 运行时开关（共享 Arc，后台可热切）。
-    pub fn with_workbench_gui(mut self, flag: Arc<AtomicBool>) -> Self {
-        self.workbench_gui = flag;
-        self
-    }
-
-    /// P55：覆盖菜单类型 ID（wiki 推导值 12，待抓包校准）。
-    pub fn with_workbench_menu_id(mut self, menu_id: i32) -> Self {
-        self.workbench_menu_id = menu_id;
-        self
-    }
-
-    /// P55：当前是否发送 Open Screen（实时读取共享原子值）。
-    pub fn workbench_gui_enabled(&self) -> bool {
-        self.workbench_gui.load(Ordering::SeqCst)
-    }
-
-    /// P53：把 NetConfig 的四项玩法开关透传到 Play 连接侧。
+    /// P53：把 NetConfig 的四项玩法开关透传到 Play 连接侧（生产恒开）。
     pub fn with_p53_features(
         mut self,
         xp_merge: bool,

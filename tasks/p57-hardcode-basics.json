@@ -1,0 +1,19 @@
+{
+  "id": "p57-hardcode-basics",
+  "title": "基本功能写死：工作台常开+去后台控制+玩法全开",
+  "status": "done",
+  "owner": "main",
+  "priority": "p0",
+  "deps": [],
+  "branch": "",
+  "created": "2026-11-27T13:15:17+00:00",
+  "updated": "2026-11-27T13:15:22+00:00",
+  "detail": "open_screen标题改无名tag（真机10bytes extra）；工作台GUI写死常开；删除后台workbench-gui/screen-open控制面+面板卡片；P53/P54玩法写死全开（仅A3 throttle可配）；588 passed",
+  "files": [
+    "mc-protocol/play_entity.rs",
+    "mc-server/admin.rs+config.rs+main.rs",
+    "mc-network/config.rs+login.rs+handshake_route+craft9.rs",
+    "admin-ui/Dashboard.js",
+    "server.toml"
+  ]
+}
