@@ -1,0 +1,13 @@
+{
+  "id": "p52-socket-ecs-b",
+  "title": "C1 方案B：socket I/O 全移 ECS + 全量切换 + 无限队列",
+  "status": "doing",
+  "owner": "subagent-socket-b",
+  "priority": "p1",
+  "deps": [],
+  "branch": "",
+  "created": "2026-11-27T01:57:03+00:00",
+  "updated": "2026-11-27T01:57:03+00:00",
+  "detail": "",
+  "files": []
+}

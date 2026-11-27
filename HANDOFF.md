@@ -1000,6 +1000,11 @@ $natives = 'C:\Users\qwe\AppData\Local\Temp\mc263natives'
     Join 八段包序 + 视距 flush 先于方块/掉落包），判定移到 ECS 最多多 1 个 50ms tick 的 Ack 延迟。
     待用户决策：批准 C1 立项、选 C 还是 B、灰度/背压策略、真机门禁、先做 P0+P1 还是直推 P5、
     C2/C3/C4/B15 排期与抓包归属。
+    **用户决策（2026-11-27）**：**批准 C1 立项，选方案 B（socket I/O 全移 ECS）**，
+    **直接 P5 全量切换**（不经过 P0–P4 中间阶段），背压采用**无限队列**；
+    `p51-uuid-identity` 等 socket→ECS 完成后再派发（不并行）。实现任务见 `p52-socket-ecs-b`。
+    已明确告知用户：跳过灰度阶段、全量切换与无限队列是本轮最高风险项，必须靠
+    `play_stream.rs` 逐字节基线与真机清单兜底。
 
 ## 6. 关键文件
 

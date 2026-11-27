@@ -123,3 +123,5 @@
 - [2026-11-27 01:50 UTC] agent=main task=p51-uuid-identity status=todo detail=UUID 稳定化 + 玩家存档/后台迁移 files=
 - [2026-11-27 01:50 UTC] agent=subagent-socket-ecs task=p50-socket-ecs status=start detail=claim files=
 - [2026-11-27 01:54 UTC] agent=subagent-socket-ecs task=p50-socket-ecs status=done detail=docs/socket-ecs-plan.md:推荐方案C混合(net持socket+ECS权威判定+per-player有序写队列);灰度socket_mode;P0-P5阶段;风险包序/Ack;7决策点;仅调研 files=docs/socket-ecs-plan.md
+- [2026-11-27 01:57 UTC] agent=main task=p52-socket-ecs-b status=todo detail=C1 方案B：socket I/O 全移 ECS + 全量切换 + 无限队列 files=
+- [2026-11-27 01:57 UTC] agent=subagent-socket-b task=p52-socket-ecs-b status=start detail=claim files=
