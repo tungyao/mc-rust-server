@@ -1,13 +1,20 @@
 {
   "id": "p55-workbench-gui",
   "title": "B6 工作台 3×3 真 GUI 骨架（open_screen 0x3c，可运行时开关/抓包校准）",
-  "status": "doing",
+  "status": "done",
   "owner": "subagent-workbench-gui",
   "priority": "p1",
   "deps": [],
   "branch": "",
   "created": "2026-11-27T06:17:01+00:00",
-  "updated": "2026-11-27T06:17:01+00:00",
-  "detail": "",
-  "files": []
+  "updated": "2026-11-27T06:43:30+00:00",
+  "detail": "B6骨架: open_screen 0x3c推导编码(menu type=12待抓包校准);右键/放置工作台触发且在BlockUpdate-Ack之后;46槽映射接craft9;默认关+运行时开关+后台API+面板按钮;575 passed;merge见main",
+  "files": [
+    "crates/mc-protocol/src/packets/play_entity.rs",
+    "crates/mc-network/src/login_route/{mod",
+    "craft9}.rs",
+    "crates/mc-network/tests/workbench_gui_e2e.rs",
+    "crates/mc-server/src/admin.rs",
+    "admin-ui/src/Dashboard.js"
+  ]
 }

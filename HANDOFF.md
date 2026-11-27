@@ -23,6 +23,8 @@
 > **真机对比待用户执行**；批次 1A（`p53-batch1-gameplay` / `51ba63f2`）A1–A2/A4/A7
 > 四项已合入（见 §5.36），批次 1B（`p54-batch1-infra` / `93a8996`）
 > A3/A5/A6/A8 四项亦已合入（见 §5.37），**批次 1 全部完成**；
+> B6 工作台 3×3 真 GUI **骨架**已合入（`p55-workbench-gui` / `90323e9`，见 §5.38），
+> menu type 等字节为**推导值、默认关、待实机抓包或逆向 jar 校准**；
 > 后台管理面板已用 Vue 3 + Naive UI 重写并**完全离线化**合入（`p34-admin-vue` / `53f1016`、
 > `p35-admin-offline` / `48e14bd`，见 §5.25）。
 
@@ -83,6 +85,8 @@ journal_trim = true           # P54 A5：journal 窗口裁剪（落盘后才裁�
 journal_keep = 10000          # P54 A5：保留条数
 weather_broadcast = false     # P54 A6：天气事件开关（0x27 type 未确认，当前不发包）
 craft_session_persist = true  # P54 A8：工作台会话断线落盘
+workbench_gui = false         # P55 B6：真 3×3 GUI 骨架，默认关（字节待抓包校准，开启后可能断线）
+workbench_menu_id = 12        # P55：wiki 推导的 crafting menu type，抓包后用本键覆盖即可 A/B
 ```
 
 P16 的 seed 示例：默认 seed 视野（radius 10）内只有树林/丘陵、没有水面（P14 高度分布下 h<63 的列约 0.2%，且不在出生视距内）；`seed=42` 出生点朝南约 40 格是沙岸+池塘，`seed=-987654321` 出生点东侧约 25 格水域更大，两者都有大量 oak 树，真机截图见 §4。
@@ -431,11 +435,11 @@ $natives = 'C:\Users\qwe\AppData\Local\Temp\mc263natives'
 
 ### 本地检查
 
-- `cargo test --workspace`：全部通过（2026-11-27 实跑 **565 passed / 0 failed**；
-  P18 当时 215，之后 P18.1–P54 又追加单测与 play_stream / play_actions / play_crops /
+- `cargo test --workspace`：全部通过（2026-11-27 实跑 **575 passed / 0 failed**；
+  P18 当时 215，之后 P18.1–P55 又追加单测与 play_stream / play_actions / play_crops /
   play_all_crops / timer_persist / play_survival / play_recipes / player_visibility /
   fluid / play_tools / socket_ecs_e2e / uuid_identity / gameplay_batch1_e2e /
-  infra_batch1_e2e / infra_admin_e2e / admin_e2e 集成测试）。
+  infra_batch1_e2e / infra_admin_e2e / workbench_gui_e2e / admin_e2e 集成测试）。
   已知 flake：`p27_bonemeal_advances_wheat_and_grows_sapling` 在并行负载下偶发失败一次
   （ticker/骨粉跟踪竞态，测试未改、隔离与复跑全过），多轮全量中出现过 2–3 次，继续观察。
 - redb 生产核心真机进程冒烟（2026-11-26）：临时 `server.toml` 设 `world_storage="redb"`、
@@ -1102,7 +1106,31 @@ $natives = 'C:\Users\qwe\AppData\Local\Temp\mc263natives'
       进程冒烟：`p54 features broadcast_throttle=false journal_trim=true/10000
       weather_broadcast=false craft_persist=true`，无 panic。
     - **未做/真机待验**：天气包、0x56、seed 派生昼夜循环、客户端工作台 GUI 恢复后的
-      `0x12` 补发（B6 未做，恢复目前只到服务端内存）；清单 §2/§5/§11。
+      `0x12` 补发（B6 骨架见 §5.38，恢复目前仍只到服务端内存）；清单 §2/§5/§11。
+
+38. **B6 工作台 3×3 真 GUI 骨架（已合入，`p55-workbench-gui` / `90323e9`）**：
+    用户决策：做真客户端 GUI，允许从仓库资料推导，后续用实机抓包或逆向 jar 校准；
+    **先交付可快速验证的骨架，不伪称字节已验证**。
+    - 包 ID `open_screen 0x3c` 来自 `data/777/packets.json`（60）；包体按 wiki 26.3
+      `VarInt window_id + VarInt menu_type + Text Component title` 编码，标题目前写成
+      **NBT String 裸 payload**，不写 menu 附加 NBT。`menu_type=12`（`crafting`）来自
+      minecraft.wiki Inventory 页；已逐份解析 `registry_00..31.bin`，**无 `minecraft:menu` 注册表**，
+      仓库也无客户端 jar，故 menu ID / 标题 NBT 形式 / 附加字段均为**待抓包校准的推导值**。
+      可用 `server.toml::workbench_menu_id` 覆盖做 A/B。
+    - 触发：右键已存在的工作台、或成功放置工作台时发 `0x3c + 0x12`；**放在
+      `BlockUpdate→Ack` 之后**，不插在两者中间；交互开 GUI 不产生额外方块编辑/Ack。
+      **Join 序列不插任何新包**（八段与 ChunkData 逐字节不变）。
+    - 会话：复用 P47 craft9 + P54 `block_entities` 快照；window id=1，46 槽映射
+      0=结果、1–9=3×3 格、10–36=主背包(9–35)、37–45=快捷栏(36–44)；打开发 `0x12` 全量，
+      C2S `container_click 0x12` 继续走权威 craft9 处理并全量同步，玩家窗口 0 语义不变。
+    - 运维：`workbench_gui` 在库/`PlayOptions`/`server.toml` 均默认 **false**（旧 565 测试字节流不变）；
+      `POST /api/workbench-gui {"enabled":true|false}` 通过共享 `AtomicBool` **运行时切换、对所有在线连接生效**；
+      `POST /api/screen-open` 给指定玩家发 GUI（关闭时拒绝/零包）；`/api/craft9` 增
+      `screen_open/menu_id/menu_id_verified=false`。面板「工作台会话」卡加开关与"打开 GUI"按钮，
+      离线单文件重建、`check-offline.mjs` 零外链。
+    - 旧 565 测试一字未改，合并后 **575 passed / 0 failed**；`check_budget.sh` 绿。
+      **待校准/真机**：menu type 实际值、Text Component 的 NBT 形式、是否需附加 NBT/Ack；
+      抓包或逆向 jar 后只改常量/编码即可，不需改会话与路由。
 
 ## 6. 关键文件
 
@@ -1119,7 +1147,7 @@ crates/mc-protocol/src/packets/
   play_sync.rs               PlayerPositionSync/KeepAlive/C2S 移动包
   data/*_777.bin             LoginPlay / PositionSync / UpdateTags 抓包
 crates/mc-network/src/
-  login_route/               Play 接线目录：login.rs（登录/Join序列）+ mod.rs（play_loop）+ block_edit.rs（decide_dig/decide_place + BlockUpdate/Ack）+ crops.rs（P37 作物路由）+ craft9.rs（P47 3×3 工作台会话）+ drop_sync.rs（掉落/50ms tick/拾取/背包同步 + P19 Q扔）+ view_sync.rs（视距节流/flush）
+  login_route/               Play 接线目录：login.rs（登录/Join序列）+ mod.rs（play_loop）+ block_edit.rs（decide_dig/decide_place + BlockUpdate/Ack）+ crops.rs（P37 作物路由）+ craft9.rs（P47 3×3 会话/P54 落盘/P55 GUI 组包）+ drop_sync.rs（掉落/50ms tick/拾取/背包同步 + P19 Q扔）+ view_sync.rs（视距节流/flush）
   socket_ecs.rs              P52 ECS socket 运行时（reader/writer/logic 三任务 + 无限 Outbound + stats）
   broadcast.rs               P21 per-player 写通道 hub（conn_id → 队列 + 位置/视距快照，BlockUpdate/Spawn/Data/Remove/TakeItem 视距广播）+ P43 玩家实体状态/known
   player_visibility.rs       P43 对外玩家 id 分配、Join/移动/视距/断线广播
@@ -1136,6 +1164,7 @@ crates/mc-network/src/
   tests/gameplay_batch1_e2e.rs P53 XP/模式/食物/统计同名重进、ticker 吸引合并守恒 e2e
   tests/infra_batch1_e2e.rs   P54 A3 双连接合并默认关/开、Ack 不入 hub e2e
   tests/infra_admin_e2e.rs    P54 时间/天气 API、工作台会话落盘恢复 e2e
+  tests/workbench_gui_e2e.rs  P55 GUI 开关/触发/槽映射/点击权威同步/Join 不变 e2e
   chunk_view.rs              clamp_view_radius/view_chunk_count、per-connection 视距集合/去重/跨区块 add/remove 规划
   chunk_cache.rs             共享已编码 ChunkData 0x2E 包体缓存（Mutex+HashMap+FIFO，默认 1024；`bodies` rayon 并行批量；P17 `with_mutable` + `invalidate`）
   play_events.rs             net 线程 → ECS 的移动/KeepAlive/Disconnect/BlockEdit 事件（conn_id 实体键）
@@ -1159,6 +1188,7 @@ crates/mc-world/src/
   world_time.rs              P54 A6 全局时间/天气状态（唯一 ticker 推进、meta 落盘）
   store/p54.rs               P54 A5/A6/A8 redb 扩展（journal 裁剪/时间/容器快照）
   broadcast.rs               P21 hub + P54 A3 per-conn 合并队列（Ack 永不合并）
+  packets/play_entity.rs     P31/P54 实体包 + P55 open_screen 0x3c 推导编码器
   worldgen/
     mod.rs                   WorldGen + GeneratorVersion(v1 冻结/v2 显式)、高度/出生保护/biome/洞穴/树、跨 chunk 扫描
     ores.rs / features.rs    P44 v2 矿种高度带 / 地表材质·多树种·草花水岸植被
