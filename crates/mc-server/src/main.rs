@@ -39,6 +39,14 @@ fn main() {
         features.broadcast_throttle, features.journal_trim, features.journal_keep,
         features.weather_broadcast, features.craft_session_persist
     );
+    // P55 B6：工作台 GUI 默认关（menu ID 未抓包校准，开启后才可能断线）；
+    // 与后台/各连接共享同一 Arc，POST /api/workbench-gui 可运行时热切。
+    let workbench_gui = Arc::new(AtomicBool::new(config::load_workbench_gui("server.toml")));
+    let workbench_menu_id = config::load_workbench_menu_id("server.toml");
+    info!(
+        "p55 workbench_gui={} menu_id={} (wiki-derived, capture-calibrate before enabling)",
+        workbench_gui.load(Ordering::SeqCst), workbench_menu_id
+    );
     // P52：socket 归属启动期锁定（默认 ecs，server.toml 可回退 net）。
     let socket_mode = config::load_socket_mode("server.toml");
     info!("socket_mode={} (ecs=full ECS ownership, net=emergency fallback)", socket_mode.as_str());
@@ -179,7 +187,10 @@ fn main() {
         .with_journal_keep(features.journal_keep)
         .with_world_time(Arc::clone(&world_time))
         .with_weather_broadcast(features.weather_broadcast)
-        .with_craft_session_persist(features.craft_session_persist);
+        .with_craft_session_persist(features.craft_session_persist)
+        // P55：GUI 总开关与菜单类型 ID（推导值，待抓包校准）。
+        .with_workbench_gui(Arc::clone(&workbench_gui))
+        .with_workbench_menu_id(workbench_menu_id);
     info!(
         "config view_distance={} effective_view_radius={} seed={} compression_threshold={}",
         cfg.view_distance, cfg.effective_view_distance(), cfg.seed, cfg.compression_threshold
@@ -251,6 +262,8 @@ fn main() {
         features.journal_keep,
         features.craft_session_persist,
     );
+    // P55：后台线程复用同一开关与菜单 ID（运行时切换即时影响所有在线连接）。
+    admin::set_workbench_gui(Arc::clone(&workbench_gui), workbench_menu_id);
     let admin_state = admin::AdminState {
         hub: Arc::clone(&hub),
         drops: Arc::clone(&drop_state),

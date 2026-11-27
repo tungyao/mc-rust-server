@@ -73,6 +73,31 @@ async fn drain_outbox<S: AsyncRead + AsyncWrite + Unpin>(
     Ok(())
 }
 
+/// P55 B6：开启工作台 GUI（默认关 → 零新包）。按 `Open Screen 0x3c` → `Content 0x12`
+/// 顺序写给自己连接；菜单 ID 来自配置（wiki 推导值，待抓包校准）。
+/// 仅在 use_item_on 判定路径调用，Join/ChunkData/Ack 契约完全不受影响。
+async fn open_workbench_gui_for<S: AsyncRead + AsyncWrite + Unpin>(
+    stream: &mut S,
+    opts: &PlayOptions,
+    ds: &crate::drop_state::DropState,
+    x: i32,
+    y: i32,
+    z: i32,
+) -> io::Result<bool> {
+    if !opts.workbench_gui_enabled() {
+        return Ok(false);
+    }
+    let Some(packets_to_send) =
+        craft9::open_workbench_gui(ds, opts.conn_id, x, y, z, opts.workbench_menu_id)
+    else {
+        return Ok(false);
+    };
+    for pkt in packets_to_send {
+        write_packet_any(stream, pkt.id, &pkt.body, opts.threshold).await?;
+    }
+    Ok(true)
+}
+
 /// P47：把挖掘进度发给视距内其它连接（本人由客户端本地动画驱动，Ack 只回本人）。
 /// 包 ID 与布局见 `mc_protocol::packets::BlockDestruction`（wiki 26.3 口径，查生成表）。
 fn queue_destroy_stage(opts: &PlayOptions, x: i32, y: i32, z: i32, stage: u8) {
@@ -515,6 +540,34 @@ async fn play_loop<S: AsyncRead + AsyncWrite + Unpin>(
                 }
                 match packets::UseItemOn::decode_body(&payload) {
                     Ok((act, _)) => {
+                        // P55 B6：右键已存在的工作台方块 → 打开 3×3 GUI。开关默认关，
+                        // 旧包流不变；开启时不改世界、不额外 Ack（客户端对交互无预测），
+                        // 只依次发 0x3c + 0x12。视距/距离检查沿用方块交互口径。
+                        if opts.workbench_gui_enabled() {
+                            if let (Some(ds), Some(world)) = (&opts.drops, mutable) {
+                                let in_reach = (mc_world::MIN_Y..=mc_world::WORLD_TOP_Y).contains(&act.y)
+                                    && block_edit::in_view(view.center(), view.radius(), act.x, act.z)
+                                    && block_edit::eye_block_dist(eye_of(last_pos), act.x, act.y, act.z)
+                                        <= mc_world::MAX_REACH;
+                                if in_reach
+                                    && world.get(act.x, act.y, act.z)
+                                        == mc_world::drops::CRAFTING_TABLE_BLOCK_ID
+                                {
+                                    match open_workbench_gui_for(
+                                        stream, opts, ds, act.x, act.y, act.z,
+                                    )
+                                    .await
+                                    {
+                                        Ok(true) => continue,
+                                        Ok(false) => {}
+                                        Err(e) => {
+                                            debug!("play uuid={} workbench gui open failed ({e}), closing", profile.uuid);
+                                            break;
+                                        }
+                                    }
+                                }
+                            }
+                        }
                         // P27：手持骨粉右键小麦/树苗本身 → 催熟（专属路径，不走种植/放置）。
                         // 小麦推进 1~2 阶段扣 1；树苗直接长成扣 1；成熟/非作物不扣。
                         let held_bonemeal: bool = opts
@@ -1014,18 +1067,27 @@ async fn play_loop<S: AsyncRead + AsyncWrite + Unpin>(
                                 }
                                 if placed {
                                     // P47：手持工作台右键放置成功 → 为该连接开 3×3 会话
-                                    // （同格重开保留原料；无 open_screen 包体真值，见 craft9 模块）。
+                                    // （同格重开保留原料）。P55 B6：GUI 开关开启时在该位置
+                                    // 追加 0x3c + 0x12；此时 BlockUpdate→Ack 已相邻发完，
+                                    // 追加包不会插在预测确认中间（P52 红线）。
                                     if place_id == mc_world::drops::CRAFTING_TABLE_BLOCK_ID {
                                         if let Some((dx, dy, dz)) = i8::try_from(act.face).ok()
                                             .and_then(packets::face_offset)
                                         {
+                                            let (px, py, pz) = (act.x + dx, act.y + dy, act.z + dz);
                                             if let Some(ds) = &opts.drops {
-                                                ds.open_craft9(
-                                                    opts.conn_id,
-                                                    act.x + dx,
-                                                    act.y + dy,
-                                                    act.z + dz,
-                                                );
+                                                if opts.workbench_gui_enabled() {
+                                                    if let Err(e) = open_workbench_gui_for(
+                                                        stream, opts, ds, px, py, pz,
+                                                    )
+                                                    .await
+                                                    {
+                                                        debug!("play uuid={} workbench gui after place failed ({e}), closing", profile.uuid);
+                                                        break;
+                                                    }
+                                                } else {
+                                                    ds.open_craft9(opts.conn_id, px, py, pz);
+                                                }
                                             }
                                         }
                                     }
