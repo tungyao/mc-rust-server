@@ -163,6 +163,48 @@ pub fn load_feature_toggles(path: impl AsRef<Path>) -> FeatureToggles {
     }
 }
 
+/// P55 B6：工作台 GUI 总开关，独立 toml 键（不塞进 `FeatureToggles`/`ServerConfig`，
+/// 保住 P53/P54 的穷举字面量测试）。**默认 false**：包体菜单 ID 是 wiki 推导值，
+/// 未抓包校准，开启后才可能断线；后台 `/api/workbench-gui` 可运行时热切。
+pub const DEFAULT_WORKBENCH_GUI: bool = false;
+
+/// P55 B6：菜单类型 ID 的配置覆盖键；wiki 推导值 12，**待抓包校准**。
+pub const DEFAULT_WORKBENCH_MENU_ID: i32 = mc_protocol::packets::CRAFTING_MENU_TYPE_ID;
+
+/// 读工作台 GUI 开关（旧 server.toml 缺键时补 `workbench_gui = false`）。
+pub fn load_workbench_gui(path: impl AsRef<Path>) -> bool {
+    load_bool_key(
+        path.as_ref(),
+        "workbench_gui",
+        DEFAULT_WORKBENCH_GUI,
+        "P55 B6: workbench GUI (open_screen 0x3c), menu id wiki-derived, capture required before enabling",
+    )
+}
+
+/// 读菜单类型 ID（缺键补 12；非法/越界值警告后回退 12）。
+pub fn load_workbench_menu_id(path: impl AsRef<Path>) -> i32 {
+    let path = path.as_ref();
+    let Ok(text) = std::fs::read_to_string(path) else { return DEFAULT_WORKBENCH_MENU_ID };
+    let value = toml::from_str::<toml::Value>(&text)
+        .ok()
+        .and_then(|v| v.get("workbench_menu_id").and_then(|x| x.as_integer()))
+        .and_then(|n| i32::try_from(n).ok())
+        .filter(|n| *n >= 0);
+
+    if value.is_none() && !text.contains("workbench_menu_id") {
+        let mut updated = text;
+        if !updated.ends_with('\n') {
+            updated.push('\n');
+        }
+        updated.push_str(&format!(
+            "\n# P55 B6: menu type id for crafting GUI (wiki-derived 12, capture-calibrate before use)\nworkbench_menu_id = {}\n",
+            DEFAULT_WORKBENCH_MENU_ID
+        ));
+        let _ = std::fs::write(path, updated);
+    }
+    value.unwrap_or(DEFAULT_WORKBENCH_MENU_ID)
+}
+
 /// 数值 toml 键：缺键补默认值；非法值警告后回退默认。
 fn load_u64_key(path: &Path, key: &str, default: u64, comment: &str) -> u64 {
     let Ok(text) = std::fs::read_to_string(path) else { return default };
@@ -472,6 +514,28 @@ mod tests {
         .unwrap();
         let toggles = load_feature_toggles(&p);
         assert!(!toggles.xp_merge && toggles.hunger_detail && !toggles.settings_persist && toggles.stats);
+        let _ = std::fs::remove_file(&p);
+    }
+
+    /// P55：GUI 默认关（未校准字节不能默认发），菜单 ID 默认 12 且可覆盖。
+    #[test]
+    fn p55_workbench_gui_defaults_off_with_calibration_override() {
+        let p = tmp_toml();
+        let _ = std::fs::remove_file(&p);
+        std::fs::write(&p, "seed = 42\n").unwrap();
+        assert!(!load_workbench_gui(&p));
+        assert_eq!(load_workbench_menu_id(&p), 12);
+        let filled = std::fs::read_to_string(&p).unwrap();
+        assert!(filled.contains("workbench_gui = false"));
+        assert!(filled.contains("workbench_menu_id = 12"));
+        // 旧 ServerConfig 穷举字面量仍能解析（不给它加字段）。
+        assert_eq!(ServerConfig::load_or_create(&p).unwrap().seed, 42);
+
+        std::fs::write(&p, "seed = 42\nworkbench_gui = true\nworkbench_menu_id = 7\n").unwrap();
+        assert!(load_workbench_gui(&p));
+        assert_eq!(load_workbench_menu_id(&p), 7);
+        std::fs::write(&p, "seed = 42\nworkbench_menu_id = -3\n").unwrap();
+        assert_eq!(load_workbench_menu_id(&p), 12, "negative id falls back to derived default");
         let _ = std::fs::remove_file(&p);
     }
 

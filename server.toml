@@ -19,3 +19,7 @@ journal_trim = true        # A5：journal 按 seq 保留窗口，只在落盘后
 journal_keep = 10000       # A5：保留记录数
 weather_broadcast = false  # A6：天气 game_event 保留开关，当前只更新服务端状态与面板
 craft_session_persist = true # A8：工作台会话断线落盘、重进恢复（仅服务端内存）
+# P55 B6：工作台 GUI 骨架；默认关。菜单 ID 12 取自 wiki 推导（仓库无 menu 注册表/jar），
+# 未抓包校准，开启后才可能断线；可运行时 POST /api/workbench-gui 热切 A/B。
+workbench_gui = false
+workbench_menu_id = 12

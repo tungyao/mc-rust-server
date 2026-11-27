@@ -42,6 +42,29 @@ fn socket_mode() -> mc_network::SocketMode {
     SOCKET_MODE.get().copied().unwrap_or(mc_network::SocketMode::Net)
 }
 
+/// P55 B6：工作台 GUI 运行时开关与菜单 ID。与 NetConfig/各连接共享同一 AtomicBool，
+/// 后台热切后下一条 use_item_on / 下一次 `/api/screen-open` 立即生效。
+/// 用 OnceLock 而不给 `AdminState` 加字段：保住既有穷举字面量测试。
+static WORKBENCH_GUI: OnceLock<Arc<AtomicBool>> = OnceLock::new();
+static WORKBENCH_MENU_ID: OnceLock<i32> = OnceLock::new();
+
+/// main 在启动期调用一次；重复调用保留第一次（与 socket_mode 同口径）。
+pub fn set_workbench_gui(flag: Arc<AtomicBool>, menu_id: i32) {
+    let _ = WORKBENCH_GUI.set(flag);
+    let _ = WORKBENCH_MENU_ID.set(menu_id);
+}
+
+/// 未注入时的兜底始终是关闭（未校准字节绝不默认发送）。
+pub fn workbench_gui_flag() -> Arc<AtomicBool> {
+    WORKBENCH_GUI.get_or_init(|| Arc::new(AtomicBool::new(false))).clone()
+}
+
+fn workbench_menu_id() -> i32 {
+    *WORKBENCH_MENU_ID
+        .get()
+        .unwrap_or(&mc_protocol::packets::CRAFTING_MENU_TYPE_ID)
+}
+
 /// P54 后台联动：四项能力共享的启动期注入（与 P52 `SOCKET_MODE` 同口径，
 /// 不给 `AdminState` 加字段，避免破坏穷举字面量的 550 个旧测试）。
 #[derive(Debug, Clone)]
@@ -790,6 +813,9 @@ fn handle_craft9(state: &AdminState) -> AdminResponse {
         .collect();
     AdminResponse::json(200, serde_json::json!({
         "ok": true, "sessions": sessions, "persist_enabled": persist_enabled,
+        // P55 B6：GUI 总开关状态 + 菜单 ID 校准提示（false=尚未抓包验证）。
+        "screen_open": workbench_gui_flag().load(Ordering::SeqCst),
+        "menu_id": workbench_menu_id(), "menu_id_verified": false,
     }))
 }
 
@@ -1097,6 +1123,100 @@ fn handle_craft9_clear(state: &AdminState, body: &[u8]) -> AdminResponse {
     AdminResponse::json(200, serde_json::json!({"ok": true, "owner": owner, "removed": removed}))
 }
 
+// --- P55 B6：工作台 GUI 运行时开关 / 后台触发打开 ---
+#[derive(Debug, Deserialize)]
+struct WorkbenchGuiReq {
+    enabled: Option<bool>,
+}
+
+fn workbench_gui_state() -> AdminResponse {
+    AdminResponse::json(200, serde_json::json!({
+        "ok": true,
+        "enabled": workbench_gui_flag().load(Ordering::SeqCst),
+        "menu_id": workbench_menu_id(),
+        "menu_id_verified": false,
+        "note": "B6 skeleton: menu type 12 derived from wiki, pending packet capture / jar calibration",
+    }))
+}
+
+fn handle_workbench_gui(_state: &AdminState, body: &[u8]) -> AdminResponse {
+    let req: WorkbenchGuiReq = match serde_json::from_slice(body) {
+        Ok(r) => r,
+        Err(_) => return AdminResponse::err(400, "bad json"),
+    };
+    let Some(enabled) = req.enabled else {
+        return AdminResponse::err(400, "enabled (bool) required");
+    };
+    workbench_gui_flag().store(enabled, Ordering::SeqCst);
+    workbench_gui_state()
+}
+
+#[derive(Debug, Deserialize)]
+struct ScreenOpenReq {
+    username: Option<String>,
+    uuid: Option<String>,
+    conn_id: Option<u64>,
+    /// 可选：显式指定会话坐标（缺省用 hub 在线位置向下取整）。
+    x: Option<i32>,
+    y: Option<i32>,
+    z: Option<i32>,
+}
+
+/// 后台触发在线玩家打开工作台 GUI：登记 3×3 会话 + 单播 0x3c/0x12。
+/// 仍受总开关约束（关闭时返回 400 且不发任何包，便于 A/B 与回退）。
+fn handle_screen_open(state: &AdminState, body: &[u8]) -> AdminResponse {
+    if !workbench_gui_flag().load(Ordering::SeqCst) {
+        return AdminResponse::err(400, "workbench_gui disabled; enable POST /api/workbench-gui first");
+    }
+    let req: ScreenOpenReq = match serde_json::from_slice(body) {
+        Ok(r) => r,
+        Err(_) => return AdminResponse::err(400, "bad json"),
+    };
+    let (conn, _user) = match resolve_conn(
+        state,
+        req.username.as_deref(),
+        req.conn_id,
+        req.uuid.as_deref(),
+    ) {
+        Ok(v) => v,
+        Err(e) => return AdminResponse::err(400, e),
+    };
+    let (x, y, z) = match (req.x, req.y, req.z) {
+        (Some(x), Some(y), Some(z)) => (x, y, z),
+        _ => match state.hub.conn_pos(conn) {
+            Some((pos, _)) => (
+                pos.0.floor() as i32,
+                pos.1.floor() as i32,
+                pos.2.floor() as i32,
+            ),
+            None => return AdminResponse::err(400, "player position unavailable; pass x/y/z"),
+        },
+    };
+    let Some(pkts) = mc_network::login_route::craft9::open_workbench_gui(
+        &state.drops,
+        conn,
+        x,
+        y,
+        z,
+        workbench_menu_id(),
+    ) else {
+        return AdminResponse::err(400, "offline player or missing inventory");
+    };
+    let mut sent = 0;
+    for pkt in pkts {
+        if state.hub.unicast(conn, pkt.id, pkt.body) {
+            sent += 1;
+        }
+    }
+    if sent != 2 {
+        return AdminResponse::err(400, "player disconnected while queueing GUI packets");
+    }
+    AdminResponse::json(200, serde_json::json!({
+        "ok": true, "conn_id": conn, "pos": [x, y, z], "sent": sent,
+        "menu_id": workbench_menu_id(), "menu_id_verified": false,
+    }))
+}
+
 /// 路由（纯构造响应；M1 只读：`/` + `/api/online` + `/api/world`）。
 pub fn route(req: &HttpRequest, state: &AdminState) -> AdminResponse {
     match (req.method.as_str(), req.path.as_str()) {
@@ -1107,6 +1227,9 @@ pub fn route(req: &HttpRequest, state: &AdminState) -> AdminResponse {
         ("GET", "/api/tools") => handle_tools(),
         ("GET", "/api/recipes") => handle_recipes(),
         ("GET", "/api/craft9") => handle_craft9(state),
+        ("GET", "/api/workbench-gui") => workbench_gui_state(),
+        ("POST", "/api/workbench-gui") => handle_workbench_gui(state, &req.body),
+        ("POST", "/api/screen-open") => handle_screen_open(state, &req.body),
         ("GET", "/api/inventory") => handle_inventory(state, &req.query),
         ("GET", "/api/stats") => handle_stats(state, &req.query),
         ("GET", "/api/time") => handle_time_get(),
@@ -1457,6 +1580,64 @@ mod tests {
         let r = route(&post("/api/gamemode", r#"{"conn_id":61,"gamemode":"survival"}"#), &st);
         assert_eq!(r.status, 200);
         assert_eq!(body_json(&route(&get("/api/online"), &st))["online"][0]["gamemode"], "survival");
+    }
+
+    /// P55 B6：默认关 → 零包；POST 开关热切；screen-open 单播 0x3c + 0x12 且建会话。
+    #[test]
+    fn p55_workbench_gui_toggle_and_screen_open_api() {
+        let st = test_state();
+        let flag = workbench_gui_flag();
+        flag.store(false, Ordering::SeqCst);
+        let before = body_json(&route(&get("/api/craft9"), &st));
+        assert_eq!(before["screen_open"], false);
+        assert_eq!(before["menu_id_verified"], false);
+        let (tx, rx) = crossbeam_channel::unbounded();
+        st.hub.register_with_uuid(
+            77,
+            tx,
+            2,
+            (4.2, 71.9, -3.4),
+            "GuiAdmin".into(),
+            "127.0.0.1:1".into(),
+            String::new(),
+        );
+        st.drops.load_inventory(77, "GuiAdmin");
+
+        // 关闭时触发必须被拒绝且不排任何包（回退/A-B 的安全口径）。
+        let r = route(&post("/api/screen-open", r#"{"conn_id":77}"#), &st);
+        assert_eq!(r.status, 400);
+        assert!(rx.try_recv().is_err());
+
+        let r = route(&post("/api/workbench-gui", r#"{"enabled":true}"#), &st);
+        assert_eq!(r.status, 200);
+        assert!(flag.load(Ordering::SeqCst));
+        assert_eq!(body_json(&route(&get("/api/craft9"), &st))["screen_open"], true);
+
+        let r = route(
+            &post("/api/screen-open", r#"{"conn_id":77,"x":4,"y":71,"z":-3}"#),
+            &st,
+        );
+        assert_eq!(r.status, 200, "{}", String::from_utf8_lossy(&r.body));
+        let first = rx.try_recv().unwrap();
+        assert_eq!(first.id, mc_protocol::packets::PLAY_OPEN_SCREEN_S2C_ID);
+        let second = rx.try_recv().unwrap();
+        assert_eq!(second.id, mc_protocol::packets::PLAY_SET_CONTAINER_CONTENT_S2C_ID);
+        assert_eq!(
+            mc_protocol::packets::SetContainerContent::decode_body(&second.body).unwrap().0.window_id,
+            mc_world::crafting::CRAFT9_WINDOW_ID
+        );
+        assert_eq!(
+            st.drops.craft9_session(77).map(|s| (s.x, s.y, s.z)),
+            Some((4, 71, -3))
+        );
+
+        // 再关回去：后续触发零新包。
+        let r = route(&post("/api/workbench-gui", r#"{"enabled":false}"#), &st);
+        assert_eq!(r.status, 200);
+        assert!(!flag.load(Ordering::SeqCst));
+        let r = route(&post("/api/screen-open", r#"{"conn_id":77}"#), &st);
+        assert_eq!(r.status, 400);
+        assert!(rx.try_recv().is_err());
     }
 
     #[test]

@@ -2,13 +2,19 @@
 //!
 //! 窗口 1 = 工作台：槽 0 结果、1..=9 合成格、10..=45 玩家背包（main/hotbar）。
 //! 所有点击经 C2S ContainerClick(0x12) 解析结果进入这里，服务端权威修改后发全量
-//! ContainerSetContent 回滚客户端预测。**不开放 `open_screen`**：26.3 数据包表里没有
-//! menu type 注册表（见 data/manifest.json），包体 menu id 无生成表可查，按“不猜字节”
-//! 约束不发该包；因此这是服务端权威会话 + 脚本/管理面板可驱动的 MVP（见 HANDOFF）。
+//! ContainerSetContent 回滚客户端预测。
+//! P55 B6 起提供可选 GUI：`workbench_gui` 默认关（旧包流不变），开启后右键工作台
+//! 发 Open Screen(0x3c) + 全量 Content(0x12)。包 ID 是数据表真值，但 menu type=12 与
+//! 标题 NBT 形式取自 wiki 推导，**待抓包校准**（见 `CRAFTING_MENU_TYPE_ID`）。
 
+use crate::broadcast::QueuedPacket;
 use crate::drop_state::{Craft9Session, DropState};
 use mc_protocol::packets;
 use mc_world::crafting::{self, CRAFT9_RESULT_SLOT, CRAFT9_WINDOW_ID};
+
+/// P55 B6：工作台界面标题。纯文本 → Text Component 的 String Tag 裸 payload。
+/// 标题文字仅影响显示；字节布局仍**待抓包校准**（见 `CRAFTING_MENU_TYPE_ID`）。
+pub const WORKBENCH_GUI_TITLE: &str = "Crafting";
 
 /// 窗口槽 → 玩家背包槽（10..=36 主包 9..=35；37..=45 快捷栏 36..=44）。
 fn inv_slot(window_slot: i16) -> Option<i16> {
@@ -239,6 +245,46 @@ pub fn build_craft9_content_body(ds: &DropState, conn: u64) -> Option<Vec<u8>> {
     Some(body)
 }
 
+/// P55 B6：`Open Screen 0x3c` 包体（仅 window/menu/title 三个字段，无 menu 附加 NBT）。
+/// **menu_type 为 wiki 推导值，待抓包校准**；`menu_id` 可由配置覆盖做真机 A/B。
+pub fn build_open_screen_body(menu_id: i32) -> Vec<u8> {
+    let mut body = Vec::new();
+    packets::OpenScreen {
+        window_id: CRAFT9_WINDOW_ID,
+        menu_type: menu_id,
+        title: WORKBENCH_GUI_TITLE.into(),
+    }
+    .encode_body(&mut body);
+    body
+}
+
+/// 打开工作台 GUI：登记会话 → 生成 `Open Screen(0x3c)` + `Content(0x12)` 两个原始包体。
+/// 调用方按顺序写给自己连接（或经 hub 单播）。无在线背包时不建会话、不发任何包。
+pub fn open_workbench_gui(
+    ds: &DropState,
+    conn: u64,
+    x: i32,
+    y: i32,
+    z: i32,
+    menu_id: i32,
+) -> Option<[QueuedPacket; 2]> {
+    if ds.with_inventory(conn, |_| ()).is_none() {
+        return None;
+    }
+    ds.open_craft9(conn, x, y, z);
+    let content = build_craft9_content_body(ds, conn)?;
+    Some([
+        QueuedPacket {
+            id: packets::PLAY_OPEN_SCREEN_S2C_ID,
+            body: build_open_screen_body(menu_id),
+        },
+        QueuedPacket {
+            id: packets::PLAY_SET_CONTAINER_CONTENT_S2C_ID,
+            body: content,
+        },
+    ])
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -258,6 +304,44 @@ mod tests {
         assert_eq!(inv_slot(37), Some(36));
         assert_eq!(inv_slot(45), Some(44));
         assert_eq!(inv_slot(9), None);
+    }
+
+    /// P55 B6：0x3c 包体 + 46 槽映射的完整骨架断言（menu ID 仍是推导值）。
+    #[test]
+    fn open_workbench_gui_bodies_and_slot_mapping() {
+        use mc_protocol::packets::{self, CRAFTING_MENU_TYPE_ID};
+        let ds = state();
+        ds.load_inventory(11, "GuiCrafter");
+        ds.with_inventory(11, |inv| {
+            inv.set_slot(9, Some((mc_world::drops::ITEM_WHEAT, 7)));
+            inv.set_slot(44, Some((mc_world::drops::ITEM_STICK, 3)));
+        });
+        let packets_pair = open_workbench_gui(&ds, 11, 4, 71, -2, CRAFTING_MENU_TYPE_ID).unwrap();
+        let (screen, content) = (&packets_pair[0], &packets_pair[1]);
+        assert_eq!(screen.id, packets::PLAY_OPEN_SCREEN_S2C_ID);
+        let (open, used) = packets::OpenScreen::decode_body(&screen.body).unwrap();
+        assert_eq!(used, screen.body.len(), "no extra NBT after title");
+        assert_eq!(open.window_id, CRAFT9_WINDOW_ID);
+        assert_eq!(open.menu_type, 12);
+        assert_eq!(open.title, WORKBENCH_GUI_TITLE);
+        assert_eq!(content.id, packets::PLAY_SET_CONTAINER_CONTENT_S2C_ID);
+        let (c, _) = packets::SetContainerContent::decode_body(&content.body).unwrap();
+        assert_eq!(c.window_id, CRAFT9_WINDOW_ID);
+        assert_eq!(c.slots.len(), 46);
+        assert_eq!(c.slots[CRAFT9_RESULT_SLOT as usize], packets::Slot::empty());
+        assert_eq!(c.slots[1], packets::Slot::empty());
+        assert_eq!(
+            c.slots[10],
+            packets::Slot { item_id: mc_world::drops::ITEM_WHEAT, count: 7 },
+            "window slot 10 = inventory slot 9"
+        );
+        assert_eq!(
+            c.slots[45],
+            packets::Slot { item_id: mc_world::drops::ITEM_STICK, count: 3 },
+            "window slot 45 = inventory slot 44 (hotbar)"
+        );
+        assert_eq!(ds.craft9_session(11).unwrap().x, 4);
+        let _ = std::fs::remove_dir_all(ds.save_dir());
     }
 
     #[test]
