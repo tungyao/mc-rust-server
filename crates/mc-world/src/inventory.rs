@@ -1249,10 +1249,16 @@ mod tests {
         let sticks = crate::crafting::RECIPES.iter().find(|r| r.name == "stick").unwrap().result.0;
         assert_eq!(inv.get(36), Some((sticks, 4)), "result lands in hotbar first");
         assert_eq!(inv.craft_result_quick_move(), 0, "no inputs left, no extra craft");
-        // 没有配方时绝不改背包。
+        // 子集语义：单格 2 原木也能做（连做 2 次，耗尽为止；原版 SHIFT 同理）。
         inv.slots[1] = Some((crate::drops::ITEM_OAK_LOG, 2));
-        assert_eq!(inv.craft_result_quick_move(), 0);
-        assert_eq!(inv.slots[1], Some((crate::drops::ITEM_OAK_LOG, 2)));
+        assert_eq!(inv.craft_result_quick_move(), 2);
+        assert_eq!(inv.slots[1], None);
+        let planks_total: i32 = (9..=44)
+            .filter_map(|s| inv.get(s))
+            .filter(|(id, _)| *id == crate::drops::ITEM_OAK_PLANKS)
+            .map(|(_, c)| c)
+            .sum();
+        assert_eq!(planks_total, 8);
     }
 
     /// jar `AbstractContainerMenu.doClick` SWAP 只在目标槽为空时把结果放进去。

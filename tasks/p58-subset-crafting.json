@@ -1,0 +1,16 @@
+{
+  "id": "p58-subset-crafting",
+  "title": "合成子集语义：多件同种可合成，多的留下",
+  "status": "done",
+  "owner": "main",
+  "priority": "p0",
+  "deps": [],
+  "branch": "",
+  "created": "2026-11-27T13:31:52+00:00",
+  "updated": "2026-11-27T13:31:52+00:00",
+  "detail": "match精确优先+子集兜底（够料无杂物即命中）；歧义槽型>总量降序>表序；588 passed",
+  "files": [
+    "mc-world/crafting.rs",
+    "mc-world/inventory.rs"
+  ]
+}

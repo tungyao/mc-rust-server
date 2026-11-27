@@ -122,3 +122,6 @@
 {"ts": "2026-11-27 13:15 UTC", "agent": "main", "task": "p57-hardcode-basics", "status": "todo", "detail": "基本功能写死：工作台常开+去后台控制+玩法全开", "files": ""}
 {"ts": "2026-11-27 13:15 UTC", "agent": "main", "task": "p57-hardcode-basics", "status": "start", "detail": "claim", "files": ""}
 {"ts": "2026-11-27 13:15 UTC", "agent": "main", "task": "p57-hardcode-basics", "status": "done", "detail": "open_screen标题改无名tag（真机10bytes extra）；工作台GUI写死常开；删除后台workbench-gui/screen-open控制面+面板卡片；P53/P54玩法写死全开（仅A3 throttle可配）；588 passed", "files": "mc-protocol/play_entity.rs,mc-server/admin.rs+config.rs+main.rs,mc-network/config.rs+login.rs+handshake_route+craft9.rs,admin-ui/Dashboard.js,server.toml"}
+{"ts": "2026-11-27 13:31 UTC", "agent": "main", "task": "p58-subset-crafting", "status": "todo", "detail": "合成子集语义：多件同种可合成，多的留下", "files": ""}
+{"ts": "2026-11-27 13:31 UTC", "agent": "main", "task": "p58-subset-crafting", "status": "start", "detail": "claim", "files": ""}
+{"ts": "2026-11-27 13:31 UTC", "agent": "main", "task": "p58-subset-crafting", "status": "done", "detail": "match精确优先+子集兜底（够料无杂物即命中）；歧义槽型>总量降序>表序；588 passed", "files": "mc-world/crafting.rs,mc-world/inventory.rs"}

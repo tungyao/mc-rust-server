@@ -4,8 +4,10 @@
 //! 与 `drops.rs` 同口径；不手写/猜物品 ID。本轮只做玩家背包 2×2（槽 1–4 输入、0 输出），
 //! 3×3 工作台 / block entity 明确不做（见 HANDOFF 任务说明）。
 //!
-//! 配方为**无序精确匹配**：把 4 个合成格内的物品按 ID 计数，必须与某条配方的
-//! 需求计数完全一致（不多不少）；输出栈直接返回给调用方，由网络层放光标/背包。
+//! 配方为**无序匹配（原版 shapeless 口径）**：把合成格内的物品按 ID 计数，
+//! 先精确命中（与某条配方的需求计数完全一致）；精确无命中时退到子集匹配——
+//! 每种物品数量 ≥ 配方需求、且无配方外的杂物即命中，多的留下（放一整组也只扣一份）。
+//! 输出栈直接返回给调用方，由网络层放光标/背包。
 //!
 //! P41 扩充：覆盖原版所有能在背包 2×2 中放下的合成（木板/木棍/工作台、全材质工具与
 //! 可容纳盔甲、火把/面包/纸书/床箱/熔炉/漏斗/活塞/铁轨/告示牌/门/栅栏/台阶楼梯墙/
@@ -644,11 +646,19 @@ pub const CRAFT9_WINDOW_ID: i32 = 1;
 /// 工作台结果槽。
 pub const CRAFT9_RESULT_SLOT: i16 = 0;
 
-/// 3×3 配方匹配：与 2×2 共用配方表/多重集口径，但不套用 2×2 的槽分布指纹
-/// （那是为 4 格歧义组准备的）；多条候选按表序取首条，确定性且与 HashMap 无关。
+/// 3×3 配方匹配：与 2×2 共用配方表/无序口径（精确优先 + 子集兜底），但不套用
+/// 2×2 的 4 格槽分布指纹；9 格用自己的占用槽指纹做规范槽型拆分，仍无命中时按
+/// 总需求量降序 + 表序兜底，确定性且与 HashMap 无关。
 pub fn match_recipe_9(grid: [Option<(i32, i32)>; GRID9_SIZE]) -> Option<&'static Recipe> {
     let input = normalized_multiset(&grid_stacks9(grid));
-    RECIPES.iter().find(|r| normalized_multiset(r.needs) == input)
+    let exact: Vec<&'static Recipe> =
+        RECIPES.iter().filter(|r| normalized_multiset(r.needs) == input).collect();
+    if !exact.is_empty() {
+        return resolve_candidates(exact, slot_fingerprint9(grid));
+    }
+    let subset: Vec<&'static Recipe> =
+        RECIPES.iter().filter(|r| needs_subset_of(r.needs, &input)).collect();
+    resolve_candidates(subset, slot_fingerprint9(grid))
 }
 
 /// 3×3 合成格展平。
@@ -683,6 +693,38 @@ pub fn consume_grid9(grid: &mut [Option<(i32, i32)>; GRID9_SIZE], recipe: &Recip
     true
 }
 
+/// 配方需求是否被输入多重集满足：输入的每种物品都必须出现在需求里
+///（无杂物），且数量 ≥ 对应需求总量（多的留下）。
+/// `needs`/`input` 均为 [`normalized_multiset`] 后的 `(id, count)` 有序表。
+fn needs_subset_of(needs: &[(i32, i32)], input: &[(i32, i32)]) -> bool {
+    let agg = normalized_multiset(needs);
+    agg.iter().all(|(id, n)| input.iter().any(|(i, h)| i == id && h >= n))
+        && input.iter().all(|(id, _)| agg.iter().any(|(i, _)| i == id))
+}
+
+/// 候选配方确定性拆分：规范槽型优先（歧义组），否则总需求量降序
+///（精确命中的候选总量必然相等，退化为表序，与旧"取首条"一致），
+/// 同量按表序（`candidates` 本来就是表序，稳定排序保持它）。
+fn resolve_candidates(
+    candidates: Vec<&'static Recipe>,
+    fingerprint: Vec<(i32, i32)>,
+) -> Option<&'static Recipe> {
+    if candidates.is_empty() {
+        return None;
+    }
+    if candidates.len() == 1 {
+        return Some(candidates[0]);
+    }
+    for recipe in &candidates {
+        if canonical_layout(recipe).as_deref() == Some(fingerprint.as_slice()) {
+            return Some(recipe);
+        }
+    }
+    let mut ranked = candidates;
+    ranked.sort_by_key(|r| std::cmp::Reverse(r.needs.iter().map(|(_, n)| *n).sum::<i32>()));
+    ranked.into_iter().next()
+}
+
 /// 把合成格展平成 `(id, count)` 列表（跳过空槽；未合并，匹配时按 ID 累计）。
 pub fn grid_stacks(grid: [Option<(i32, i32)>; GRID_SIZE]) -> Vec<(i32, i32)> {
     grid.into_iter().flatten().collect()
@@ -707,6 +749,13 @@ fn normalized_multiset(items: &[(i32, i32)]) -> Vec<(i32, i32)> {
 /// 槽分布指纹：按 (id,count) 排序的占用槽列表，位置无关（4 格内）。
 /// 只在“多条配方输入多重集完全相同”的歧义组里用作确定性拆分键。
 fn slot_fingerprint(grid: [Option<(i32, i32)>; GRID_SIZE]) -> Vec<(i32, i32)> {
+    let mut slots: Vec<(i32, i32)> = grid.into_iter().flatten().filter(|(_, c)| *c > 0).collect();
+    slots.sort_unstable();
+    slots
+}
+
+/// 9 格占用槽指纹（与 [`slot_fingerprint`] 同口径，供 3×3 规范槽型拆分）。
+fn slot_fingerprint9(grid: [Option<(i32, i32)>; GRID9_SIZE]) -> Vec<(i32, i32)> {
     let mut slots: Vec<(i32, i32)> = grid.into_iter().flatten().filter(|(_, c)| *c > 0).collect();
     slots.sort_unstable();
     slots
@@ -756,25 +805,21 @@ fn canonical_layout(recipe: &Recipe) -> Option<Vec<(i32, i32)>> {
     Some(layout)
 }
 
-/// 无序精确匹配：返回命中的配方；格内多/少任意一件都视为无配方（结果槽保持空）。
-/// 输入多重集相同且存在多条配方时，按 [`canonical_layout`] 的槽型确定性拆分；
-/// 若槽型未命中任何规范型（例如原料全塞在一格），取配方表中的首条（表序稳定），
+/// 无序匹配（原版 shapeless 口径）：先精确多重集命中（旧行为逐字节保留），
+/// 精确无命中时退到子集匹配——格内每种物品数量 ≥ 配方需求、且无配方外的杂物，
+/// 即命中（多的留下，原版放一整组也只扣一份）。候选多条时先按规范槽型拆分
+///（[`canonical_layout`]），再按总需求量降序（越具体越优先），同量按表序，
 /// 绝不随机、也不按 HashMap 迭代顺序出结果。
 pub fn match_recipe(grid: [Option<(i32, i32)>; GRID_SIZE]) -> Option<&'static Recipe> {
     let input = normalized_multiset(&grid_stacks(grid));
-    let candidates: Vec<&'static Recipe> =
+    let exact: Vec<&'static Recipe> =
         RECIPES.iter().filter(|r| normalized_multiset(r.needs) == input).collect();
-    let first = *candidates.first()?;
-    if candidates.len() == 1 {
-        return Some(first);
+    if !exact.is_empty() {
+        return resolve_candidates(exact, slot_fingerprint(grid));
     }
-    let fingerprint = slot_fingerprint(grid);
-    for recipe in &candidates {
-        if canonical_layout(recipe).as_deref() == Some(fingerprint.as_slice()) {
-            return Some(recipe);
-        }
-    }
-    Some(first)
+    let subset: Vec<&'static Recipe> =
+        RECIPES.iter().filter(|r| needs_subset_of(r.needs, &input)).collect();
+    resolve_candidates(subset, slot_fingerprint(grid))
 }
 /// 配方命中后按 ID 从合成格扣除原料（每格最多取自己数量；返回是否全部扣成功）。
 /// 调用方应先 `match_recipe`；不匹配时不要调用，避免误扣。
@@ -851,11 +896,23 @@ mod tests {
     #[test]
     fn extra_or_missing_items_never_match() {
         assert!(match_recipe([None; GRID_SIZE]).is_none());
-        assert!(match_recipe([Some((OAK_LOG, 2)), None, None, None]).is_none());
+        // 同种多一件仍命中（只扣一份，多的留下；原版放一整组也一样）。
+        let mut grid = [Some((OAK_LOG, 2)), None, None, None];
+        assert_eq!(match_recipe(grid).unwrap().result, (OAK_PLANKS, 4));
+        let r = match_recipe(grid).unwrap();
+        assert!(consume_grid(&mut grid, r));
+        assert_eq!(grid, [Some((OAK_LOG, 1)), None, None, None]);
         // 多一个无关物品 → 原木配方不成立（避免白送木板）。
         assert!(match_recipe([Some((OAK_LOG, 1)), Some((STICK, 1)), None, None]).is_none());
-        // 少一件原料 → 石镐不成立。
-        assert!(match_recipe([Some((COBBLESTONE, 3)), Some((STICK, 1)), None, None]).is_none());
+        // 3 圆石 + 1 木棍 → 石剑成立（总需求量 3 > 拉杆 2，越具体越优先；
+        // 只扣 2 圆石 + 1 木棍，剩 1 圆石）。
+        let mut grid = [Some((COBBLESTONE, 3)), Some((STICK, 1)), None, None];
+        let r = match_recipe(grid).expect("3 cobble + 1 stick must match stone_sword");
+        assert_eq!(r.name, "stone_sword");
+        assert!(consume_grid(&mut grid, r));
+        assert_eq!(grid, [Some((COBBLESTONE, 1)), None, None, None]);
+        // 少一件原料 → 面包不成立（2 小麦不够 3 个，其它小麦配方也差东西）。
+        assert!(match_recipe([Some((WHEAT, 2)), None, None, None]).is_none());
     }
 
     #[test]
@@ -890,12 +947,16 @@ mod tests {
         let mut g4 = [None; GRID_SIZE];
         g4[0] = Some((WHEAT, 9));
         assert_eq!(match_recipe(g4).unwrap().name, "hay_block");
-        // 工作台不存在 10 件小麦的配方：不多不少才算命中。
+        // 18 个小麦（每格 2 个）→ 干草捆成立，扣 9 个剩 9 个（子集语义）。
         let mut too_many = [None; GRID9_SIZE];
         for slot in too_many.iter_mut() {
             *slot = Some((WHEAT, 2));
         }
-        assert!(match_recipe_9(too_many).is_none());
+        let r = match_recipe_9(too_many).expect("18 wheat must still match hay_block");
+        assert_eq!(r.name, "hay_block");
+        assert!(consume_grid9(&mut too_many, r));
+        assert_eq!(too_many.iter().flatten().map(|(_, c)| c).sum::<i32>(), 9);
+        assert!(match_recipe_9(too_many).is_some(), "leftover 9 wheat still crafts");
     }
 
     #[test]
@@ -1004,7 +1065,7 @@ mod tests {
             match_recipe([Some((COAL, 1)), Some((STICK, 1)), None, None]).unwrap().result,
             (TORCH, 4)
         );
-        // 多一件无关物品仍不命中（新配方同样遵守精确多重集）。
+        // 多一件无关物品仍不命中（杂物照样挡配方，只有"同种多件"放宽）。
         assert!(match_recipe([Some((ITEM_IRON_INGOT, 3)), Some((STICK, 2)), Some((COBBLESTONE, 1)), None]).is_none());
     }
 
