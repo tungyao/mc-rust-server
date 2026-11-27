@@ -113,3 +113,6 @@
 - [2026-11-26 08:28 UTC] agent=main task=p47-gameplay-admin status=todo detail=剩余玩法缺口 + 后台管理联动（工具等级/3x3工作台/游戏模式/挖掘动画） files=
 - [2026-11-26 08:28 UTC] agent=subagent-gameplay-admin task=p47-gameplay-admin status=start detail=claim files=
 - [2026-11-26 09:11 UTC] agent=subagent-gameplay-admin task=p47-gameplay-admin status=done detail=工具档位/时运/精准采集+3x3工作台整箱整理+游戏模式+挖掘动画0x05;后台新增5个API与Vue卡片并重建离线产物;drop_state测试拆子模块消budget告警;509 passed;merge见main files=crates/mc-world/src/tools.rs,crates/mc-network/src/login_route/craft9.rs,crates/mc-network/src/drop_state/tests.rs,crates/mc-server/src/admin.rs,admin-ui/src/Dashboard.js,crates/mc-server/src/admin_page.html
+- [2026-11-27 01:35 UTC] agent=main task=p48-live-checklist status=todo detail=真机复验清单（用户本机执行） files=
+- [2026-11-27 01:35 UTC] agent=main task=p48-live-checklist status=start detail=claim files=
+- [2026-11-27 01:35 UTC] agent=main task=p48-live-checklist status=done detail=docs/real-machine-checklist.md 12组验证步骤+失败定位表;用户本机Windows客户端执行;仓库e2e不替代真机 files=docs/real-machine-checklist.md,HANDOFF.md

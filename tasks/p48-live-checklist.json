@@ -1,0 +1,16 @@
+{
+  "id": "p48-live-checklist",
+  "title": "真机复验清单（用户本机执行）",
+  "status": "done",
+  "owner": "main",
+  "priority": "p1",
+  "deps": [],
+  "branch": "",
+  "created": "2026-11-27T01:35:52+00:00",
+  "updated": "2026-11-27T01:35:52+00:00",
+  "detail": "docs/real-machine-checklist.md 12组验证步骤+失败定位表;用户本机Windows客户端执行;仓库e2e不替代真机",
+  "files": [
+    "docs/real-machine-checklist.md",
+    "HANDOFF.md"
+  ]
+}

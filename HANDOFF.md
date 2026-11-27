@@ -965,6 +965,13 @@ $natives = 'C:\Users\qwe\AppData\Local\Temp\mc263natives'
     - 未做：耐久/挖掘速度、飞行、创造槽包、真实 open_screen GUI、工作台存档、
       完整 Respawn 0x54、名字/皮肤 0x47、聊天广播（p32 blocked）、生物 AI/战斗/命令/声音。
 
+32. **真机复验清单（2026-11-27）**：`docs/real-machine-checklist.md` 按 12 组列出人工验证步骤
+    （通用准备 / 登录视距压缩 / v1 地形 / 方块交互 / 掉落背包 Q 扔 / 多人 /
+    农业 / 经验球 / 后台 / 生存合成工具 / redb 存档 / v2 世界生成），每项含配置、操作、
+    期望日志与包、截图点；末尾附失败定位速查表与记录表。**真机验证由用户在 Windows 客户端执行**，
+    仓库内脚本 e2e 不能替代。重点风险：v2 441 块 Join 本地估算 1060ms 超 700ms 红线、
+    v2 biome 容器/非均匀 light 无 vanilla 抓包对照、P47 `open_screen`/飞行/0x47/0x54 未做。
+
 ## 6. 关键文件
 
 ```
@@ -1029,6 +1036,7 @@ docs/packet-map-777.md                 777 包 ID 对照表（权威；§6 挖�
 docs/registries-777.md                 注册表清单
 docs/world-storage-plan.md             P36 新世界存储格式方案（redb，不做 Anvil 兼容）
 docs/worldgen-plan.md                  P42 地图生成器调研与分阶段路线图（未改代码）
+docs/real-machine-checklist.md         真机复验清单（按功能分组，含配置/按键/日志/截图/失败定位）
 ```
 
 ## 7. 测试命令
