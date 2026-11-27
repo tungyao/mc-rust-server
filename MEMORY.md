@@ -134,3 +134,5 @@
 - [2026-11-27 03:30 UTC] agent=subagent-batch1a task=p53-batch1-gameplay status=done detail=A1 XP吸引合并守恒+A2饥饿疲劳度+A4设置持久化+A7统计;四开关库默认关生产开;唯一ticker;存档v4/v3;后台xp/food/stats+e2e;550 passed;merge见main files=crates/mc-world/src/{xp,survival,inventory,store}.rs,crates/mc-network/src/drop_state/gameplay.rs,crates/mc-server/src/admin.rs,admin-ui/src/Dashboard.js,crates/mc-server/tests/gameplay_batch1_e2e.rs
 - [2026-11-27 03:30 UTC] agent=subagent-batch1b task=p54-batch1-infra status=start detail=claim files=
 - [2026-11-27 04:12 UTC] agent=subagent-batch1b task=p54-batch1-infra status=done detail=A3广播合并默认关Ack不合并+A5 journal裁剪落盘后+A6 set_time 0x73/天气不发包+A8会话落盘;新表block_entities/meta;后台时间天气运维会话卡;565 passed;merge见main files=crates/mc-world/src/{world_time.rs,store/p54.rs,mutable.rs},crates/mc-network/src/broadcast.rs,crates/mc-protocol/src/packets/play_chunk.rs,crates/mc-server/src/admin.rs,admin-ui/src/Dashboard.js
+- [2026-11-27 06:17 UTC] agent=main task=p55-workbench-gui status=todo detail=B6 工作台 3×3 真 GUI 骨架（open_screen 0x3c，可运行时开关/抓包校准） files=
+- [2026-11-27 06:17 UTC] agent=subagent-workbench-gui task=p55-workbench-gui status=start detail=claim files=

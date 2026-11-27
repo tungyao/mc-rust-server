@@ -1,0 +1,13 @@
+{
+  "id": "p55-workbench-gui",
+  "title": "B6 工作台 3×3 真 GUI 骨架（open_screen 0x3c，可运行时开关/抓包校准）",
+  "status": "doing",
+  "owner": "subagent-workbench-gui",
+  "priority": "p1",
+  "deps": [],
+  "branch": "",
+  "created": "2026-11-27T06:17:01+00:00",
+  "updated": "2026-11-27T06:17:01+00:00",
+  "detail": "",
+  "files": []
+}
