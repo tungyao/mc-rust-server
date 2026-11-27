@@ -95,6 +95,15 @@ fn main() {
             (Arc::new(loaded), None)
         }
     };
+    // P51：玩家存档 username 键 → 稳定 UUID 键一次性迁移（失败已内部回滚；
+    // 即使跳过，DropState 仍按 UUID 主键读、缺档回退旧用户名键，不会丢背包/XP）。
+    match mc_world::uuid_migration::migrate_saves(world_path, cfg.seed, shared_store.as_deref()) {
+        Ok(report) => info!(
+            "uuid migration seed={} ran={} files={:?} redb_keys={:?} skipped={}",
+            cfg.seed, report.ran, report.files, report.redb_keys, report.skipped
+        ),
+        Err(e) => warn!("uuid migration failed dir={world_dir} seed={} ({e}); legacy keys remain readable", cfg.seed),
+    }
     info!(
         "world loaded storage={storage:?} generator={:?} dir={world_dir} seed={} overrides={} dirty={}",
         generator_version,

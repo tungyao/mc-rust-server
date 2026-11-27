@@ -18,8 +18,96 @@ pub const COMPRESSION_DISABLED_THRESHOLD: i32 = -1;
 /// 阈值>=0即启用压缩（framing 压缩帧判定与 login_route 发送判定共用）。
 pub fn compression_enabled(threshold: i32) -> bool { threshold >= 0 }
 
-/// 离线模式 UUID：服务端随机分配 v4，忽略客户端所带。
+/// 离线模式 UUID（历史遗留）：服务端随机分配 v4，忽略客户端所带。
+/// **只保留给旧单测/旧工具**，身份链路已改用 [`stable_offline_uuid`]。
 pub fn offline_uuid(_name: &str) -> Uuid { Uuid::new_v4() }
+
+/// P51：原版口径的离线 UUID（稳定身份）。
+///
+/// 原版 `UUID.nameUUIDFromBytes(("OfflinePlayer:" + name).getBytes(UTF_8))`：
+/// 对 **裸** `OfflinePlayer:<name>` 字节取 MD5（不是 `Uuid::new_v3` 的
+/// namespace+name），再把 digest[6] 设为版本 3、digest[8] 设为 RFC4122 variant。
+/// 因此同一用户名每次登录得到同一个 UUID，不同用户名不同；不信任客户端带的 UUID。
+pub fn stable_offline_uuid(name: &str) -> Uuid {
+    let mut digest = md5(format!("OfflinePlayer:{name}").as_bytes());
+    digest[6] = (digest[6] & 0x0f) | 0x30; // version 3
+    digest[8] = (digest[8] & 0x3f) | 0x80; // variant 10xx
+    Uuid::from_bytes(digest)
+}
+
+/// 存档键是否已是 UUID（迁移据此区分 username 键与 uuid 键）。
+pub fn is_uuid_tag(tag: &str) -> bool {
+    Uuid::parse_str(tag).is_ok()
+}
+
+/// 自包含 MD5（原版离线 UUID 算法要求裸摘要；`uuid` crate 的 v3 只能算 namespace+name）。
+/// 避免引入新依赖（仓库忽略 Cargo.lock，靠自包含实现消除版本漂移）。
+fn md5(input: &[u8]) -> [u8; 16] {
+    const K: [u32; 64] = [
+        0xd76aa478, 0xe8c7b756, 0x242070db, 0xc1bdceee, 0xf57c0faf, 0x4787c62a, 0xa8304613,
+        0xfd469501, 0x698098d8, 0x8b44f7af, 0xffff5bb1, 0x895cd7be, 0x6b901122, 0xfd987193,
+        0xa679438e, 0x49b40821, 0xf61e2562, 0xc040b340, 0x265e5a51, 0xe9b6c7aa, 0xd62f105d,
+        0x02441453, 0xd8a1e681, 0xe7d3fbc8, 0x21e1cde6, 0xc33707d6, 0xf4d50d87, 0x455a14ed,
+        0xa9e3e905, 0xfcefa3f8, 0x676f02d9, 0x8d2a4c8a, 0xfffa3942, 0x8771f681, 0x6d9d6122,
+        0xfde5380c, 0xa4beea44, 0x4bdecfa9, 0xf6bb4b60, 0xbebfbc70, 0x289b7ec6, 0xeaa127fa,
+        0xd4ef3085, 0x04881d05, 0xd9d4d039, 0xe6db99e5, 0x1fa27cf8, 0xc4ac5665, 0xf4292244,
+        0x432aff97, 0xab9423a7, 0xfc93a039, 0x655b59c3, 0x8f0ccc92, 0xffeff47d, 0x85845dd1,
+        0x6fa87e4f, 0xfe2ce6e0, 0xa3014314, 0x4e0811a1, 0xf7537e82, 0xbd3af235, 0x2ad7d2bb,
+        0xeb86d391,
+    ];
+    const S: [u32; 64] = [
+        7, 12, 17, 22, 7, 12, 17, 22, 7, 12, 17, 22, 7, 12, 17, 22,
+        5, 9, 14, 20, 5, 9, 14, 20, 5, 9, 14, 20, 5, 9, 14, 20,
+        4, 11, 16, 23, 4, 11, 16, 23, 4, 11, 16, 23, 4, 11, 16, 23,
+        6, 10, 15, 21, 6, 10, 15, 21, 6, 10, 15, 21, 6, 10, 15, 21,
+    ];
+    let mut msg = input.to_vec();
+    let bit_len = (msg.len() as u64).wrapping_mul(8);
+    msg.push(0x80);
+    while msg.len() % 64 != 56 {
+        msg.push(0);
+    }
+    msg.extend_from_slice(&bit_len.to_le_bytes());
+    let mut h = [0x67452301u32, 0xefcdab89, 0x98badcfe, 0x10325476];
+    for chunk in msg.chunks_exact(64) {
+        let mut m = [0u32; 16];
+        for (i, word) in m.iter_mut().enumerate() {
+            *word = u32::from_le_bytes(chunk[i * 4..i * 4 + 4].try_into().unwrap());
+        }
+        let [h0, h1, h2, h3] = h;
+        let (mut a, mut b, mut c, mut d) = (h0, h1, h2, h3);
+        for i in 0..64 {
+            let (f, g) = match i {
+                0..=15 => ((b & c) | (!b & d), i),
+                16..=31 => ((d & b) | (!d & c), (5 * i + 1) % 16),
+                32..=47 => (b ^ c ^ d, (3 * i + 5) % 16),
+                _ => (c ^ (b | !d), (7 * i) % 16),
+            };
+            let old_a = a;
+            a = d;
+            d = c;
+            c = b;
+            b = b.wrapping_add(
+                old_a
+                    .wrapping_add(f)
+                    .wrapping_add(K[i])
+                    .wrapping_add(m[g])
+                    .rotate_left(S[i]),
+            );
+        }
+        h = [
+            h0.wrapping_add(a),
+            h1.wrapping_add(b),
+            h2.wrapping_add(c),
+            h3.wrapping_add(d),
+        ];
+    }
+    let mut out = [0u8; 16];
+    for (i, word) in h.iter().enumerate() {
+        out[i * 4..i * 4 + 4].copy_from_slice(&word.to_le_bytes());
+    }
+    out
+}
 
 /// UUID 线包格式：16字节 big-endian。
 pub fn write_uuid(v: Uuid, out: &mut Vec<u8>) { out.extend_from_slice(v.as_bytes()); }
@@ -202,5 +290,18 @@ mod tests {
         let (rid, m) = packet_id_of(&q); assert_eq!(rid, ENCRYPTION_RESPONSE_PACKET_ID);
         assert_eq!(decode_encryption_response(&q[m..]).unwrap().0, rsp);
         assert_ne!(offline_uuid("a"), offline_uuid("a"));
+    }
+
+    /// P51：原版 `OfflinePlayer:<name>` 裸 MD5 + v3/variant 位向量（独立工具计算）。
+    #[test]
+    fn stable_offline_uuid_is_vanilla_deterministic_and_name_scoped() {
+        assert_eq!(stable_offline_uuid("Notch").to_string(), "b50ad385-829d-3141-a216-7e7d7539ba7f");
+        assert_eq!(stable_offline_uuid("Steve").to_string(), "5627dd98-e6be-3c21-b8a8-e92344183641");
+        assert_eq!(stable_offline_uuid("Alex").to_string(), "36532b5e-c442-3dbb-a24c-c7e55d0f979a");
+        assert_eq!(stable_offline_uuid("Notch"), stable_offline_uuid("Notch"));
+        assert_ne!(stable_offline_uuid("Notch"), stable_offline_uuid("notch"));
+        assert_eq!(stable_offline_uuid("Notch").get_version_num(), 3);
+        assert!(is_uuid_tag("b50ad385-829d-3141-a216-7e7d7539ba7f"));
+        assert!(!is_uuid_tag("Steve"));
     }
 }

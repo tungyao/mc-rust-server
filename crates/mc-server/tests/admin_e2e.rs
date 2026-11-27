@@ -503,6 +503,109 @@ async fn admin_tools_recipes_gamemode_and_enchant_flow() {
         }
     }
     assert!(synced, "given pickaxe must reach the client immediately");
+    env.drops.stop_global_tick();
+    env.shutdown.store(true, Ordering::SeqCst);
+    let _ = std::fs::remove_dir_all(env.world_dir.parent().unwrap());
+}
+
+/// P51：面板按稳定 UUID 发放 / 查背包 / 切模式 / 设附魔 / 踢人（用户名兼容不删）。
+#[tokio::test]
+async fn admin_uuid_targets_all_player_endpoints() {
+    let env = boot().await;
+    let name = "UuidAdminUser";
+    let uuid = packets::stable_offline_uuid(name).to_string();
+    let mut s = join(env.game, name).await;
+
+    let mut online = serde_json::Value::Null;
+    for _ in 0..50 {
+        let (st, b) = http(env.admin, "GET", "/api/online", "").await;
+        assert_eq!(st, 200);
+        online = j(&b);
+        if online["count"] == 1 {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
+    assert_eq!(online["count"], 1);
+    assert_eq!(online["online"][0]["uuid"], uuid);
+    assert_eq!(online["online"][0]["username"], name);
+
+    // give by uuid → 客户端立刻收到 Content 同步。
+    let dirt = mc_registry::item_id("minecraft:dirt").unwrap() as i64;
+    let (st, b) = http(
+        env.admin,
+        "POST",
+        "/api/give",
+        &format!(r#"{{"uuid":"{uuid}","item":"minecraft:dirt","count":7}}"#),
+    )
+    .await;
+    assert_eq!(st, 200, "{}", String::from_utf8_lossy(&b));
+    let mut got = false;
+    for _ in 0..40 {
+        let (id, payload) = read_frame_timeout(&mut s, Duration::from_secs(5)).await.unwrap();
+        if id == packets::PLAY_SET_CONTAINER_CONTENT_S2C_ID {
+            let (c, _) = packets::SetContainerContent::decode_body(&payload).unwrap();
+            if c.slots.iter().any(|sl| sl.item_id as i64 == dirt && sl.count == 7) {
+                got = true;
+                break;
+            }
+        }
+    }
+    assert!(got, "uuid give must reach the client immediately");
+    // inventory by uuid 复核同一终态。
+    let (st, b) = http(env.admin, "GET", &format!("/api/inventory?uuid={uuid}"), "").await;
+    assert_eq!(st, 200);
+    let inv = j(&b);
+    assert_eq!(inv["username"], name);
+    assert!(inv["slots"].as_array().unwrap().iter().any(|e| e[1] == dirt && e[2] == 7));
+
+    // gamemode / tool-enchant by uuid：在线快照跟随变化。
+    let (st, _) = http(
+        env.admin,
+        "POST",
+        "/api/gamemode",
+        &format!(r#"{{"uuid":"{uuid}","gamemode":"creative"}}"#),
+    )
+    .await;
+    assert_eq!(st, 200);
+    let (st, _) = http(
+        env.admin,
+        "POST",
+        "/api/tool-enchant",
+        &format!(r#"{{"uuid":"{uuid}","enchant":"fortune"}}"#),
+    )
+    .await;
+    assert_eq!(st, 200);
+    let (_, b) = http(env.admin, "GET", "/api/online", "").await;
+    let online = j(&b);
+    assert_eq!(online["online"][0]["gamemode"], "creative");
+    assert_eq!(online["online"][0]["tool_enchant"], "fortune");
+    // 未知 uuid 400（不误伤旧字段）。
+    let (st, _) = http(
+        env.admin,
+        "POST",
+        "/api/gamemode",
+        r#"{"uuid":"00000000-0000-0000-0000-000000000000","gamemode":"survival"}"#,
+    )
+    .await;
+    assert_eq!(st, 400);
+
+    // kick by uuid → 客户端断开、在线清零。
+    let (st, b) = http(env.admin, "POST", "/api/kick", &format!(r#"{{"uuid":"{uuid}"}}"#)).await;
+    assert_eq!(st, 200, "{}", String::from_utf8_lossy(&b));
+    assert_eq!(j(&b)["kicked"], true);
+    let mut gone = false;
+    for _ in 0..50 {
+        let (st, b) = http(env.admin, "GET", "/api/online", "").await;
+        assert_eq!(st, 200);
+        if j(&b)["count"] == 0 {
+            gone = true;
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
+    assert!(gone, "uuid kick must remove the player from online");
+    drop(s);
 
     env.drops.stop_global_tick();
     env.shutdown.store(true, Ordering::SeqCst);

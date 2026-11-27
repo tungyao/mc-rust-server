@@ -697,3 +697,65 @@
         assert_eq!(st2.survival_state(12), Some(target));
         let _ = std::fs::remove_dir_all(&dir);
     }
+
+    /// P51：UUID 主键 + 用户名兼容镜像；新连接即使 v4 不同也按同一 UUID 恢复 XP/背包。
+    #[test]
+    fn uuid_identity_persists_across_random_v4_rejoins() {
+        let dir = std::env::temp_dir().join(format!("mc-p51-drop-{}-uuid", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let seed = 77;
+        let uuid = mc_protocol::packets::stable_offline_uuid("P51Miner").to_string();
+        {
+            let st = DropState::new(dir.clone(), seed);
+            st.load_inventory_with_uuid(1, "P51Miner", &uuid);
+            st.with_inventory(1, |inv| {
+                inv.add_item(55, 7);
+                inv.add_experience(9);
+            });
+            st.save_inventory(1, "P51Miner");
+            st.unload_inventory(1, "P51Miner");
+        }
+        // 主键与兼容镜像同时存在，数据一致。
+        let (primary, p_new) = PlayerInventory::load_from_dir(&dir, &uuid, seed).unwrap();
+        let (mirror, m_new) = PlayerInventory::load_from_dir(&dir, "P51Miner", seed).unwrap();
+        assert!(!p_new && !m_new);
+        assert_eq!(primary.total_xp(), 9);
+        // 开局石头占槽 36，新增物品落在后续空槽；按物品查而非固定槽位。
+        let has_dirt = |inv: &mut PlayerInventory| (0..mc_world::inventory::SLOT_COUNT)
+            .any(|i| inv.get(i) == Some((55, 7)));
+        assert!((0..mc_world::inventory::SLOT_COUNT).any(|i| primary.get(i) == Some((55, 7))));
+        assert!((0..mc_world::inventory::SLOT_COUNT).any(|i| mirror.get(i) == Some((55, 7))));
+        // 新连接（模拟新的随机 v4）用同一稳定 UUID 读回，XP/背包不丢。
+        let st2 = DropState::new(dir.clone(), seed);
+        st2.load_inventory_with_uuid(2, "P51Miner", &uuid);
+        assert_eq!(st2.with_inventory(2, |inv| inv.total_xp()), Some(9));
+        assert_eq!(st2.with_inventory(2, has_dirt), Some(true));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// P51：UUID 主键缺档时仍可从旧用户名键兜底读取；两个用户互不串档。
+    #[test]
+    fn uuid_load_falls_back_to_legacy_username_key() {
+        let dir = std::env::temp_dir().join(format!("mc-p51-drop-{}-fallback", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let seed = 77;
+        // 旧档：只有 username 键，XP=13。
+        let mut legacy = PlayerInventory::new();
+        legacy.add_item(62, 4);
+        legacy.set_total_xp(13);
+        legacy.save_to_dir(&dir, "LegacyUser", seed).unwrap();
+        let st = DropState::new(dir.clone(), seed);
+        let uuid = mc_protocol::packets::stable_offline_uuid("LegacyUser").to_string();
+        st.load_inventory_with_uuid(3, "LegacyUser", &uuid);
+        assert_eq!(st.with_inventory(3, |inv| inv.total_xp()), Some(13));
+        assert_eq!(st.with_inventory(3, |inv| inv.get(36)), Some(Some((62, 4))));
+        // 另一用户同名不同：UUID 不同，读盘不会命中这个旧档。
+        let other = mc_protocol::packets::stable_offline_uuid("OtherUser").to_string();
+        assert_ne!(other, uuid);
+        st.load_inventory_with_uuid(4, "OtherUser", &other);
+        assert_eq!(st.with_inventory(4, |inv| inv.total_xp()), Some(0));
+        st.unload_inventory(3, "LegacyUser");
+        st.unload_inventory(4, "OtherUser");
+        assert!(PlayerInventory::save_path(&dir, &uuid, seed).exists(), "读旧档后刷盘应写 UUID 主键");
+        let _ = std::fs::remove_dir_all(&dir);
+    }

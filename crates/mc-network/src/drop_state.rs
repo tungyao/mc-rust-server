@@ -140,8 +140,10 @@ pub struct DropState {
     /// P39：构造时从 redb `timers` 一次读入、尚未被 `adopt_existing_*` 认领的记录。
     /// 树叶观察在构造时直接进 `pending_leaves`；其余三类由 `serve` 的认领入口消耗。
     restored_timers: Mutex<Vec<TimerRecord>>,
-    /// conn_id → 用户名（redb 的 players 表键；load/unload 时维护）。
+    /// conn_id → 用户名（redb 的 players 表兼容镜像键；load/unload 时维护）。
     player_tags: Mutex<HashMap<u64, String>>,
+    /// P51：conn_id → 稳定 UUID 字符串（存档主键；旧入口未绑定时退化成用户名键）。
+    player_uuids: Mutex<HashMap<u64, String>>,
     /// P47 工具附魔开关（时运/精准采集）：服务端权威的连接态，默认无附魔；
     /// 不解析 Slot data component（需注册表驱动解码，猜字节会错位 TCP 流），
     /// 由管理面板 `/api/tool-enchant` 设置，挖掘判定经 `drops_for_block_with_tool` 读取。
@@ -196,6 +198,7 @@ impl DropState {
             store,
             restored_timers: Mutex::new(Vec::new()),
             player_tags: Mutex::new(HashMap::new()),
+            player_uuids: Mutex::new(HashMap::new()),
             tool_enchants: Mutex::new(HashMap::new()),
             craft9: Mutex::new(HashMap::new()),
         };
@@ -1187,32 +1190,73 @@ impl DropState {
         self.player_tags.lock().unwrap_or_else(|p| p.into_inner())
     }
 
-    /// 把一份背包写到当前后端（redb 一个事务写 players + journal）。
-    fn persist_inventory(&self, user_tag: &str, inv: &PlayerInventory) {
-        if let Some(store) = &self.store {
-            if let Err(e) = store.save_player(user_tag, inv) {
-                warn!("redb player save failed tag={user_tag} seed={} ({e})", self.seed);
+    fn lock_uuids(&self) -> std::sync::MutexGuard<'_, HashMap<u64, String>> {
+        self.player_uuids.lock().unwrap_or_else(|p| p.into_inner())
+    }
+
+    /// P51：绑定本连接的稳定 UUID（Join 前调用）。未绑定时存档链路退化为旧用户名键。
+    pub fn set_player_identity(&self, conn_id: u64, uuid: &str) {
+        self.lock_uuids().insert(conn_id, uuid.to_string());
+    }
+
+    /// P51：带稳定 UUID 的 Join 读盘（生产入口）。
+    pub fn load_inventory_with_uuid(&self, conn_id: u64, user_tag: &str, uuid: &str) -> (usize, u8) {
+        self.set_player_identity(conn_id, uuid);
+        self.load_inventory(conn_id, user_tag)
+    }
+
+    /// 只读当前后端一个键；缺档/损坏都返回 None（调用方据此开局+石头）。
+    fn read_stored_player(&self, tag: &str) -> Option<PlayerInventory> {
+        match &self.store {
+            Some(store) => store.load_player(tag).unwrap_or_else(|e| {
+                warn!("redb player load failed tag={tag} seed={} ({e})", self.seed);
+                None
+            }),
+            None => {
+                // 注意 load_from_dir 的缺文件是 Ok((new, true))，不是 Err；
+                // 必须按 is_new 判缺档，否则会误把空背包当命中（丢兜底/开局石头）。
+                let (inv, is_new) =
+                    PlayerInventory::load_from_dir(&self.save_dir, tag, self.seed)
+                        .unwrap_or_else(|e| {
+                            warn!("player load failed tag={tag} seed={} ({e})", self.seed);
+                            (PlayerInventory::new(), true)
+                        });
+                if is_new { None } else { Some(inv) }
             }
-        } else if let Err(e) = inv.save_to_dir(&self.save_dir, user_tag, self.seed) {
-            warn!("player save failed tag={user_tag} seed={} ({e})", self.seed);
         }
     }
 
-    /// Join 时调入背包：读盘命中则用盘档，否则新背包 + 石头开局（后续替换为生存模式）。
-    pub fn load_inventory(&self, conn_id: u64, user_tag: &str) -> (usize, u8) {
-        let (mut inv, is_new) = match &self.store {
-            Some(store) => {
-                let found = store.load_player(user_tag).unwrap_or_else(|e| {
-                    warn!("redb player load failed tag={user_tag} seed={} ({e})", self.seed);
-                    None
-                });
-                // 无记录 = 旧档缺文件；已有记录即使背包空也不能再发石头。
-                let is_new = found.is_none();
-                (found.unwrap_or_default(), is_new)
-            }
-            None => PlayerInventory::load_from_dir(&self.save_dir, user_tag, self.seed)
-                .unwrap_or_else(|_| (PlayerInventory::new(), true)),
+    /// 把一份背包写到当前后端（redb 一个事务写 players + journal）。
+    /// P51：有稳定 UUID 时主键写 uuid，另写一份用户名键作**兼容镜像**
+    /// （旧工具/旧入口仍可按用户名读，迁移报告不会因此丢失数据）。
+    fn persist_inventory(&self, conn_id: u64, user_tag: &str, inv: &PlayerInventory) {
+        let uuid = self.lock_uuids().get(&conn_id).cloned();
+        let keys: Vec<&str> = match uuid.as_deref() {
+            Some(u) if u != user_tag => vec![u, user_tag],
+            _ => vec![user_tag],
         };
+        for tag in keys {
+            if let Some(store) = &self.store {
+                if let Err(e) = store.save_player(tag, inv) {
+                    warn!("redb player save failed tag={tag} seed={} ({e})", self.seed);
+                }
+            } else if let Err(e) = inv.save_to_dir(&self.save_dir, tag, self.seed) {
+                warn!("player save failed tag={tag} seed={} ({e})", self.seed);
+            }
+        }
+    }
+
+    /// Join 时调入背包：优先稳定 UUID 键，缺档时回退旧用户名键；
+    /// 都没有则新背包 + 石头开局。UUID 是主键，随机 v4 不再影响身份。
+    pub fn load_inventory(&self, conn_id: u64, user_tag: &str) -> (usize, u8) {
+        let uuid = self.lock_uuids().get(&conn_id).cloned();
+        let primary = uuid.as_deref().unwrap_or(user_tag);
+        let mut found = self.read_stored_player(primary);
+        if found.is_none() && primary != user_tag {
+            found = self.read_stored_player(user_tag);
+        }
+        let is_new = found.is_none();
+        let mut inv = found.unwrap_or_default();
         if is_new && inv.is_empty() {
             inv.slots_hotbar_starter();
         }
@@ -1233,15 +1277,16 @@ impl DropState {
         self.survival.lock().unwrap_or_else(|p| p.into_inner()).remove(&conn_id);
         if let Some(mut inv) = self.lock_invs().remove(&conn_id) {
             inv.stow_cursor();
-            self.persist_inventory(user_tag, &inv);
+            self.persist_inventory(conn_id, user_tag, &inv);
         }
+        self.lock_uuids().remove(&conn_id);
         self.lock_known().remove(&conn_id);
     }
 
     /// 背包刷盘（拾取/放置后调用）。
     pub fn save_inventory(&self, conn_id: u64, user_tag: &str) {
         if let Some(inv) = self.lock_invs().get(&conn_id) {
-            self.persist_inventory(user_tag, inv);
+            self.persist_inventory(conn_id, user_tag, inv);
         }
     }
 
@@ -1256,7 +1301,7 @@ impl DropState {
             let invs = self.lock_invs();
             for (conn_id, inv) in invs.iter() {
                 if let Some(tag) = tags.get(conn_id) {
-                    self.persist_inventory(tag, inv);
+                    self.persist_inventory(*conn_id, tag, inv);
                 }
             }
         }
