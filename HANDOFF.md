@@ -25,7 +25,8 @@
 > A3/A5/A6/A8 四项亦已合入（见 §5.37），**批次 1 全部完成**；
 > B6 工作台 3×3 真 GUI 已合入（`p55-workbench-gui` / `90323e9`，见 §5.38），
 > 并已用**官方 26.3 客户端 jar 逆向校准**（menu type=12、标题为完整 NBT tag、无附加字段）；
-> 仍默认关，真机复核后再开；
+> 仍默认关，真机复核后再开；完整 2×2/3×3 合成（`p56-full-crafting` / `3fba492`，见 §5.39）
+> 亦已合入（同样按 jar 真值对齐）；
 > 后台管理面板已用 Vue 3 + Naive UI 重写并**完全离线化**合入（`p34-admin-vue` / `53f1016`、
 > `p35-admin-offline` / `48e14bd`，见 §5.25）。
 
@@ -436,11 +437,11 @@ $natives = 'C:\Users\qwe\AppData\Local\Temp\mc263natives'
 
 ### 本地检查
 
-- `cargo test --workspace`：全部通过（2026-11-27 实跑 **575 passed / 0 failed**；
-  P18 当时 215，之后 P18.1–P55 又追加单测与 play_stream / play_actions / play_crops /
+- `cargo test --workspace`：全部通过（2026-11-27 实跑 **588 passed / 0 failed**；
+  P18 当时 215，之后 P18.1–P56 又追加单测与 play_stream / play_actions / play_crops /
   play_all_crops / timer_persist / play_survival / play_recipes / player_visibility /
   fluid / play_tools / socket_ecs_e2e / uuid_identity / gameplay_batch1_e2e /
-  infra_batch1_e2e / infra_admin_e2e / workbench_gui_e2e / admin_e2e 集成测试）。
+  infra_batch1_e2e / infra_admin_e2e / workbench_gui_e2e / p56_crafting_e2e / admin_e2e 集成测试）。
   已知 flake：`p27_bonemeal_advances_wheat_and_grows_sapling` 在并行负载下偶发失败一次
   （ticker/骨粉跟踪竞态，测试未改、隔离与复跑全过），多轮全量中出现过 2–3 次，继续观察。
 - redb 生产核心真机进程冒烟（2026-11-26）：临时 `server.toml` 设 `world_storage="redb"`、
@@ -1140,6 +1141,30 @@ $natives = 'C:\Users\qwe\AppData\Local\Temp\mc263natives'
       jar 未入库（41 MB，临时放 `/tmp/opencode/26.3-client.jar`）。
       **真机待验**：开启开关后右键工作台是否弹出真界面；若异常，抓包复核或调 `workbench_menu_id`。
 
+39. **完整 2×2 + 3×3 合成（已合入，`p56-full-crafting` / `3fba492`，jar 对齐）**：
+    用同一份官方 26.3 客户端 jar + CFR 反编译 `InventoryMenu`/`CraftingMenu`/
+    `AbstractCraftingMenu`/`ResultSlot`/`AbstractContainerMenu.doClick`/
+    `ClientboundContainerSet{Content,Slot}Packet`/`ContainerInput` 作为真值。
+    - **2×2 背包窗口 0**：结果槽 0、格 1–4、盔甲 5–8、背包 9–35、快捷栏 36–44、副手 45；
+      `ResultSlot.mayPlace()==false` 故结果槽永远不能手放。结果槽 PICKUP/SHIFT/SWAP 三种
+      权威点击已实现：SHIFT 循环"合成→入包→重算"连续执行，SWAP 只接受空快捷栏/副手；
+      格 1–4 的 SHIFT 按 `moveItemStackTo(9,45,false)` 搬进背包。
+    - **3×3 工作台窗口 1**：结果槽 0、格 1–9、背包 10–36、快捷栏 37–45；背包格 SHIFT 先按
+      `quickMoveStack` 同物合并/填空合成格，再做 main↔hotbar 兜底；结果槽由服务端按 9 格算出
+      并写入 `0x12` 全量同步的槽 0。0x14 单槽包体已按 `SetContainerSlot` codec 实现并有单测，
+      日常同步仍统一走 0x12（不改既有包流）；P47 的 craft9 会话 SHIFT 补料扩展保留。
+    - 两窗口 `state_id` 按 `AbstractContainerMenu.incrementStateId()` 在 `0x7fff` 回绕；
+      两网格共用 283 条配方表，未新增配方/物品 ID；`workbench_gui` 仍默认关、关闭零新包；
+      P51/P52/P53/P54 与 socket/ECS 线程模型未动。
+    - 旧 575 测试一字未改，合并后 **588 passed / 0 failed**；`check_budget.sh`、离线检查绿。
+      **未做（如实记录）**：配方书 —— `ServerboundPlaceRecipePacket.recipe` 依赖
+      `RecipeDisplayId.STREAM_CODEC`，`ClientboundRecipeBookAddPacket.Entry` 依赖
+      `RecipeDisplayEntry.STREAM_CODEC`（含 `RecipeDisplay`/`Ingredient`/`RecipeBookCategory`
+      注册表 codec），`RecipeBookSettings.STREAM_CODEC` 与 `GamePacketTypes` 分配的包 ID
+      均未在本仓实现，硬做等于猜字节，按铁律放弃；如需实现需先单独建任务补这些 codec。
+      另有既有简化保留：无序多重集配方匹配、`consume_grid` 按配方数量扣除（非 vanilla 逐格）；
+      真机待验清单 §9 合成组。
+
 ## 6. 关键文件
 
 ```
@@ -1173,6 +1198,7 @@ crates/mc-network/src/
   tests/infra_batch1_e2e.rs   P54 A3 双连接合并默认关/开、Ack 不入 hub e2e
   tests/infra_admin_e2e.rs    P54 时间/天气 API、工作台会话落盘恢复 e2e
   tests/workbench_gui_e2e.rs  P55 GUI 开关/触发/槽映射/点击权威同步/Join 不变 e2e
+  tests/p56_crafting_e2e.rs   P56 2×2 SHIFT/格SHIFT、3×3 背包补格与共享配方表 e2e
   chunk_view.rs              clamp_view_radius/view_chunk_count、per-connection 视距集合/去重/跨区块 add/remove 规划
   chunk_cache.rs             共享已编码 ChunkData 0x2E 包体缓存（Mutex+HashMap+FIFO，默认 1024；`bodies` rayon 并行批量；P17 `with_mutable` + `invalidate`）
   play_events.rs             net 线程 → ECS 的移动/KeepAlive/Disconnect/BlockEdit 事件（conn_id 实体键）
@@ -1186,7 +1212,9 @@ crates/mc-world/src/
   items.rs                   P18 物品实体纯逻辑（生成/合并/重力/拾取/despawn/视距过滤）
   inventory.rs               P18 背包（46 槽/手持/合并/扣减）+ `player-<user>-<seed>.dat` 存档 + P19 throw_held/throw_from_slot
   tools.rs                   P47 工具档位/矿门槛/时运/精准采集纯逻辑
-  crafting.rs                P40/P41/P47 2×2 283 条配方 + 3×3 `match_recipe_9`/`consume_grid9`
+  crafting.rs                P40/P41/P47/P56 283 条配方 + 2×2/3×3共享匹配引擎
+  inventory.rs               P18/P56 背包 2×2 合成（结果槽权威/SHIFT/SWAP/state id 回绕）
+  login_route/craft9.rs      P47/P54/P56 3×3 会话落盘 + GUI 组包 + SHIFT/结果权威同步
   survival.rs                P40 生存状态（health/food/saturation）与食物表纯逻辑
   store.rs                   P36/P38/P39 redb 存储（生产核心 + 计时）
   uuid_migration.rs          P51 用户名→稳定 UUID 存档迁移（幂等/回退/报告）

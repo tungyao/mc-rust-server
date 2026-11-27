@@ -1,13 +1,20 @@
 {
   "id": "p56-full-crafting",
   "title": "完整合成：2×2 背包 + 3×3 工作台（26.3 jar 真值对齐）",
-  "status": "doing",
+  "status": "done",
   "owner": "subagent-full-crafting",
   "priority": "p1",
   "deps": [],
   "branch": "",
   "created": "2026-11-27T07:45:08+00:00",
-  "updated": "2026-11-27T07:45:08+00:00",
-  "detail": "",
-  "files": []
+  "updated": "2026-11-27T08:06:54+00:00",
+  "detail": "jar逆向对齐2x2背包+3x3工作台:结果槽服务端权威/SHIFT连续合成/SWAP/state id回绕/背包补格;283配方共享;配方书未做(codec缺失);588 passed;merge见main",
+  "files": [
+    "crates/mc-world/src/{inventory",
+    "crafting}.rs",
+    "crates/mc-network/src/login_route/{mod",
+    "craft9",
+    "drop_sync}.rs",
+    "crates/mc-network/tests/p56_crafting_e2e.rs"
+  ]
 }
