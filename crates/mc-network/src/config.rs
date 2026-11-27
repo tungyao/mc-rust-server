@@ -7,7 +7,7 @@ use super::fluid_sync::FluidState;
 use super::play_events::PlayEvent;
 use super::socket_ecs::{AcceptedSocket, SocketMode};
 use crossbeam_channel::Sender;
-use mc_world::MutableWorld;
+use mc_world::{MutableWorld, world_time::WorldTimeState};
 use std::sync::{Arc, atomic::AtomicUsize};
 
 /// Status 回包默认配置；`NetConfig::default()` 的回退值。
@@ -67,6 +67,19 @@ pub struct NetConfig {
     pub settings_persist: bool,
     /// P53 A7：本地统计累积（库默认关，生产默认开；不发包）。
     pub stats: bool,
+    // --- P54 批次 1 基础设施：四项独立开关 ---
+    /// A3：广播限流/合并（**库/生产默认关**：改包序有风险，等真机 §5 双开包流确认）。
+    pub broadcast_throttle: bool,
+    /// A5：journal 按 seq 裁剪（默认开；裁剪只在后台/60s autosave，不占 50ms 关键路径）。
+    pub journal_trim: bool,
+    /// A5：journal 保留窗口（条数；默认 10000）。
+    pub journal_keep: u64,
+    /// A6：全局时间/天气状态（时间默认推进，天气广播默认关）。
+    pub world_time: Arc<WorldTimeState>,
+    /// A6：天气事件 0x27 广播（默认关且**当前不发包**：type 值真机未确认）。
+    pub weather_broadcast: bool,
+    /// A8：工作台会话跨重连落盘（默认开，仅在 redb 模式下真正写表）。
+    pub craft_session_persist: bool,
 }
 
 impl Default for NetConfig {
@@ -93,9 +106,18 @@ impl Default for NetConfig {
             hunger_detail: false,
             settings_persist: false,
             stats: false,
+            broadcast_throttle: false,
+            journal_trim: true,
+            journal_keep: DEFAULT_JOURNAL_KEEP,
+            world_time: Arc::new(WorldTimeState::default()),
+            weather_broadcast: false,
+            craft_session_persist: true,
         }
     }
 }
+
+/// A5 默认 journal 保留窗口（条）。
+pub const DEFAULT_JOURNAL_KEEP: u64 = 10_000;
 
 impl NetConfig {
     /// 旧三参构造保留（兼容旧调用点），view_distance/compression 取默认；
@@ -123,6 +145,12 @@ impl NetConfig {
             hunger_detail: false,
             settings_persist: false,
             stats: false,
+            broadcast_throttle: false,
+            journal_trim: true,
+            journal_keep: DEFAULT_JOURNAL_KEEP,
+            world_time: Arc::new(WorldTimeState::default()),
+            weather_broadcast: false,
+            craft_session_persist: true,
         }
     }
 
@@ -239,6 +267,41 @@ impl NetConfig {
         self.stats = enabled;
         self
     }
+
+    /// P54 A3：广播限流（默认关）。需要同时 `.with_hub(...)` 才真正生效。
+    pub fn with_broadcast_throttle(mut self, enabled: bool) -> Self {
+        self.broadcast_throttle = enabled;
+        self
+    }
+
+    /// P54 A5：journal 裁剪开关（默认开）。
+    pub fn with_journal_trim(mut self, enabled: bool) -> Self {
+        self.journal_trim = enabled;
+        self
+    }
+
+    pub fn with_journal_keep(mut self, keep: u64) -> Self {
+        self.journal_keep = keep;
+        self
+    }
+
+    /// P54 A6：注入全局时间/天气状态（默认新建一份；admin 与 net 共享同一 Arc）。
+    pub fn with_world_time(mut self, time: Arc<WorldTimeState>) -> Self {
+        self.world_time = time;
+        self
+    }
+
+    /// P54 A6：天气广播（默认关；0x27 type 值未真机确认，当前不发包）。
+    pub fn with_weather_broadcast(mut self, enabled: bool) -> Self {
+        self.weather_broadcast = enabled;
+        self
+    }
+
+    /// P54 A8：工作台会话落盘（默认开，仅 redb 模式有实际存档）。
+    pub fn with_craft_session_persist(mut self, enabled: bool) -> Self {
+        self.craft_session_persist = enabled;
+        self
+    }
 }
 
 #[cfg(test)]
@@ -305,6 +368,26 @@ mod tests {
         assert_eq!(XP_ATTRACT_RADIUS, 7.25);
         assert_eq!(XP_MERGE_MAX_ORBS, 16);
         assert_eq!(EXHAUSTION_THRESHOLD, 4.0);
+    }
+
+    /// P54：A3 默认关、A5/A6 时间/A8 默认开、天气广播默认关；四项独立可切。
+    #[test]
+    fn p54_feature_switches_have_independent_defaults() {
+        let base = NetConfig::default();
+        assert!(!base.broadcast_throttle, "A3 changes packet order → opt-in only");
+        assert!(base.journal_trim && base.craft_session_persist);
+        assert!(!base.weather_broadcast, "0x27 weather type is not confirmed");
+        assert_eq!(base.journal_keep, DEFAULT_JOURNAL_KEEP);
+        assert_eq!(base.world_time.tick(), mc_world::world_time::DEFAULT_DAY_TICK);
+        let cfg = base
+            .with_broadcast_throttle(true)
+            .with_journal_trim(false)
+            .with_journal_keep(7)
+            .with_weather_broadcast(true)
+            .with_craft_session_persist(false);
+        assert!(cfg.broadcast_throttle && !cfg.journal_trim && !cfg.craft_session_persist);
+        assert!(cfg.weather_broadcast);
+        assert_eq!(cfg.journal_keep, 7);
     }
 
     #[test]

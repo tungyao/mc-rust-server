@@ -33,6 +33,17 @@ pub const PLAY_CHUNK_BATCH_FINISHED_ID: i32 = super::packet_id("clientbound.play
 /// 切到 WaitingForPlayerChunk；缺失则永远停在“加载地形中…”。
 pub const PLAY_GAME_EVENT_ID: i32 = super::packet_id("clientbound.play", "game_event");
 pub const GAME_EVENT_LEVEL_CHUNKS_LOAD_START: u8 = 13;
+/// P54 A6 Set Time（Play CB `0x73` set_time）：ID 从 777 数据表查表（115=0x73）。
+/// 包体按 wiki 26.3 `Long + Bool`（world age 低 20 位 = tick，bool = 是否让客户端
+/// 继续推进时间）。**天气 game_event 0x27 的 type 值未抓包确认，绝不猜字节，
+/// 本文件只提供 set_time 编码器。**
+pub const PLAY_SET_TIME_ID: i32 = super::packet_id("clientbound.play", "set_time");
+
+/// Set Time 包体：i64 BE + bool u8（wiki Java Edition protocol/Packets#Set Time）。
+pub fn encode_set_time_body(tick: i64, advance_time: bool, out: &mut Vec<u8>) {
+    out.extend_from_slice(&tick.to_be_bytes());
+    out.push(if advance_time { 1 } else { 0 });
+}
 /// 原版 26.3 `worldgen/biome` 网络注册表中 `minecraft:plains` 的 ID
 /// （空 KnownPacks 抓包：67 项按 key 排序，plains=41）。区块 palette 用这个 ID。
 /// 以下 biome ID 均从仓库内 `registry_00.bin`（`minecraft:worldgen/biome`，67 项，
@@ -1087,6 +1098,16 @@ mod tests {
         let mut e = Vec::new();
         super::encode_light_data(&[], &[], &mut e);
         assert_eq!(e, vec![0, 0, 0, 0, 0, 0]);
+    }
+
+    #[test]
+    fn set_time_id_and_body_follow_777_layout() {
+        assert_eq!(PLAY_SET_TIME_ID, 0x73);
+        let mut body = Vec::new();
+        encode_set_time_body(13_000, true, &mut body);
+        let mut want = 13_000i64.to_be_bytes().to_vec();
+        want.push(1);
+        assert_eq!(body, want);
     }
 
     #[test]

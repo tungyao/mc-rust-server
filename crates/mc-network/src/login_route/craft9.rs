@@ -299,6 +299,45 @@ mod tests {
         let _ = std::fs::remove_dir_all(ds.save_dir());
     }
 
+    /// P54 A8：断开写 redb `block_entities`，重进 Join 恢复 10 槽快照（不改包流）。
+    #[test]
+    fn craft9_session_survives_disconnect_and_reconnect() {
+        use mc_world::store::{craft_container_key, WorldStore};
+        use std::sync::Arc;
+        let dir = std::env::temp_dir().join(format!(
+            "mc-craft9-persist-{}-{}",
+            std::process::id(),
+            mc_world::crafting::GRID9_SIZE
+        ));
+        let _ = std::fs::remove_dir_all(&dir);
+        let seed = 777;
+        let store = Arc::new(WorldStore::open(&dir, seed).unwrap());
+        let ds = DropState::with_store(dir.clone(), seed, Some(Arc::clone(&store)));
+        let uuid = "550e8400-e29b-41d4-a716-446655440000";
+        let pos = (12, 71, -8);
+        ds.load_inventory_with_uuid(7, "PersistCrafter", uuid);
+        ds.open_craft9(7, pos.0, pos.1, pos.2);
+        ds.with_craft9(7, |s| s.grid[0] = Some((42, 9)));
+        ds.unload_inventory(7, "PersistCrafter");
+        assert!(ds.craft9_session(7).is_none());
+
+        let key = craft_container_key(uuid, pos);
+        let snap = store.load_craft_snapshot(&key).unwrap().unwrap();
+        assert_eq!(snap.owner, uuid);
+        assert!(snap.last_saved > 0);
+        assert_eq!(snap.grid[1], Some((42, 9)));
+
+        // 新连接 Join 恢复会话（无 open_screen/0x12 补充包，只在内存里恢复）。
+        ds.load_inventory_with_uuid(8, "PersistCrafter", uuid);
+        let restored = ds.craft9_session(8).unwrap();
+        assert_eq!((restored.x, restored.y, restored.z), pos);
+        assert_eq!(restored.grid[0], Some((42, 9)));
+        assert_eq!(ds.craft9_persisted_info(uuid).0, true);
+        assert!(ds.clear_craft9(8, uuid));
+        assert_eq!(ds.craft9_persisted_info(uuid).0, false);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
     #[test]
     fn non_workbench_clicks_leave_session_untouched() {
         let ds = state();

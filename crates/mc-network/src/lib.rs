@@ -24,7 +24,8 @@ pub use chunk_view::{
     clamp_view_radius, view_chunk_count, ChunkView, ChunkViewUpdate, MAX_VIEW_RADIUS,
     MIN_VIEW_RADIUS, PLAY_VIEW_CHUNK_COUNT, PLAY_VIEW_RADIUS,
 };
-pub use config::{NetConfig, STATUS_MAX_PLAYERS, STATUS_MOTD};
+pub use config::{DEFAULT_JOURNAL_KEEP, NetConfig, STATUS_MAX_PLAYERS, STATUS_MOTD};
+pub use mc_world::world_time::{WorldTimeState, Weather as WorldWeather, TICKS_PER_DAY};
 pub use drop_state::{
     enchant_code, gamemode_code, stat_name, DropState, FIRST_DROP_ENTITY_ID, PLAYER_ENTITY_ID,
     STARTER_STONE_COUNT,
@@ -72,6 +73,12 @@ pub enum NetError {
 /// 相关回归均为服务端状态级验证；真机手感 T1–T13 仍需人工确认。
 pub async fn serve(listener: TcpListener, tx: Sender<NewConnection>, config: NetConfig) -> Result<(), NetError> {
     info!("listening on {:?}", listener.local_addr()?);
+    // P54 A3：启动期锁定广播限流开关（默认关，改包序风险待真机确认）。
+    if let Some(hub) = &config.hub {
+        hub.set_throttle(config.broadcast_throttle);
+    }
+    // P54 A6：唯一物理 ticker 同时推进全局时间/天气；天气广播默认关且不猜 0x27 type。
+    config.world_time.set_weather_broadcast(config.weather_broadcast);
     // P18 掉落物理：全服唯一 ticker 在这里启动一次（50ms）。各连接的 play_loop
     // 只做拾取/视距同步，绝不调用 ItemEntities::tick()，否则 N 连接 = N 倍速物理。
     // 独立 std::thread，不依赖 tokio runtime；DropState::new 在单测里依然无副作用。
@@ -83,6 +90,8 @@ pub async fn serve(listener: TcpListener, tx: Sender<NewConnection>, config: Net
             config.settings_persist,
             config.stats,
         );
+        // P54 A8：会话落盘开关（默认开；legacy 无 store 时为空操作）。
+        drops.set_craft_session_persist(config.craft_session_persist);
         // P22 生长广播/缓存失效：hub 与 cache 齐备时注入 DropState，生长变更才能
         // fan-out 到视距内连接并使 chunk 缓存失效；缺谁都不影响落子本身。
         if let Some(hub) = &config.hub {
@@ -91,6 +100,8 @@ pub async fn serve(listener: TcpListener, tx: Sender<NewConnection>, config: Net
         if let Some(cache) = &config.chunk_cache {
             drops.set_cache(Arc::clone(cache));
         }
+        // P54 A6：时间/天气挂同一个 50ms ticker，绝不随连接数倍增。
+        drops.set_world_time(Arc::clone(&config.world_time));
         // P22：重启后把存量小麦重新纳入生长（内存跟踪丢失，override 还在）。
         drops.adopt_existing_crops(world);
         // P26：存量树苗同口径重计时认领。

@@ -45,6 +45,10 @@ const TIMERS: TableDefinition<&[u8], &[u8]> = TableDefinition::new("timers");
 /// P53 A7：本地统计表（无客户端包）。key = `uuid|stat_id|day_bucket`，value = u64；
 /// 同时按用户名写兼容镜像键（与 players 表同口径），旧库缺表视为空。
 const STATS: TableDefinition<&str, u64> = TableDefinition::new("stats");
+/// P54 A8：工作台会话快照表（逻辑容器 id → 10 槽快照 + owner/last_saved）。
+/// key = `craft9|<uuid>|<x>,<y>,<z>`；旧库缺表按空处理，不递增 SCHEMA_VERSION
+/// （与 P53 `stats` 表同样只增不删，v4 存档/stats 布局逐字节不变）。
+const BLOCK_ENTITIES: TableDefinition<&str, &[u8]> = TableDefinition::new("block_entities");
 
 /// stat_id 是本服内部口径（不占用客户端 stat 注册表，也不发包）。
 pub mod stat_id {
@@ -58,6 +62,9 @@ const META_SEED: &str = "seed";
 const META_SEQ: &str = "journal_seq";
 const META_TICK: &str = "tick_offset";
 const META_GENERATOR: &str = "generator";
+/// P54 A6：全局时间/天气（缺省 = 1000 tick / 晴）。
+const META_WORLD_TIME: &str = "world_time";
+const META_WEATHER: &str = "weather";
 
 /// 日志操作码（与 `Op` 一一对应，落盘 u8）。
 pub mod op_code {
@@ -153,6 +160,9 @@ pub struct TimerRecord {
     /// 作物规格 ID（未来按 `CropSpec` 查表；原型直接存编号）。
     pub spec: u8,
 }
+
+mod p54;
+pub use p54::{craft_container_key, CraftSnapshot};
 
 /// 一条待刷盘的方块编辑（内存热层 → redb 的桥）。
 ///
@@ -540,6 +550,7 @@ impl WorldStore {
             let _ = tx.open_table(PLAYERS)?;
             let _ = tx.open_table(TIMERS)?;
             let _ = tx.open_table(STATS)?;
+            let _ = tx.open_table(BLOCK_ENTITIES)?;
             let v = SCHEMA_VERSION.to_be_bytes();
             meta_put(&tx, META_SCHEMA, v.as_slice())?;
             let s = seed.to_be_bytes();
@@ -1748,6 +1759,74 @@ mod tests {
         assert_eq!(s.generator_version().unwrap(), 1);
         s.ensure_generator_version(1).unwrap();
         assert!(meta_str_read(&s.db, META_GENERATOR).unwrap().unwrap().contains("worldgen=1"));
+        cleanup(&dir);
+    }
+
+    /// P54 A5：journal 按 seq 保留窗口；未确认 blocks 落盘时必须拒绝裁剪。
+    #[test]
+    fn journal_trim_keeps_recent_window_and_requires_flushed_blocks() {
+        let dir = tmp("journal-trim");
+        let seed = 911;
+        let s = WorldStore::open(&dir, seed).unwrap();
+        for i in 0..10 {
+            s.set_block(i, 100, i, STONE_BLOCK_ID).unwrap();
+        }
+        assert_eq!(s.journal_stats().unwrap().0, 10);
+        assert!(s.trim_journal(4, false).is_err(), "must not trim before blocks are flushed");
+        let removed = s.trim_journal(4, true).unwrap();
+        assert_eq!(removed, 6);
+        let (seq, count, oldest, _bytes) = s.journal_stats().unwrap();
+        assert_eq!(seq, 10, "seq is monotonic across trims");
+        assert_eq!(count, 4);
+        assert_eq!(oldest, 6);
+        assert_eq!(s.replay().unwrap().len(), 4);
+        assert_eq!(s.block(9, 100, 9).unwrap(), Some(STONE_BLOCK_ID), "retained edits still replayable");
+        drop(s);
+        let reopened = WorldStore::open(&dir, seed).unwrap();
+        assert_eq!(reopened.journal_stats().unwrap().1, 4);
+        cleanup(&dir);
+    }
+
+    /// P54 A6：时间/天气写入 meta，缺省回退由 WorldTimeState 处理。
+    #[test]
+    fn world_time_and_weather_persist_in_meta() {
+        let dir = tmp("world-time-meta");
+        let seed = 912;
+        let s = WorldStore::open(&dir, seed).unwrap();
+        assert_eq!(s.world_time().unwrap(), None);
+        assert_eq!(s.weather().unwrap(), None);
+        s.set_world_time(13_000).unwrap();
+        s.set_weather(2).unwrap();
+        drop(s);
+        let reopened = WorldStore::open(&dir, seed).unwrap();
+        assert_eq!(reopened.world_time().unwrap(), Some(13_000));
+        assert_eq!(reopened.weather().unwrap(), Some(2));
+        cleanup(&dir);
+    }
+
+    /// P54 A8：工作台快照在关闭/重开后保持 10 槽内容与 owner/last_saved。
+    #[test]
+    fn craft_snapshot_survives_reopen() {
+        let dir = tmp("craft-snapshot");
+        let seed = 913;
+        let owner = "550e8400-e29b-41d4-a716-446655440000";
+        let pos = (5, 70, 8);
+        let key = craft_container_key(owner, pos);
+        let mut grid = [None; 10];
+        grid[1] = Some((42, 9));
+        grid[9] = Some((7, -3));
+        let snap = CraftSnapshot { owner: owner.into(), pos, last_saved: 1_700_000_000, grid };
+        {
+            let s = WorldStore::open(&dir, seed).unwrap();
+            s.save_craft_snapshot(&snap).unwrap();
+            assert_eq!(s.craft_snapshots().unwrap().len(), 1);
+        }
+        let s = WorldStore::open(&dir, seed).unwrap();
+        assert_eq!(s.load_craft_snapshot(&key).unwrap(), Some(snap));
+        assert!(s.delete_craft_snapshot(&key).unwrap());
+        assert!(!s.delete_craft_snapshot(&key).unwrap());
+        assert!(s.craft_snapshots().unwrap().is_empty());
+        drop(s);
         cleanup(&dir);
     }
 }

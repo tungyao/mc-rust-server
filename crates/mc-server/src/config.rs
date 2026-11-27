@@ -108,11 +108,24 @@ pub struct FeatureToggles {
     pub hunger_detail: bool,
     pub settings_persist: bool,
     pub stats: bool,
+    /// P54 A3：默认关（改包序有风险，等真机双开包流确认）。
+    pub broadcast_throttle: bool,
+    /// P54 A5：默认开。
+    pub journal_trim: bool,
+    pub journal_keep: u64,
+    /// P54 A6：时间默认推进；天气广播默认关（0x27 type 未确认，当前不发包）。
+    pub weather_broadcast: bool,
+    /// P54 A8：默认开。
+    pub craft_session_persist: bool,
 }
 
 impl Default for FeatureToggles {
     fn default() -> Self {
-        Self { xp_merge: true, hunger_detail: true, settings_persist: true, stats: true }
+        Self {
+            xp_merge: true, hunger_detail: true, settings_persist: true, stats: true,
+            broadcast_throttle: false, journal_trim: true, journal_keep: 10_000,
+            weather_broadcast: false, craft_session_persist: true,
+        }
     }
 }
 
@@ -141,7 +154,31 @@ pub fn load_feature_toggles(path: impl AsRef<Path>) -> FeatureToggles {
         hunger_detail: load_bool_key(path, "hunger_detail", true, "P53 A2: sprint/jump/swim exhaustion (default true)"),
         settings_persist: load_bool_key(path, "settings_persist", true, "P53 A4: persist gamemode/tool_enchant across reconnect (default true)"),
         stats: load_bool_key(path, "stats", true, "P53 A7: local stats accumulation (default true, no packets)"),
+        // P54：A3 默认关；A5/A6 时间/A8 默认开；天气广播默认关。
+        broadcast_throttle: load_bool_key(path, "broadcast_throttle", false, "P54 A3: broadcast merge/throttle (default false, packet order risk)"),
+        journal_trim: load_bool_key(path, "journal_trim", true, "P54 A5: journal seq window trim (default true)"),
+        journal_keep: load_u64_key(path, "journal_keep", 10_000, "P54 A5: journal retained record count"),
+        weather_broadcast: load_bool_key(path, "weather_broadcast", false, "P54 A6: weather game_event (default false; 0x27 type unconfirmed, not sent yet)"),
+        craft_session_persist: load_bool_key(path, "craft_session_persist", true, "P54 A8: workbench session redb persistence (default true)"),
     }
+}
+
+/// 数值 toml 键：缺键补默认值；非法值警告后回退默认。
+fn load_u64_key(path: &Path, key: &str, default: u64, comment: &str) -> u64 {
+    let Ok(text) = std::fs::read_to_string(path) else { return default };
+    let value = toml::from_str::<toml::Value>(&text)
+        .ok()
+        .and_then(|v| v.get(key).and_then(|x| x.as_integer()))
+        .and_then(|n| u64::try_from(n).ok());
+    if value.is_none() && !text.contains(key) {
+        let mut updated = text;
+        if !updated.ends_with('\n') {
+            updated.push('\n');
+        }
+        updated.push_str(&format!("\n# {comment}\n{key} = {default}\n"));
+        let _ = std::fs::write(path, updated);
+    }
+    value.unwrap_or(default)
 }
 
 /// 生成器版本默认值：v1=legacy 永久冻结；v2 只对新 seed / 显式配置启用。

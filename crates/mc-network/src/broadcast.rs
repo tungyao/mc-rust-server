@@ -24,8 +24,9 @@
 //! `PlayOptions::player_visibility` 控制，旧入口默认关闭（旧包流逐字节不变）。
 
 use mc_core::ChunkPos;
-use std::collections::{HashMap, HashSet};
-use std::sync::RwLock;
+use std::collections::{HashMap, HashSet, VecDeque};
+use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
+use std::sync::{Mutex, RwLock};
 use std::time::Instant;
 
 /// 排队给其它连接 `play_loop` 代写的原始 S2C 包（包 ID + 未压缩包体；
@@ -63,8 +64,21 @@ impl GameMode {
     }
 }
 
+/// P54 A3：合并队列的键 = (chunk_x, chunk_z, section_y, x, y, z)；
+/// 只在同 chunk 同 section 的**同一格**上合并 `BlockUpdate`，绝不合 Ack/其它包。
+type MergeKey = (i32, i32, i16, i32, i32, i32);
+
+#[derive(Default)]
+struct PendingOutbox {
+    queue: VecDeque<QueuedPacket>,
+    /// MergeKey → queue 下标（替换后包序位置保持不变）。
+    index: HashMap<MergeKey, usize>,
+}
+
 struct HubConn {
     tx: crossbeam_channel::Sender<QueuedPacket>,
+    /// P54 A3：默认空；只有 `throttle` 打开时 `broadcast` 才写这里。
+    pending: Mutex<PendingOutbox>,
     radius: i32,
     gamemode: GameMode,
     pos: (f64, f64, f64),
@@ -100,6 +114,9 @@ pub struct OnlineEntry {
 /// 这就是计划 §6.4 的备选"admin 指令通道"：不断线猜包、不手写踢出包体。
 pub const ADMIN_KICK_PACKET_ID: i32 = -1;
 
+/// P54 A3：每连接合并队列默认上限（纯服务端背压参数）。
+pub const DEFAULT_BROADCAST_MAX_QUEUE: usize = 256;
+
 /// P43：一个连接对外的玩家实体快照（位置/朝向随 C2S 移动包更新）。
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct PlayerEntityState {
@@ -114,6 +131,13 @@ pub struct PlayerEntityState {
 /// 全服共享的广播 hub（`Arc` 进 `NetConfig`/`PlayOptions`）。
 pub struct BroadcastHub {
     conns: RwLock<HashMap<u64, HubConn>>,
+    /// P54 A3：限流开关（默认关，改包序有风险，等真机 §5 双开包流确认）。
+    throttle: AtomicBool,
+    /// 每个接收连接最多排多少个包；满后**新包**丢弃（BlockUpdate 合并不占新槽）。
+    max_queue: AtomicUsize,
+    queued: AtomicU64,
+    dropped: AtomicU64,
+    merged_blocks: AtomicU64,
     /// P43：`owner_conn_id → 该玩家对外的实体快照`；只在开关打开时登记。
     players: RwLock<HashMap<u64, PlayerEntityState>>,
     /// P43：`viewer_conn_id → 已发给该视者的玩家实体 id`（独立的 known 集，
@@ -131,10 +155,18 @@ impl BroadcastHub {
     pub fn new() -> Self {
         Self {
             conns: RwLock::new(HashMap::new()),
+            throttle: AtomicBool::new(false),
+            max_queue: AtomicUsize::new(DEFAULT_BROADCAST_MAX_QUEUE),
+            queued: AtomicU64::new(0),
+            dropped: AtomicU64::new(0),
+            merged_blocks: AtomicU64::new(0),
             players: RwLock::new(HashMap::new()),
             player_known: RwLock::new(HashMap::new()),
         }
     }
+
+    /// P54 A3：默认合并队列上限（纯服务端参数，可由 admin 调整）。
+    pub const DEFAULT_MAX_QUEUE: usize = 256;
 
     /// 当前在线连接数（测试/诊断用）。
     pub fn len(&self) -> usize {
@@ -195,6 +227,7 @@ impl BroadcastHub {
                 conn_id,
                 HubConn {
                     tx,
+                    pending: Mutex::new(PendingOutbox::default()),
                     radius,
                     pos,
                     gamemode: GameMode::Survival,
@@ -386,7 +419,26 @@ impl BroadcastHub {
     }
 
     /// 向事件区块视距内的其它连接各排队一份（`except` 本人不收；`Ack` 不要走这里）。
+    ///
+    /// P54 A3：默认关——逐包走原 crossbeam 队列，包流逐字节不变；开启后改为
+    /// per-conn `VecDeque`，同 tick 内同 chunk 同 section 的 `BlockUpdate` 合并
+    /// 为最后一格状态，其它包（尤其 Ack，虽然 Ack 本来就不进 hub）原样排队。
+    /// `section_blocks_update 0x56` 的 wire format 未对照确认，**不使用**；只合并 0x08。
     pub fn broadcast(&self, except: u64, chunk: ChunkPos, id: i32, body: &[u8]) {
+        if self.throttle_enabled() {
+            let targets: Vec<u64> = {
+                let guard = self.conns.read().unwrap_or_else(|p| p.into_inner());
+                guard
+                    .iter()
+                    .filter(|(cid, c)| **cid != except && chunk_in_view(chunk_of_pos(c.pos), c.radius, chunk))
+                    .map(|(cid, _)| *cid)
+                    .collect()
+            };
+            for cid in targets {
+                self.queue_throttled(cid, QueuedPacket { id, body: body.to_vec() });
+            }
+            return;
+        }
         // 读锁内只拷贝发送端，丢锁后再发送：判定线程永不阻塞，锁粒度最小。
         let targets: Vec<crossbeam_channel::Sender<QueuedPacket>> = {
             let guard = self.conns.read().unwrap_or_else(|p| p.into_inner());
@@ -399,6 +451,97 @@ impl BroadcastHub {
         for tx in targets {
             let _ = tx.try_send(QueuedPacket { id, body: body.to_vec() });
         }
+    }
+
+    // --- P54 A3：广播限流（默认关；纯服务端参数） ---
+
+    pub fn throttle_enabled(&self) -> bool {
+        self.throttle.load(Ordering::Relaxed)
+    }
+
+    pub fn set_throttle(&self, enabled: bool) {
+        self.throttle.store(enabled, Ordering::Relaxed);
+        if !enabled {
+            // 关掉时把残留合并队列放回原通道，避免吞包；顺序保持排队顺序。
+            let ids = self.conn_ids();
+            for cid in ids {
+                for pkt in self.drain_throttled(cid) {
+                    let _ = self.unicast(cid, pkt.id, pkt.body);
+                }
+            }
+        }
+    }
+
+    pub fn max_queue(&self) -> usize {
+        self.max_queue.load(Ordering::Relaxed)
+    }
+
+    /// 合并队列上限（0 视为 1）。设置后不会丢已排队的包。
+    pub fn set_max_queue(&self, n: usize) {
+        self.max_queue.store(n.max(1), Ordering::Relaxed);
+    }
+
+    pub fn throttle_stats(&self) -> (u64, u64, u64) {
+        (
+            self.queued.load(Ordering::Relaxed),
+            self.dropped.load(Ordering::Relaxed),
+            self.merged_blocks.load(Ordering::Relaxed),
+        )
+    }
+
+    /// 给单个接收连接排一个（可能合并的）包；只处理 `BlockUpdate`。
+    fn queue_throttled(&self, conn_id: u64, pkt: QueuedPacket) {
+        let key = if pkt.id == mc_protocol::packets::PLAY_BLOCK_UPDATE_S2C_ID {
+            mc_protocol::packets::BlockUpdate::decode_body(&pkt.body).ok().map(|(u, _)| {
+                (
+                    mc_world::chunk_of_block(u.x, u.z).0,
+                    mc_world::chunk_of_block(u.x, u.z).1,
+                    ((u.y - mc_world::MIN_Y) / 16) as i16,
+                    u.x, u.y, u.z,
+                )
+            })
+        } else {
+            None
+        };
+        // 单把读锁只用于定位连接；发包/排空绝不持它（计划 §6.2）。
+        let guard = self.conns.read().unwrap_or_else(|p| p.into_inner());
+        let Some(conn) = guard.get(&conn_id) else { return };
+        let mut q = conn.pending.lock().unwrap_or_else(|p| p.into_inner());
+        if let Some(key) = key {
+            if let Some(&idx) = q.index.get(&key) {
+                // 同 section 同格只保留最后一次状态；不新增队列项。
+                if let Some(slot) = q.queue.get_mut(idx) {
+                    *slot = pkt;
+                }
+                self.merged_blocks.fetch_add(1, Ordering::Relaxed);
+                return;
+            }
+        }
+        if q.queue.len() >= self.max_queue() {
+            self.dropped.fetch_add(1, Ordering::Relaxed);
+            return;
+        }
+        let next_index = q.queue.len();
+        if let Some(key) = key {
+            q.index.insert(key, next_index);
+        }
+        q.queue.push_back(pkt);
+        self.queued.fetch_add(1, Ordering::Relaxed);
+    }
+
+    /// 由 `play_loop` 的 50ms 节拍排空合并队列（视距 flush 已先于本函数调用）。
+    pub fn drain_throttled(&self, conn_id: u64) -> Vec<QueuedPacket> {
+        let guard = self.conns.read().unwrap_or_else(|p| p.into_inner());
+        let Some(conn) = guard.get(&conn_id) else { return Vec::new() };
+        let mut q = conn.pending.lock().unwrap_or_else(|p| p.into_inner());
+        let out: Vec<QueuedPacket> = q.queue.drain(..).collect();
+        q.index.clear();
+        drop(q);
+        drop(guard);
+        if !out.is_empty() {
+            self.queued.fetch_sub(out.len() as u64, Ordering::Relaxed);
+        }
+        out
     }
 }
 
@@ -614,5 +757,66 @@ mod tests {
         assert!(!hub.is_player_known(2, a.entity_id));
         assert!(hub.player_known_ids(1).is_empty());
         assert!(hub.player_states().is_empty());
+    }
+
+    fn block_update_body(x: i32, y: i32, z: i32, id: i32) -> Vec<u8> {
+        let mut body = Vec::new();
+        mc_protocol::packets::BlockUpdate { x, y, z, block_id: id }.encode_body(&mut body);
+        body
+    }
+
+    #[test]
+    fn throttle_defaults_off_and_leaves_packet_stream_unchanged() {
+        let (hub, _arx, brx) = hub_with((0.0, 64.0, 0.0), (1.0, 64.0, 0.0));
+        assert!(!hub.throttle_enabled());
+        assert_eq!(hub.max_queue(), DEFAULT_BROADCAST_MAX_QUEUE);
+        assert_eq!(hub.throttle_stats(), (0, 0, 0));
+        hub.broadcast(1, ChunkPos(0, 0), mc_protocol::packets::PLAY_BLOCK_UPDATE_S2C_ID, &[1, 2]);
+        let got = brx.try_recv().unwrap();
+        assert_eq!((got.id, got.body), (mc_protocol::packets::PLAY_BLOCK_UPDATE_S2C_ID, vec![1, 2]));
+        assert!(hub.drain_throttled(2).is_empty(), "no hidden queue when disabled");
+    }
+
+    #[test]
+    fn throttle_merges_only_block_update_and_acks_stay_direct() {
+        let (hub, arx, brx) = hub_with((0.0, 64.0, 0.0), (1.0, 64.0, 0.0));
+        hub.set_throttle(true);
+        let chunk = ChunkPos(0, 0);
+        let id = mc_protocol::packets::PLAY_BLOCK_UPDATE_S2C_ID;
+        hub.broadcast(1, chunk, id, &block_update_body(1, 70, 1, 1));
+        hub.broadcast(1, chunk, id, &block_update_body(2, 71, 1, 2));
+        hub.broadcast(1, chunk, id, &block_update_body(1, 70, 1, 9));
+        // 不同包（掉落 Spawn）不合并：排两项。
+        hub.broadcast(1, chunk, 0x01, &[7, 7]);
+        assert!(brx.try_recv().is_err(), "throttled packets wait for the 50ms drain");
+        let (queued, dropped, merged) = hub.throttle_stats();
+        assert_eq!((queued, dropped, merged), (3, 0, 1), "only same-position updates merge");
+        // Ack 永远直连本人，不进 hub 合并队列（P52 红线）。
+        assert!(hub.unicast(1, mc_protocol::packets::PLAY_BLOCK_CHANGED_ACK_S2C_ID, vec![3]));
+        let ack = arx.try_recv().unwrap();
+        assert_eq!(ack.id, mc_protocol::packets::PLAY_BLOCK_CHANGED_ACK_S2C_ID);
+        assert_eq!(hub.throttle_stats().2, 1, "Ack must never be merged");
+        let drained = hub.drain_throttled(2);
+        assert_eq!(drained.len(), 3);
+        assert_eq!(drained[0].id, id);
+        assert_eq!(drained[0].body, block_update_body(1, 70, 1, 9), "last write wins");
+        assert_eq!(drained[1].id, id);
+        assert_eq!(drained[1].body, block_update_body(2, 71, 1, 2), "other position stays");
+        assert_eq!(drained[2].id, 0x01);
+        assert_eq!(hub.throttle_stats().0, 0);
+        assert!(hub.drain_throttled(2).is_empty());
+        hub.set_throttle(false);
+    }
+
+    #[test]
+    fn throttle_drops_new_packets_at_queue_limit() {
+        let (hub, _arx, _brx) = hub_with((0.0, 64.0, 0.0), (1.0, 64.0, 0.0));
+        hub.set_throttle(true);
+        hub.set_max_queue(2);
+        hub.broadcast(1, ChunkPos(0, 0), 0x01, &[1]);
+        hub.broadcast(1, ChunkPos(0, 0), 0x01, &[2]);
+        hub.broadcast(1, ChunkPos(0, 0), 0x01, &[3]);
+        assert_eq!(hub.throttle_stats(), (2, 1, 0));
+        assert_eq!(hub.drain_throttled(2).len(), 2);
     }
 }

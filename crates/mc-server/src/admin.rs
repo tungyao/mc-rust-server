@@ -20,8 +20,8 @@ use std::io::{Read, Write};
 use std::net::{TcpListener, TcpStream};
 use std::path::PathBuf;
 use std::sync::{
-    Arc,
-    atomic::{AtomicBool, Ordering},
+    Arc, OnceLock,
+    atomic::{AtomicBool, AtomicU64, Ordering},
 };
 use std::time::Duration;
 
@@ -40,6 +40,47 @@ pub fn set_socket_mode(mode: mc_network::SocketMode) {
 
 fn socket_mode() -> mc_network::SocketMode {
     SOCKET_MODE.get().copied().unwrap_or(mc_network::SocketMode::Net)
+}
+
+/// P54 后台联动：四项能力共享的启动期注入（与 P52 `SOCKET_MODE` 同口径，
+/// 不给 `AdminState` 加字段，避免破坏穷举字面量的 550 个旧测试）。
+#[derive(Debug, Clone)]
+pub struct AdminExtras {
+    pub store: Option<Arc<mc_world::store::WorldStore>>,
+    pub world_time: Arc<mc_world::world_time::WorldTimeState>,
+    pub journal_trim: bool,
+    pub journal_keep: Arc<AtomicU64>,
+    pub craft_persist: bool,
+}
+
+static ADMIN_EXTRAS: OnceLock<AdminExtras> = OnceLock::new();
+
+/// main 在启动期调用一次；重复调用保留第一次（与 socket_mode 一致）。
+pub fn set_admin_extras(
+    store: Option<Arc<mc_world::store::WorldStore>>,
+    world_time: Arc<mc_world::world_time::WorldTimeState>,
+    journal_trim: bool,
+    journal_keep: u64,
+    craft_persist: bool,
+) {
+    let _ = ADMIN_EXTRAS.set(AdminExtras {
+        store,
+        world_time,
+        journal_trim,
+        journal_keep: Arc::new(AtomicU64::new(journal_keep)),
+        craft_persist,
+    });
+}
+
+/// 未注入时给出无 store/默认时间的只读兜底（旧 admin 单测零改动）。
+fn extras() -> AdminExtras {
+    ADMIN_EXTRAS.get().cloned().unwrap_or_else(|| AdminExtras {
+        store: None,
+        world_time: Arc::new(mc_world::world_time::WorldTimeState::default()),
+        journal_trim: false,
+        journal_keep: Arc::new(AtomicU64::new(mc_network::DEFAULT_JOURNAL_KEEP)),
+        craft_persist: false,
+    })
 }
 
 /// 管理线程共享状态（与游戏线程共享的 `Arc`，`main.rs` 组装）。
@@ -488,6 +529,12 @@ fn handle_online(state: &AdminState) -> AdminResponse {
 
 fn handle_world(state: &AdminState) -> AdminResponse {
     let (xp_merge, hunger_detail, settings_persist, stats) = state.drops.p53_features();
+    let ex = extras();
+    let (broadcast_queue, broadcast_dropped, merged_blocks) = state.hub.throttle_stats();
+    let (journal_seq, journal_count, oldest_kept, journal_bytes) = ex.store.as_ref()
+        .and_then(|s| s.journal_stats().ok())
+        .unwrap_or((0, 0, 0, 0));
+    let (world_tick, weather_code) = ex.world_time.snapshot();
     AdminResponse::json(
         200,
         serde_json::json!({
@@ -506,6 +553,22 @@ fn handle_world(state: &AdminState) -> AdminResponse {
                 "xp_merge": xp_merge, "hunger_detail": hunger_detail,
                 "settings_persist": settings_persist, "stats": stats,
             },
+            // P54 A3/A5/A6/A8：新增统计与开关展示（旧字段全部保留）。
+            "broadcast_queue": broadcast_queue,
+            "broadcast_dropped": broadcast_dropped,
+            "merged_blocks": merged_blocks,
+            "broadcast_throttle": state.hub.throttle_enabled(),
+            "broadcast_max_queue": state.hub.max_queue(),
+            "journal_seq": journal_seq,
+            "journal_bytes": journal_bytes,
+            "journal_kept": journal_count,
+            "oldest_kept": oldest_kept,
+            "journal_trim": ex.journal_trim,
+            "journal_keep": ex.journal_keep.load(Ordering::Relaxed),
+            "world_time": world_tick,
+            "weather": mc_world::world_time::Weather::from_code(weather_code).as_str(),
+            "weather_until": ex.world_time.weather_until(),
+            "craft_session_persist": ex.craft_persist,
         }),
     )
 }
@@ -687,13 +750,19 @@ fn handle_recipes() -> AdminResponse {
     )
 }
 
-/// P47 工作台会话快照（仅内存会话，断线即丢；无 block entity 存档 MVP）。
+/// P47 工作台会话快照（P54 A8：附落盘/owner/last_saved；无 0x06 包）。
 fn handle_craft9(state: &AdminState) -> AdminResponse {
+    let persist_enabled = state.drops.craft_session_persist() && extras().craft_persist;
     let sessions: Vec<serde_json::Value> = state
-        .drops
-        .craft9_sessions()
+        .hub
+        .snapshot()
         .into_iter()
-        .map(|s| {
+        .filter_map(|e| {
+            state.drops.craft9_session(e.conn_id).map(|s| (e, s))
+        })
+        .map(|(entry, s)| {
+            let owner = if entry.uuid.is_empty() { entry.username.clone() } else { entry.uuid.clone() };
+            let (persisted, owner, last_saved) = state.drops.craft9_persisted_info(&owner);
             let grid: Vec<serde_json::Value> = s
                 .grid
                 .into_iter()
@@ -710,12 +779,18 @@ fn handle_craft9(state: &AdminState) -> AdminResponse {
                 })
                 .collect();
             serde_json::json!({
+                "conn_id": entry.conn_id,
                 "pos": [s.x, s.y, s.z],
                 "grid": grid,
+                "persisted": persisted,
+                "owner": owner,
+                "last_saved": last_saved,
             })
         })
         .collect();
-    AdminResponse::json(200, serde_json::json!({"ok": true, "sessions": sessions}))
+    AdminResponse::json(200, serde_json::json!({
+        "ok": true, "sessions": sessions, "persist_enabled": persist_enabled,
+    }))
 }
 
 // --- P53 A1/A2/A7：经验发放 / 生存调试 / 本地统计 ---
@@ -831,6 +906,197 @@ fn handle_stats(state: &AdminState, query: &str) -> AdminResponse {
     }))
 }
 
+// --- P54 批次 1 基础设施：广播限流 / journal 运维 / 时间天气 / 会话落盘 ---
+
+#[derive(Debug, Deserialize)]
+struct ThrottleReq {
+    enabled: bool,
+    max_queue: Option<usize>,
+}
+
+fn handle_broadcast_throttle(state: &AdminState, body: &[u8]) -> AdminResponse {
+    let req: ThrottleReq = match serde_json::from_slice(body) {
+        Ok(r) => r,
+        Err(_) => return AdminResponse::err(400, "bad json"),
+    };
+    if let Some(max) = req.max_queue {
+        if !(1..=65_536).contains(&max) {
+            return AdminResponse::err(400, "max_queue must be 1..=65536");
+        }
+        state.hub.set_max_queue(max);
+    }
+    state.hub.set_throttle(req.enabled);
+    let (queued, dropped, merged) = state.hub.throttle_stats();
+    AdminResponse::json(200, serde_json::json!({
+        "ok": true, "enabled": state.hub.throttle_enabled(),
+        "max_queue": state.hub.max_queue(),
+        "broadcast_queue": queued, "broadcast_dropped": dropped, "merged_blocks": merged,
+        "note": "A3: default off; packet order changes, verify with two clients before enabling",
+    }))
+}
+
+#[derive(Debug, Deserialize)]
+struct TrimReq {
+    keep: Option<u64>,
+}
+
+fn handle_journal_trim(state: &AdminState, body: &[u8]) -> AdminResponse {
+    let ex = extras();
+    if !ex.journal_trim {
+        return AdminResponse::err(400, "journal_trim disabled in server.toml");
+    }
+    let Some(store) = ex.store.as_deref() else {
+        return AdminResponse::err(400, "journal trim requires redb storage");
+    };
+    let req: TrimReq = if body.is_empty() {
+        TrimReq { keep: None }
+    } else {
+        match serde_json::from_slice(body) {
+            Ok(r) => r,
+            Err(_) => return AdminResponse::err(400, "bad json"),
+        }
+    };
+    let keep = req.keep.unwrap_or_else(|| ex.journal_keep.load(Ordering::Relaxed)).max(1);
+    // 与 60s autosave 同语义：先把 blocks 落盘再裁剪，绝不占唯一 50ms ticker。
+    if state.mutable.dirty_len() > 0 {
+        if let Err(e) = state.mutable.flush_to_store(state.drops.tick_count()) {
+            return AdminResponse::err(500, format!("flush before trim failed: {e}"));
+        }
+    }
+    match store.trim_journal(keep, true) {
+        Ok(removed) => {
+            let (seq, kept, oldest, bytes) = store.journal_stats().unwrap_or((0, 0, 0, 0));
+            AdminResponse::json(200, serde_json::json!({
+                "ok": true, "removed": removed, "keep": keep,
+                "journal_seq": seq, "journal_kept": kept,
+                "oldest_kept": oldest, "journal_bytes": bytes,
+            }))
+        }
+        Err(e) => AdminResponse::err(500, format!("journal trim failed: {e}")),
+    }
+}
+
+#[derive(Debug, Deserialize)]
+struct TimeReq {
+    tick: Option<i64>,
+    preset: Option<String>,
+}
+
+fn handle_time_get() -> AdminResponse {
+    let time = extras().world_time;
+    let tick = time.tick();
+    AdminResponse::json(200, serde_json::json!({
+        "ok": true, "tick": tick, "day_time": tick % 24_000,
+        "is_day": (0..13_000).contains(&(tick % 24_000)),
+        "ticks_per_day": mc_world::world_time::TICKS_PER_DAY,
+        "note": "set_time 0x73 (Long+Bool) is verified; Join does NOT send time (packet stream frozen)",
+    }))
+}
+
+fn handle_time_post(state: &AdminState, body: &[u8]) -> AdminResponse {
+    let req: TimeReq = match serde_json::from_slice(body) {
+        Ok(r) => r,
+        Err(_) => return AdminResponse::err(400, "bad json"),
+    };
+    let tick = match (req.preset.as_deref(), req.tick) {
+        (Some("day"), _) => mc_world::world_time::DEFAULT_DAY_TICK,
+        (Some("night"), _) => mc_world::world_time::DEFAULT_NIGHT_TICK,
+        (Some(other), _) => return AdminResponse::err(400, format!("unknown time preset {other}")),
+        (None, Some(t)) if (0..mc_world::world_time::TICKS_PER_DAY).contains(&t) => t,
+        _ => return AdminResponse::err(400, "tick must be 0..24000 or preset day/night"),
+    };
+    let time = extras().world_time;
+    time.set_tick(tick);
+    if let Some(store) = extras().store.as_deref() {
+        if let Err(e) = store.set_world_time(tick) {
+            return AdminResponse::err(500, format!("time persist failed: {e}"));
+        }
+    }
+    // 管理员手动设置时间：给在线连接直发 set_time（不进 hub 合并队列、不改 Join 包序）。
+    let mut body = Vec::new();
+    mc_protocol::packets::encode_set_time_body(tick, true, &mut body);
+    let delivered: Vec<u64> = state.hub.conn_ids().into_iter()
+        .filter(|id| state.hub.unicast(*id, mc_protocol::packets::PLAY_SET_TIME_ID, body.clone()))
+        .collect();
+    AdminResponse::json(200, serde_json::json!({
+        "ok": true, "tick": time.tick(), "delivered": delivered,
+    }))
+}
+
+#[derive(Debug, Deserialize)]
+struct WeatherReq {
+    weather: String,
+    duration_ticks: Option<i64>,
+}
+
+fn handle_weather_get() -> AdminResponse {
+    let ex = extras();
+    AdminResponse::json(200, serde_json::json!({
+        "ok": true,
+        "weather": ex.world_time.weather().as_str(),
+        "weather_until": ex.world_time.weather_until(),
+        "weather_broadcast": ex.world_time.weather_broadcast(),
+        "note": "0x27 game_event weather type is NOT captured; server state only, no packet sent",
+    }))
+}
+
+fn handle_weather_post(_state: &AdminState, body: &[u8]) -> AdminResponse {
+    let req: WeatherReq = match serde_json::from_slice(body) {
+        Ok(r) => r,
+        Err(_) => return AdminResponse::err(400, "bad json"),
+    };
+    let weather = match mc_world::world_time::Weather::parse(&req.weather) {
+        Some(w) => w,
+        None => return AdminResponse::err(400, "weather must be clear|rain|thunder"),
+    };
+    if let Some(d) = req.duration_ticks {
+        if !(1..mc_world::world_time::TICKS_PER_DAY).contains(&d) {
+            return AdminResponse::err(400, "duration_ticks must be 1..24000");
+        }
+    }
+    let ex = extras();
+    ex.world_time.set_weather(weather, req.duration_ticks);
+    if let Some(store) = ex.store.as_deref() {
+        if let Err(e) = store.set_weather(weather.code()) {
+            return AdminResponse::err(500, format!("weather persist failed: {e}"));
+        }
+    }
+    AdminResponse::json(200, serde_json::json!({
+        "ok": true, "weather": weather.as_str(),
+        "weather_until": ex.world_time.weather_until(),
+        "note": "P54 A6: server state + admin display only; 0x27 weather type unconfirmed → no packet",
+    }))
+}
+
+#[derive(Debug, Deserialize)]
+struct CraftClearReq {
+    username: Option<String>,
+    uuid: Option<String>,
+    conn_id: Option<u64>,
+}
+
+fn handle_craft9_clear(state: &AdminState, body: &[u8]) -> AdminResponse {
+    let req: CraftClearReq = match serde_json::from_slice(body) {
+        Ok(r) => r,
+        Err(_) => return AdminResponse::err(400, "bad json"),
+    };
+    let owner = if let Some(uuid) = req.uuid.filter(|s| !s.is_empty()) {
+        uuid
+    } else if let Ok((conn, _)) = resolve_conn(state, req.username.as_deref(), req.conn_id, None) {
+        state.hub.snapshot().into_iter().find(|e| e.conn_id == conn)
+            .map(|e| if e.uuid.is_empty() { e.username } else { e.uuid })
+            .unwrap_or_default()
+    } else {
+        String::new()
+    };
+    if owner.is_empty() {
+        return AdminResponse::err(400, "cannot resolve craft session owner");
+    }
+    let conn = state.hub.find_conn_by_uuid(&owner).or_else(|| state.hub.find_conn_by_name(&owner));
+    let removed = state.drops.clear_craft9(conn.unwrap_or(0), &owner);
+    AdminResponse::json(200, serde_json::json!({"ok": true, "owner": owner, "removed": removed}))
+}
+
 /// 路由（纯构造响应；M1 只读：`/` + `/api/online` + `/api/world`）。
 pub fn route(req: &HttpRequest, state: &AdminState) -> AdminResponse {
     match (req.method.as_str(), req.path.as_str()) {
@@ -843,6 +1109,13 @@ pub fn route(req: &HttpRequest, state: &AdminState) -> AdminResponse {
         ("GET", "/api/craft9") => handle_craft9(state),
         ("GET", "/api/inventory") => handle_inventory(state, &req.query),
         ("GET", "/api/stats") => handle_stats(state, &req.query),
+        ("GET", "/api/time") => handle_time_get(),
+        ("POST", "/api/time") => handle_time_post(state, &req.body),
+        ("GET", "/api/weather") => handle_weather_get(),
+        ("POST", "/api/weather") => handle_weather_post(state, &req.body),
+        ("POST", "/api/broadcast-throttle") => handle_broadcast_throttle(state, &req.body),
+        ("POST", "/api/journal-trim") => handle_journal_trim(state, &req.body),
+        ("POST", "/api/craft9-clear") | ("POST", "/api/craft9") => handle_craft9_clear(state, &req.body),
         ("POST", "/api/xp") => handle_xp(state, &req.body),
         ("POST", "/api/set-food") => handle_set_food(state, &req.body),
         ("POST", "/api/give") => handle_give(state, &req.body),

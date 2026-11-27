@@ -34,6 +34,11 @@ fn main() {
         "p53 features xp_merge={} hunger_detail={} settings_persist={} stats={}",
         features.xp_merge, features.hunger_detail, features.settings_persist, features.stats
     );
+    info!(
+        "p54 features broadcast_throttle={} journal_trim={}/{} weather_broadcast={} craft_persist={}",
+        features.broadcast_throttle, features.journal_trim, features.journal_keep,
+        features.weather_broadcast, features.craft_session_persist
+    );
     // P52：socket 归属启动期锁定（默认 ecs，server.toml 可回退 net）。
     let socket_mode = config::load_socket_mode("server.toml");
     info!("socket_mode={} (ecs=full ECS ownership, net=emergency fallback)", socket_mode.as_str());
@@ -137,6 +142,10 @@ fn main() {
         cfg.seed,
         shared_store.clone(),
     ));
+    // P54 A6：全局时间/天气从 meta 恢复（缺省白天/晴），net ticker 与 admin 共享同一 Arc。
+    let world_time = Arc::new(mc_world::world_time::WorldTimeState::from_store(
+        shared_store.as_deref(), cfg.seed,
+    ));
     // P25 管理面板：与游戏线程共享的 hub（在线映射唯一来源，计划 §5.2 推荐方案）。
     let hub = Arc::new(mc_network::BroadcastHub::new());
     // P46 流体：状态由 serve 挂载全服唯一 ticker（仅 V2 世界真正传播）。
@@ -163,7 +172,14 @@ fn main() {
         .with_xp_merge(features.xp_merge)
         .with_hunger_detail(features.hunger_detail)
         .with_settings_persist(features.settings_persist)
-        .with_stats(features.stats);
+        .with_stats(features.stats)
+        // P54：四项独立开关（A3 默认关；A5/A6 时间/A8 默认开；天气广播默认关）。
+        .with_broadcast_throttle(features.broadcast_throttle)
+        .with_journal_trim(features.journal_trim)
+        .with_journal_keep(features.journal_keep)
+        .with_world_time(Arc::clone(&world_time))
+        .with_weather_broadcast(features.weather_broadcast)
+        .with_craft_session_persist(features.craft_session_persist);
     info!(
         "config view_distance={} effective_view_radius={} seed={} compression_threshold={}",
         cfg.view_distance, cfg.effective_view_distance(), cfg.seed, cfg.compression_threshold
@@ -194,7 +210,11 @@ fn main() {
     app.insert_resource(movement::PendingPlayerRemoval::default());
     app.insert_resource(persist::SharedWorld(Arc::clone(&mutable)));
     app.insert_resource(persist::WorldSaveDir(world_dir.clone().into()));
-    app.insert_resource(persist::SharedStore(shared_store));
+    app.insert_resource(persist::SharedStore(shared_store.clone()));
+    app.insert_resource(persist::JournalTrimConfig {
+        enabled: features.journal_trim,
+        keep: features.journal_keep,
+    });
     app.insert_resource(persist::SharedDropState(Arc::clone(&drop_state)));
     app.add_systems(Startup, systems::startup_system);
     app.add_systems(
@@ -223,6 +243,14 @@ fn main() {
     std::thread::spawn(move || net_thread::run_net_thread(bind, tx, shutdown_net, net_config, rt));
     // P25 管理面板：独立线程 + 独立监听（默认 127.0.0.1:25566），故障隔离：
     // admin 线程崩了/端口被占都不影响 25565 游戏线程。
+    // P54 后台联动：启动期注入共享 store/时间状态给 admin 线程（不给 AdminState 加字段）。
+    admin::set_admin_extras(
+        shared_store.clone(),
+        Arc::clone(&world_time),
+        features.journal_trim,
+        features.journal_keep,
+        features.craft_session_persist,
+    );
     let admin_state = admin::AdminState {
         hub: Arc::clone(&hub),
         drops: Arc::clone(&drop_state),

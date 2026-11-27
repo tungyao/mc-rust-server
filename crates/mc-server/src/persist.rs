@@ -32,6 +32,14 @@ pub struct SharedStore(pub Option<Arc<mc_world::store::WorldStore>>);
 #[derive(Resource, Clone, Debug)]
 pub struct SharedDropState(pub Arc<mc_network::DropState>);
 
+/// P54 A5：journal 裁剪配置（启动期来自 server.toml；只在 60s autosave 触发，
+/// 不占 50ms 关键路径）。`keep=0` 表示不裁剪。
+#[derive(Resource, Clone, Copy, Debug)]
+pub struct JournalTrimConfig {
+    pub enabled: bool,
+    pub keep: u64,
+}
+
 /// 每 1200 tick 刷盘一次（60s）或断线时刷脏 chunk。
 /// redb 模式：同一触发点把所有在线背包/XP 与脏方块提交（方块 + journal 一个事务）。
 /// 旧模式：原 `MutableWorld::save_to_dir` 路径逐字节不变。
@@ -44,6 +52,7 @@ pub fn autosave_system(
     pending: Res<PendingPlayerRemoval>,
     store: Option<Res<SharedStore>>,
     drops: Option<Res<SharedDropState>>,
+    trim: Option<Res<JournalTrimConfig>>,
 ) {
     let periodic = tick.0 % 1200 == 0;
     let on_disconnect = !pending.is_empty();
@@ -61,6 +70,16 @@ pub fn autosave_system(
                 world.0.seed(), n, tick.0
             ),
             Err(e) => warn!("world save to redb failed seed={} ({e})", world.0.seed()),
+        }
+        // P54 A5：裁剪必须在 blocks 已落盘后；只在 60s 周期触发，绝不占 50ms ticker。
+        if periodic {
+            if let Some(trim) = trim.as_ref().filter(|t| t.enabled && t.keep > 0) {
+                match store.trim_journal(trim.keep, true) {
+                    Ok(n) if n > 0 => info!("journal trimmed removed={n} keep={}", trim.keep),
+                    Ok(_) => {}
+                    Err(e) => warn!("journal trim failed ({e})"),
+                }
+            }
         }
         return;
     }

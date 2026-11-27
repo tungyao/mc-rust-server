@@ -56,6 +56,7 @@ pub async fn handle_connection<S: AsyncRead + AsyncWrite + Unpin>(
                 hunger_detail: config.hunger_detail,
                 settings_persist: config.settings_persist,
                 stats: config.stats,
+                craft_session_persist: config.craft_session_persist,
             };
             handle_login_with_options(stream, addr, &tx, opts).await?;
         }

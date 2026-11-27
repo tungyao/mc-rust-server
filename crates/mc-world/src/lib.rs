@@ -14,6 +14,7 @@ pub mod items;
 pub mod inventory;
 pub mod tools;
 pub mod uuid_migration; // P51：玩家存档 username → 稳定 UUID 键迁移
+pub mod world_time; // P54 A6：全局时间/天气服务端状态
 pub mod xp;
 
 pub use crops::{
@@ -30,7 +31,7 @@ pub use inventory::PlayerInventory;
 pub use xp::{XpOrb, XpOrbEntities};
 pub use mutable::{
     MutableWorld, DEFAULT_PLACE_BLOCK_ID, EYE_HEIGHT, MAX_REACH, PLACEABLE_BLOCK_IDS,
-    WORLD_TOP_Y, chunk_of_block, is_placeable, is_replaceable,
+    WORLD_TOP_Y, chunk_of_block, is_placeable, is_replaceable, with_journal_actor,
 };
 pub use worldgen::{
     GeneratedChunk, GeneratorVersion, WorldGen, DEFAULT_SEED, MAX_SURFACE_Y, MIN_SURFACE_Y,
