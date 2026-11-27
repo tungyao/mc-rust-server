@@ -166,6 +166,109 @@ impl PlayerInventory {
         Some((id, count))
     }
 
+    /// P56 / 26.3 jar `InventoryMenu.quickMoveStack(player, 0)` +
+    /// `AbstractContainerMenu.doClick` QUICK_MOVE 循环：SHIFT 点结果槽时把已算出的结果
+    /// 整份搬进背包（jar: `moveItemStackTo(stack, 9, 45, true)`），`ResultSlot.onTake`
+    /// 逐格扣原料，客户端再重算结果并重复搬运。这里按同一口径循环“匹配→扣料→入包”，
+    /// 但与工作台窗口 1 不同：**背包 2×2 不主动从背包补料**（jar 的 SHIFT 只搬结果，
+    /// 没有把背包物品塞回合成格的逻辑）；放不下整份结果时直接停止，绝不吞原料。
+    /// 返回本次连续合成次数。
+    pub fn craft_result_quick_move(&mut self) -> usize {
+        let mut crafted = 0;
+        loop {
+            let mut grid = [None; crate::crafting::GRID_SIZE];
+            for (i, slot) in grid.iter_mut().enumerate() {
+                *slot = self.slots[1 + i];
+            }
+            let Some(recipe) = crate::crafting::match_recipe(grid) else { break };
+            let (id, count) = recipe.result;
+            if self.free_slots_for(id, count) < count {
+                break;
+            }
+            if !crate::crafting::consume_grid(&mut grid, recipe) {
+                break;
+            }
+            for (i, slot) in grid.into_iter().enumerate() {
+                self.slots[1 + i] = slot;
+            }
+            assert_eq!(self.add_item(id, count), 0, "capacity pre-checked");
+            self.slots[crate::crafting::RESULT_SLOT] = None;
+            crafted += 1;
+        }
+        crafted
+    }
+
+    /// P56 / 26.3 jar `InventoryMenu.slotsChanged` → `CraftingMenu.slotChangedCraftingGrid`：
+    /// 结果槽是服务端按合成格算出来的（`resultSlots.setItem(0, result)`），不是手放进去的。
+    /// 这里给出要写进全量/单槽同步包槽 0 的协议 Slot；没有配方时为空。
+    pub fn craft_result_protocol_slot(&self) -> mc_protocol::packets::Slot {
+        let mut grid = [None; crate::crafting::GRID_SIZE];
+        for (i, slot) in grid.iter_mut().enumerate() {
+            *slot = self.slots[1 + i];
+        }
+        match crate::crafting::match_recipe(grid) {
+            Some(recipe) => mc_protocol::packets::Slot {
+                item_id: recipe.result.0,
+                count: recipe.result.1,
+            },
+            None => mc_protocol::packets::Slot::empty(),
+        }
+    }
+
+    /// P56 / 26.3 jar `AbstractContainerMenu.doClick` SWAP 分支作用于 `ResultSlot`：
+    /// button 0..=8 = 快捷栏槽 36..44，button 40 = 副手槽 45。jar 里结果槽
+    /// `mayPlace()==false`，所以目标槽非空时 jar 直接 no-op；本服另外要求光标为空
+    /// （避免重复产物）。成功时权威合成结果直接落进该槽，原槽清空；越界一律无操作。
+    pub fn craft_result_swap(&mut self, button: i8) -> bool {
+        if !(0..=8).contains(&button) && button != 40 {
+            return false;
+        }
+        let idx = if button == 40 { 45 } else { HOTBAR_START + button as usize };
+        if self.cursor.is_some() || self.slots[idx].is_some() {
+            return false;
+        }
+        let Some((id, count)) = self.craft_result(0) else { return false };
+        self.slots[idx] = Some((id, count));
+        self.cursor = None;
+        true
+    }
+
+    /// P56 / 26.3 jar `InventoryMenu.quickMoveStack` 对合成格 1..=4 的 SHIFT：
+    /// `moveItemStackTo(stack, 9, 45, false)` —— 先同物合并，再填入空格（主包+快捷栏，
+    /// 不含副手 45）。旧实现的 `click_quick_move` 只认 9..=45，格内 SHIFT 是 no-op。
+    pub fn quick_move_grid_slot(&mut self, slot: i16) -> bool {
+        if !(1..=4).contains(&slot) {
+            return false;
+        }
+        let idx = slot as usize;
+        let Some((id, original)) = self.slots[idx] else { return false };
+        let mut count = original;
+        for t in (MAIN_START..=MAIN_END).chain(HOTBAR_START..=HOTBAR_END) {
+            if count <= 0 {
+                break;
+            }
+            if let Some((tid, tc)) = self.slots[t] {
+                if tid == id && tc < MAX_STACK {
+                    let take = (MAX_STACK - tc).min(count);
+                    self.slots[t] = Some((id, tc + take));
+                    count -= take;
+                }
+            }
+        }
+        for t in (HOTBAR_START..=HOTBAR_END).chain(MAIN_START..=MAIN_END) {
+            if count <= 0 {
+                break;
+            }
+            if self.slots[t].is_none() {
+                let take = MAX_STACK.min(count);
+                self.slots[t] = Some((id, take));
+                count -= take;
+            }
+        }
+        self.slots[idx] = if count > 0 { Some((id, count)) } else { None };
+        count < original
+    }
+
     /// 可操作槽（P18 原有语义，保持不变）：主背包 9-35、快捷栏 36-44、副手 45；
     /// 合成/盔甲 0-8 不碰。SWAP / QUICK_MOVE / THROW 继续走这里。
     fn play_slot(&self, slot: i16) -> Option<usize> {
@@ -323,8 +426,11 @@ impl PlayerInventory {
         self.state_id
     }
 
+    /// P56 / 26.3 jar `AbstractContainerMenu.incrementStateId()`:
+    /// `stateId = stateId + 1 & Short.MAX_VALUE`（15 位回绕：0x7fff → 0）。
+    /// 正常会话的 state id 远小于 32768，既有包流逐字节不变；只在长会话回绕时生效。
     pub fn next_state(&mut self) -> i32 {
-        self.state_id += 1;
+        self.state_id = (self.state_id + 1) & 0x7fff;
         self.state_id
     }
 
@@ -1083,5 +1189,121 @@ mod tests {
         assert_eq!(inv.cursor(), None);
         assert!(inv.to_protocol_slots().iter().any(|s| *s != mc_protocol::packets::Slot::empty() && s.item_id == 62));
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    // ---- P56：26.3 jar 对齐（InventoryMenu / AbstractContainerMenu） ----
+
+    /// jar `InventoryMenu`: RESULT_SLOT=0 / CRAFT_SLOT_START=1..4 / INV 9..36 /
+    /// USE_ROW 36..45 / SHIELD_SLOT=45；`AbstractContainerMenu.SLOT_CLICKED_OUTSIDE=-999`。
+    #[test]
+    fn p56_window0_slot_layout_matches_inventory_menu() {
+        assert_eq!(crate::crafting::RESULT_SLOT, 0);
+        assert_eq!(crate::crafting::GRID_SIZE, 4);
+        assert_eq!(MAIN_START, 9);
+        assert_eq!(MAIN_END, 35);
+        assert_eq!(HOTBAR_START, 36);
+        assert_eq!(HOTBAR_END, 44);
+        assert_eq!(SLOT_COUNT, 46);
+        assert_eq!(crate::crafting::CRAFT9_RESULT_SLOT, 0);
+        assert_eq!(crate::crafting::CRAFT9_WINDOW_ID, 1);
+    }
+
+    /// jar `CraftingMenu.slotChangedCraftingGrid`：结果槽由服务端算出并同步。
+    #[test]
+    fn p56_result_protocol_slot_is_server_computed() {
+        let mut inv = PlayerInventory::new();
+        assert_eq!(inv.craft_result_protocol_slot(), mc_protocol::packets::Slot::empty());
+        inv.slots[1] = Some((crate::drops::ITEM_OAK_LOG, 1));
+        let slot = inv.craft_result_protocol_slot();
+        assert_eq!(slot.item_id, crate::drops::ITEM_OAK_PLANKS);
+        assert_eq!(slot.count, 4);
+        assert_eq!(inv.get(0), None, "结果不写进背包槽 0（只读结果槽）");
+    }
+
+    /// jar `ResultSlot.mayPlace()==false`：结果槽只能由配方引擎写入。
+    #[test]
+    fn p56_result_slot_rejects_hand_placement() {
+        let mut inv = PlayerInventory::new();
+        inv.set_cursor(Some((crate::drops::ITEM_OAK_LOG, 1)));
+        // PICKUP / SWAP / QUICK_MOVE / THROW 都不能把手持物放进槽 0。
+        assert!(!inv.apply_click(0, 0, 0));
+        assert!(!inv.apply_click(0, 0, 1));
+        assert!(!inv.apply_click(0, 0, 2));
+        assert_eq!(inv.get(0), None);
+        assert_eq!(inv.cursor(), Some((crate::drops::ITEM_OAK_LOG, 1)));
+        inv.set_cursor(None);
+    }
+
+    /// jar `AbstractContainerMenu.doClick` QUICK_MOVE 循环 + `ResultSlot.onTake`：
+    /// SHIFT 结果槽把连续合成的产物入包并逐格扣原料（背包 2×2 不补料）。
+    #[test]
+    fn p56_shift_result_crafts_repeatedly_and_stows() {
+        let mut inv = PlayerInventory::new();
+        // 两格各 1 木板 → 木棍的规范槽型（1+1）；单格 2 木板则是压力板。
+        inv.slots[1] = Some((crate::drops::ITEM_OAK_PLANKS, 1));
+        inv.slots[2] = Some((crate::drops::ITEM_OAK_PLANKS, 1));
+        assert_eq!(inv.craft_result_quick_move(), 1, "two planks -> four sticks");
+        assert_eq!(inv.slots[1], None);
+        assert_eq!(inv.slots[2], None);
+        assert_eq!(inv.cursor(), None, "SHIFT never touches the cursor");
+        let sticks = crate::crafting::RECIPES.iter().find(|r| r.name == "stick").unwrap().result.0;
+        assert_eq!(inv.get(36), Some((sticks, 4)), "result lands in hotbar first");
+        assert_eq!(inv.craft_result_quick_move(), 0, "no inputs left, no extra craft");
+        // 没有配方时绝不改背包。
+        inv.slots[1] = Some((crate::drops::ITEM_OAK_LOG, 2));
+        assert_eq!(inv.craft_result_quick_move(), 0);
+        assert_eq!(inv.slots[1], Some((crate::drops::ITEM_OAK_LOG, 2)));
+    }
+
+    /// jar `AbstractContainerMenu.doClick` SWAP 只在目标槽为空时把结果放进去。
+    #[test]
+    fn p56_swap_result_into_empty_hotbar_or_offhand() {
+        let mut inv = PlayerInventory::new();
+        inv.slots[1] = Some((crate::drops::ITEM_OAK_LOG, 1));
+        inv.set_cursor(Some((crate::drops::ITEM_STICK, 1)));
+        assert!(!inv.craft_result_swap(0), "occupied cursor never crafts via SWAP");
+        inv.set_cursor(None);
+        // button 0 把 4 木板放进快捷栏 36。
+        assert!(inv.craft_result_swap(0));
+        assert_eq!(inv.get(36), Some((crate::drops::ITEM_OAK_PLANKS, 4)));
+        assert_eq!(inv.get(1), None);
+        assert_eq!(inv.cursor(), None);
+        // 目标槽非空 → no-op，原料保留。
+        inv.slots[1] = Some((crate::drops::ITEM_OAK_LOG, 1));
+        assert!(!inv.craft_result_swap(0));
+        assert_eq!(inv.slots[1], Some((crate::drops::ITEM_OAK_LOG, 1)));
+        // button 40 = 副手槽 45。
+        assert!(inv.craft_result_swap(40));
+        assert_eq!(inv.get(45), Some((crate::drops::ITEM_OAK_PLANKS, 4)));
+        assert!(!inv.craft_result_swap(9));
+    }
+
+    /// jar `InventoryMenu.quickMoveStack` 对 1..=4 的 SHIFT：`moveItemStackTo(9, 45, false)`。
+    #[test]
+    fn p56_quick_move_grid_slot_into_main_or_hotbar() {
+        let mut inv = PlayerInventory::new();
+        inv.slots[1] = Some((crate::drops::ITEM_OAK_LOG, 3));
+        assert!(inv.quick_move_grid_slot(1));
+        assert_eq!(inv.get(1), None);
+        assert_eq!(inv.get(36), Some((crate::drops::ITEM_OAK_LOG, 3)));
+        // 同物合并不新开槽。
+        inv.slots[2] = Some((crate::drops::ITEM_OAK_LOG, 2));
+        assert!(inv.quick_move_grid_slot(2));
+        assert_eq!(inv.get(36), Some((crate::drops::ITEM_OAK_LOG, 5)));
+        assert_eq!(inv.get(2), None);
+        assert!(!inv.quick_move_grid_slot(1), "empty grid slot does nothing");
+        assert!(!inv.quick_move_grid_slot(5), "armor slot is not a craft grid slot");
+    }
+
+    /// jar `AbstractContainerMenu.incrementStateId()`：`(state + 1) & Short.MAX_VALUE`。
+    #[test]
+    fn p56_state_id_wraps_at_short_max() {
+        let mut inv = PlayerInventory::new();
+        assert_eq!(inv.state_id(), 1);
+        inv.set_state_id(0x7fff);
+        assert_eq!(inv.next_state(), 0);
+        assert_eq!(inv.next_state(), 1);
+        inv.set_state_id(123);
+        assert_eq!(inv.next_state(), 124);
     }
 }
