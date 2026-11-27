@@ -987,6 +987,20 @@ $natives = 'C:\Users\qwe\AppData\Local\Temp\mc263natives'
     （v1 仍是默认、v2 仍 opt-in）；身份方案选 **UUID 稳定化 + 玩家存档/后台迁移**
     （`p51-uuid-identity`，排队待派发，会动 `player-<user>-<seed>.dat` 键与后台按用户名查找）。
 
+34. **P50 socket→ECS 立项评估（已完成，仅文档）**：`docs/socket-ecs-plan.md`（449 行）推荐
+    **方案 C（混合）**：net 线程只保留 accept + 帧编解码 + 真实 socket 写，ECS 拥有 play loop
+    权威判定与「每个玩家有序写队列的唯一生产者」；把“判定必须与 socket 写同线程”精确化为
+    “必须与 Ack 同序、且无第三方插队”，不把 441 块 Join 编码塞进 Bevy 50ms Update，
+    且不恢复 P16.1 删除的全量区块生成脚手架（继续 `ChunkCache::bodies` + `ChunkView`）。
+    灰度 `socket_mode=net|ecs`（默认 net、重启切换、按进程锁定），阶段：
+    P0 只读观测（`/api/world.socket_mode`）→ P1 Outbound 通道抽取（纯重构）→ P2 移动/心跳
+    ECS 化 → P3 方块判定 ECS 化 → P4 视距/掉落 ECS 化 → P5 全量切换与清理；
+    每阶段独立提交/回退/验收（含 `play_stream.rs` 逐字节基线与真机清单 §1/§3/§5/§8）。
+    **最大风险**：包序与 Ack 归属（`BlockUpdate → Ack(seq)` 必须同玩家流相邻、Ack 绝不进 hub；
+    Join 八段包序 + 视距 flush 先于方块/掉落包），判定移到 ECS 最多多 1 个 50ms tick 的 Ack 延迟。
+    待用户决策：批准 C1 立项、选 C 还是 B、灰度/背压策略、真机门禁、先做 P0+P1 还是直推 P5、
+    C2/C3/C4/B15 排期与抓包归属。
+
 ## 6. 关键文件
 
 ```
@@ -1053,6 +1067,7 @@ docs/world-storage-plan.md             P36 新世界存储格式方案（redb，
 docs/worldgen-plan.md                  P42 地图生成器调研与分阶段路线图（未改代码）
 docs/real-machine-checklist.md         真机复验清单（按功能分组，含配置/按键/日志/截图/失败定位）
 docs/gameplay-gaps-plan.md             P49 剩余玩法缺口调研（A/B/C 分类 + 后台联动 + 批次路线）
+docs/socket-ecs-plan.md                P50 socket→ECS 立项评估（方案 C 混合 + 灰度 + P0–P5）
 ```
 
 ## 7. 测试命令
