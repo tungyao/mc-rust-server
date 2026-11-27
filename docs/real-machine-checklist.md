@@ -1,6 +1,7 @@
 # 真机复验清单（Java 26.3 客户端 + 本机服务端）
 
-> 日期：2026-11-27；对应 main `76f645a`（`cargo test --workspace` 509 passed / 0 failed）。
+> 日期：2026-11-27；对应 main `862c69e`（`cargo test --workspace` **588 passed / 0 failed**）。
+> 本轮新增 §13（P51/P52/P53/P54/P55/P56），请连同 §1/§5/§9/§11 一起验；§12 的 UUID 说明已更新。
 > 本清单是**人工验证**用；仓库里的脚本 e2e 只验证服务端状态/包流，不能替代真机观察。
 > 原则：每项都记录「配置 → 操作 → 期望日志/包/画面 → 截图」，失败先看 §12 的定位表。
 
@@ -143,7 +144,8 @@ $natives = 'C:\Users\qwe\AppData\Local\Temp\mc263natives'
 - [ ] v2 block light：火把/灯笼/岩浆附近亮度正确，chunk 接缝无突变；遗迹内灯笼照明可见。
 - [ ] v2 单 chunk 小遗迹：约 6% chunk 出现石砖小遗迹、5×5 足迹不跨 chunk、避出生圈；截图。
 - [ ] **性能红线 ⚠️**：`generator_version=2`、r=10、441 块无压缩 Join 的 `elapsed_ms` **≤700ms**（本地估算约 1060ms，可能超标），包体 ≤~60KB；若超标记录实际值，回退到 v1 或降视距。
-- [ ] `player_info_update 0x47` 名字/皮肤、`open_screen` 客户端 GUI、`Respawn 0x54`、聊天仍缺，不计入失败。
+- [ ] `player_info_update 0x47` 名字/皮肤、`Respawn 0x54`、聊天仍缺，不计入失败；
+      `open_screen` 工作台 GUI 已实现但默认关（`workbench_gui=false`），见 §13。
 
 ## 12. 失败定位速查
 
@@ -153,7 +155,7 @@ $natives = 'C:\Users\qwe\AppData\Local\Temp\mc263natives'
 | `DecoderException` / 连接重置 | 服务端是否有猜包/改包体；v2 的 biome 64 项容器与非均匀 light 是高风险点，先回退 `generator_version=1` 对比 |
 | 方块操作后客户端幽灵块/数不对 | `BlockUpdate` 是否回滚、Ack seq 是否对、手持物品映射（`Set Held Item` Short vs S2C VarInt）、圆石映射 |
 | 掉落看不到/捡不到 | Spawn/Data 是否发、50ms 全局 ticker 是否跑、拾取延迟（10/40 ticks）、是否出视距、双开时 known 集 |
-| 背包/经验重进丢失 | `player-<user>-<seed>.dat` 或 redb `players` 是否刷盘；存档键是用户名不是 uuid |
+| 背包/经验重进丢失 | P51 起主键是稳定 UUID（`player-<uuid>-<seed>.dat` / redb UUID key），username 只是兼容镜像；检查 `.bak` 迁移报告 `uuid-migration-<seed>.json` |
 | 种植后不生长/重启从头 | 全局 ticker 是否跑；`timers` 表与 `tick_offset` 是否恢复；legacy 模式本来就重计时 |
 | 别人看不到我/看到幽灵玩家 | P43 `player_visibility` 是否开启、对外 id 是否唯一、视距进出 `RemoveEntities` 是否发 |
 | 面板打不开/空白 | `admin_page.html` 是否被重新构建、`check-offline.mjs`、浏览器控制台是否有 CDN 请求（应为零） |
@@ -162,9 +164,51 @@ $natives = 'C:\Users\qwe\AppData\Local\Temp\mc263natives'
 
 ---
 
+## 13. 本轮新增：身份 / ECS / 批次1 / GUI 合成（**新，必验**）
+
+> 前置：用独立 seed 与 `world_dir`；`cargo build -p mc-server` 后运行。以下开关都在 `server.toml`。
+
+**P52 socket→ECS（最高风险）**
+- [ ] 启动日志 `socket_mode=ecs → redb opened → listening → global drop physics ticker started → keepalive`，无 panic。
+- [ ] 改 `socket_mode="net"` 重启做 A/B：同 seed 同操作的 Join 八段/ChunkData、方块 `BlockUpdate→Ack` 包流应一致；
+      后台 `/api/world.socket_mode` 只读显示正确。
+- [ ] 双开：A 挖/放方块，A 收到的 `Ack(seq)` 紧邻 `BlockUpdate`，B 只收 `BlockUpdate`、零 Ack；视距切换先于方块包。
+- [ ] 慢连接（限速/暂停客户端收发 30s）：观察服务端 RSS 是否持续上涨（**无限写队列**风险）、
+      `SocketEcsRuntime::stats()` 的 queued_bytes、其它玩家 tick 是否正常；恢复后队列排空。
+- [ ] 客户端无 `tick lag`，服务端 KeepAlive 稳定。
+
+**P51 稳定 UUID**
+- [ ] 同名玩家重进：背包/XP/生存状态保留；后台 `/api/online` 的 `uuid` 每次登录一致（离线 `OfflinePlayer:<name>` v3）。
+- [ ] `/api/give`、`/api/inventory`、`/api/kick`、`/api/gamemode`、`/api/tool-enchant` 用 `uuid` 定位均生效，旧 username 仍可用。
+- [ ] 迁移报告 `uuid-migration-<seed>.json` 存在、旧 `.dat` 变 `.bak`、重进不重复迁移（幂等）。
+
+**批次 1（P53/P54）**
+- [ ] `xp_merge=true`：地面经验球 7.25 格内被吸引、邻近合并，总经验不丢；捡取手感正常（§7）。
+- [ ] `hunger_detail=true`：疾跑/跳跃/游泳后 `/api/online` 的 `exhaustion` 上升、饱和/饥饿按阈值下降；`POST /api/set-food` 生效。
+- [ ] `settings_persist=true`：后台切创造/附魔 → 断线重进仍生效；`/api/online.persisted_*` 正确。
+- [ ] `stats=true`：`GET /api/stats?uuid=` 能看到挖掘/放置/死亡计数按天累加，面板「统计」卡显示。
+- [ ] `broadcast_throttle` 保持 **false**：双开高频挖放包流无异常；确认后再决定是否开（会改包序）。
+- [ ] `GET|POST /api/time` 改白天/夜晚客户端天空光有变化；`GET|POST /api/weather` 只改变面板/服务端状态
+      （`0x27` 未确认，**不应有天气包**）；`weather_broadcast=true` 也保持不发包。
+- [ ] `POST /api/journal-trim` 在 redb 落盘后裁剪；`/api/world.journal_seq/bytes/oldest_kept` 合理。
+- [ ] `craft_session_persist=true`：3×3 会话放原料 → 断线重进 → 服务端会话仍在内存（**客户端 GUI 暂不补发**）。
+
+**P55/P56 GUI 与合成**
+- [ ] 面板「工作台会话」卡打开开关（`POST /api/workbench-gui {"enabled":true}`），
+      `/api/craft9.menu_id_verified` 应为 `true`、`menu_id=12`。
+- [ ] 客户端右键工作台（或手持工作台放置）：弹出真 3×3 界面，不断线、无 `DecoderException`；截图。
+      若断线/界面错：关开关，把 `workbench_menu_id` 改成其它值 A/B 并抓包给我。
+- [ ] 3×3：格内放小麦 → 结果槽显示干草捆；结果 SHIFT 连续合成；背包格 SHIFT 优先补合成格。
+- [ ] 2×2（背包按 E 的原生界面）：结果槽不能手放；SHIFT 连续合成产物入包；SWAP 进空快捷栏/副手；格 1–4 SHIFT 入包。
+- [ ] 关闭 `workbench_gui` 后重连：不出现任何 `0x3c` 包，Join 包序与旧版一致。
+
+---
+
 ## 复验记录表（请按实际填写）
 
 | 日期 | 服务端 commit | seed / 配置 | 项目 | 结果 | 备注/截图 |
 |---|---|---|---|---|---|
-| | | | | | |
+| | `862c69e` | | §1 / §11 v2 Join 性能与解码 | | |
+| | `862c69e` | | §5 / §13 P52 ECS A/B 与双开 Ack | | |
+| | `862c69e` | | §13 P51 UUID + 批次1 + P55/P56 GUI 合成 | | |
 | | | | | | |

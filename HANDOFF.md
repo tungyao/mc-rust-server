@@ -1,6 +1,7 @@
 # 交接文档：Rust 自研 MC 服务器（只兼容 Java 26.3 / protocol 777 / data 5023）
 
-> 更新日期：2026-11-26；分支 `main` @ `bc86694`（P30 任务库 M1）。
+> 更新日期：2026-11-27；分支 `main` @ `862c69e`（P56 完整合成；`cargo test --workspace` **588 passed / 0 failed**）。
+> **交接快照见 §1.1（当前能力 / 开关 / 真机优先级 / 未完成项），真机清单见 `docs/real-machine-checklist.md`。**
 > `tasks/` + `tasks/events.jsonl` 已是任务真相源（见 `tasks/README.md`），本文件保留能力/验证记录。
 > P19 Q 扔、P20 `login_route` 拆目录、P21 多人广播、P22 种植、P25 管理面板、P26 树苗长树、
 > P27 种田闭环、P28 Q 扔按视角飞 + 三个补丁（拾取延迟/弹道/选中槽同步）均已合入 main；
@@ -55,6 +56,43 @@ P16 的能力保持：世界有水（water=89，海平面 63）、沙岸、oak �
 P13 的能力保持：`compression_threshold` 配置化（默认 -1，256 已真机）、C2S 移动经 `PlayEvent` 进 ECS、跨区块动态补/卸区块、0x26 packed ChunkPos 修正。
 
 上一阶段（P11/P12）的 Configuration 卡点也已解决：根因不是 dimension NBT，而是 `minecraft:block` 标签缺少 `minecraft:infiniburn_overworld`。现在 Configuration 直接回放原版 26.3 抓包的全量注册表与 Update Tags，保证条目 ID 与标签自洽。
+
+### 1.1 交接快照（2026-11-27，给下一轮 Windows 真机/开发）
+
+**仓库状态**：`main` 干净且已 push @ `862c69e`；`cargo test --workspace` **588 passed / 0 failed**；
+`cargo check --workspace --tests`、`scripts/check_budget.sh`、`node admin-ui/scripts/check-offline.mjs` 全绿。
+任务真相源 `tasks/*.json` + `events.jsonl`：`p30–p56` 全部 done，**仅 `p32-broadcast-chat` 保持 blocked**
+（等真实 777 聊天包抓包，用户明确要求暂缓）。
+
+**本轮新增能力（按合入顺序）**：P31 经验球；P33/P37 全作物 + 模块拆分；P34/P35 Vue 3 + Naive UI 后台（完全离线）；
+P36/P38/P39 redb 存储（不做 Anvil 兼容）+ 计时持久化；P40/P41 生存 + 283 配方；P43 玩家互见；
+P44–P46 worldgen v1 冻结 / v2 多 biome·洞穴·流动水·游泳·block light·小遗迹；P47 工具等级/3×3 工作台/模式/挖掘动画；
+P49/P50 缺口与 socket→ECS 调研；**P52 socket I/O 全移 ECS（方案 B 全量切换 + 无限写队列，`socket_mode` 默认 ecs、net 可紧急回退）**；
+**P51 稳定离线 UUID + 存档/后台迁移（UUID 主键 + username 镜像）**；
+批次 1（P53 A1–A2/A4/A7、P54 A3/A5/A6/A8）八项；
+**P55/P56 工作台 3×3 真 GUI + 完整 2×2/3×3 合成**（均按官方 26.3 客户端 jar 反编译校准）。
+
+**关键开关（`server.toml`，全部可单独关）**：`world_storage="redb"`、`generator_version=1`（v2 仅新 seed）、
+`socket_mode="ecs"`（net 回退）、`xp_merge/hunger_detail/settings_persist/stats=true`、
+`broadcast_throttle=false`（改包序，真机双开确认前保持关）、`journal_trim=true/keep=10000`、
+`weather_broadcast=false`（**0x27 天气 type 未确认，即使开关开也只更新服务端状态与面板、不发包**）、
+`craft_session_persist=true`、`workbench_gui=false`（**jar 已校准但真机未验，开启后右键工作台才会发 0x3c+0x12**）、
+`workbench_menu_id=12`（jar 确认；改成其它值后台 `menu_id_verified=false`）。
+运行时热切：`POST /api/workbench-gui {"enabled":true}`、`POST /api/screen-open`；天气/时间 `GET|POST /api/time`、`/api/weather`。
+
+**真机优先级（`docs/real-machine-checklist.md`）**：
+1. **§1/§11**：v2 Join 441 块 `elapsed_ms`（本地估算 ~1060ms vs 700ms 红线，用户已接受较慢）与 biome/light 解码。
+2. **§5 双开**：P52 ECS 全量切换后的包序/Ack 相邻、视距 flush；A3 默认关，确认后再决定是否开。
+3. **§8/§9**：P51 UUID 重进背包/XP 保留、后台按 uuid 定位；P56 2×2 SHIFT/SWAP、3×3 GUI 开关后右键工作台。
+4. **§7/§4**：A1 吸引手感、A2 疲劳度、A7 统计卡；P53 设置持久化重进仍生效。
+5. **慢连接**：P52 无限写队列无界增长风险，观察 RSS 与 tick lag=0（`SocketEcsRuntime::stats()`）。
+6. **§10**：redb 计时续算、journal 裁剪在落盘后。
+
+**未完成 / 已知风险**：`p32` 聊天 blocked；配方书（recipe book）未做——缺 `RecipeDisplayId` / `RecipeDisplayEntry` /
+`RecipeBookSettings` codec 与 `GamePacketTypes` 分配的包 ID，硬做等于猜字节（HANDOFF §5.39）；
+天气包、0x56 合并、seed 派生昼夜循环未做；0x47 名字/皮肤、`Respawn 0x54`、飞行/创造槽未做（需抓包）；
+已知 flake：`p27_bonemeal_advances_wheat_and_grows_sapling` 并行负载偶发失败，隔离/复跑全过。
+逆向用的官方 26.3 jar 在 `/tmp/opencode/26.3-client.jar`（41 MB，**未入库**），CFR 在 `/tmp/opencode/cfr.jar`。
 
 ## 2. 怎么跑
 
@@ -453,13 +491,17 @@ $natives = 'C:\Users\qwe\AppData\Local\Temp\mc263natives'
 
 ## 5. 已知限制 / 下一步
 
-1. **socket 仍未进 ECS（P17 有意为之）**：Play 的 Join/Chunk/动态区块/方块回包实际仍由 net 线程发送；
-   权威判定（`decide_dig`/`decide_place`）与 socket 写必须在同一线程完成，因为 ECS 没有写通道。
-   ECS 通过共享 `Arc<MutableWorld>` 看到同一世界并负责刷盘；`PlayEvent::BlockEdit` 只做日志/未来多人钩子。
-   未来 socket→ECS 时必须用 per-player 写通道 + `ChunkView`，不要恢复已删除的全量生成脚手架。
-2. **在线数/连接语义**：ECS 玩家实体已有 `PlayerConnId`，Disconnect 在下一 tick 清理，timeout 与 Disconnect 汇入唯一删除点；同 addr 快速重连由 conn_id 区分。仍未按 UUID 去重（同 UUID 多开仍会有多个实体），也未有登录阶段踢掉旧连接的策略。
+1. ~~**socket 仍未进 ECS（P17 有意为之）**：Play 的 Join/Chunk/动态区块/方块回包实际仍由 net 线程发送；
+   权威判定与 socket 写必须在同一线程完成，因为 ECS 没有写通道。~~ **已过时：P52 已按用户批准的方案 B
+   全量切换**——`serve()` 只 accept + 交接，Bevy `Update` 非阻塞登记，每连接 reader/writer/logic 三任务由 ECS
+   持有，writer 是唯一写者、logic 是唯一 Outbound 生产者；`socket_mode="ecs"` 默认、`net` 紧急回退；
+   三条红线（Join 逐字节、`BlockUpdate→Ack` 相邻且 Ack 不广播、视距 flush 顺序）由 e2e 守住。详见 §5.34 与
+   `docs/socket-ecs-p52.md`。**真机 ECS vs net 对比与慢连接 RSS 仍待用户执行**。不要恢复 P16.1 删除的全量生成脚手架。
+2. **在线数/连接语义**：ECS 玩家实体已有 `PlayerConnId`，Disconnect 在下一 tick 清理，timeout 与 Disconnect 汇入唯一删除点；同 addr 快速重连由 conn_id 区分。P51 起 UUID 已稳定且后台可按 uuid 定位，但**仍未按 UUID 去重**（同 UUID 多开仍会有多个实体），也未有登录阶段踢掉旧连接的策略。
 3. **初始 441 块仍是单批**：P17 真机 debug 下缓存命中 38ms（无压缩）、1464ms（threshold=256 新进程），未触发 5s 阈值，因此没有拆 64 块 + 50ms。若未来弱机器/更大视距（clamp 上限 10 已封顶）或高延迟网络出现客户端超时，再把 `send_join_sequence` 改为每批 64 块、批间 sleep（每批 BatchStart/Finished 成对，PositionSync 最后）。
-4. **存档是自有稀疏格式，不是 Anvil**：`world/overrides-<seed>.dat` 只存与基底不同的方块
+4. **（历史记录，已过时）存档是自有稀疏格式，不是 Anvil**：P38 起默认 redb，`world_storage="legacy"`
+   仍可用旧稀疏档；**用户已明确不做 Anvil 兼容**，以下的 Anvil 补齐方案不再是计划项。
+   `world/overrides-<seed>.dat` 只存与基底不同的方块
    （魔数 `P17W`/版本/seed/条数/条目 x,y,z,id），无 Region 文件头、无 Chunk NBT（Sections blockstates/biomes、
    Heightmaps、block_entities）、无压缩、无旧扇区回收。换 seed 靠文件名隔离（旧文件保留）。
    下轮补真 Anvil 时：读 `r.<rx>.<rz>.mca`（Region 头 + zlib NBT），写 Sections 的 block_states/biomes
@@ -1263,9 +1305,12 @@ bash scripts/check_budget.sh     # Windows 可用 C:\Program Files\Git\bin\bash.
 
 ## 8. Git 状态 / 提交注意
 
-- 当前分支 `main` @ `bc86694`（P30 任务库 M1）；P19–P28 均已合入并 push（P19 `bd42e93`、P20 `5962e89`、P21 `bb898d5`、P22 `f10207b`、P25 `a07b79d`、P26 `4fbf7aa`、P27 `8161068`、P28 `535939b` + 补丁 `c97e34a`/`93620e8`/`adcc449`），历史提交见 `git log` / `tasks/events.jsonl`。
+- 当前分支 `main` @ `862c69e`（P56 完整合成；588 passed）；P19–P56 均已合入并 push，历史提交见
+  `git log` / `tasks/events.jsonl`；任务真相源是 `tasks/*.json` + `events.jsonl`（见 `tasks/README.md`）。
+  近期关键提交：P52 `72436e0`、P51 `826f5b3`、P53 `51ba63f`、P54 `93a8996`、P55 `90323e9` +
+  jar 校准 `2fe7f9d`、P56 `3fba492`。
 - 历史：P18 代码 `cf821df`（协议）/`9109cd9`（掉落表+实体+背包）/`34af0cd`（net 接线+e2e）、文档 `f693d73`（基线 `7a0dca7`）；P17 代码 `c5c57af`/`db8f666`/`1fc0a45`/`4de7bbe`、文档 `3744455`/`7a0dca7`（基线 `97c241b`）；P16.1 代码 `561cc7e`、文档 `fc91291`；P16 代码 `2d8c89d`、文档 `4b4cb08`/`b83a096`（基线 `ceec052`）；P15 代码 `7f44b20`、文档 `0df9b40`（基线 `12bdaa4`）；P14 `1e47e69`/`12bdaa4`（基线 `c3bd992`）；P13 `02d31ee`/`0aaf8ed`。
-- P18 注意：`DropState` 进 `NetConfig`/`PlayOptions`（`handshake_route` 透传）；`decide_*` 仍在 net 线程（ECS 无写通道，实体/背包同步同理，见 §5.1）；50ms tick 是读超时驱动，不改变 10s 半开语义；背包键用用户名（离线 uuid 随机，见 §5.10）；临时 Java 实测工具/冒烟 ps1/测试世界只放 Temp、不提交；冒烟服 `C:\Users\qwe\AppData\Local\Temp\p18smoke` 不在仓库。
+- P18 注意：`DropState` 进 `NetConfig`/`PlayOptions`（`handshake_route` 透传）；`decide_*` 仍在 net 线程（ECS 无写通道，实体/背包同步同理，见 §5.1）；50ms tick 是读超时驱动，不改变 10s 半开语义；背包键 P51 起是**稳定 UUID 主键 + username 兼容镜像**（旧档 `.bak` 迁移，见 §5.35；§5.10 的原描述已过时）；临时 Java 实测工具/冒烟 ps1/测试世界只放 Temp、不提交；冒烟服 `C:\Users\qwe\AppData\Local\Temp\p18smoke` 不在仓库。
 - P17 注意：`autosave_system` 必须排在 `player_removal_system` 之前（断线登记靠 `PendingPlayerRemoval` 非空触发，唯一删除点会 drain 它）；`decide_*` 在 net 线程做判定是刻意设计（ECS 无写通道），见 §5.1；脚本客户端 `live_edit.py` 只放 Temp、不提交。
 - P16.1 注意：ECS `PlayScaffold` 已不再生成/编码区块；`ready to join` 每次登录 1 条，`chunk data (...)` 脚手架日志和 `tick lag` 已消失。未来 socket→ECS 时用 per-player 写通道 + `ChunkView`，不要恢复全量生成脚手架。
 - P16 注意：`crates/mc-world/src/worldgen.rs` 已拆成 `worldgen/{mod,noise,encode,tests}.rs`；新增 `rayon` 到 `mc-network`（workspace 依赖，`Cargo.lock` 无版本变化）；临时 seed 搜索程序/截图均在 `logs/`/Temp，未提交。
