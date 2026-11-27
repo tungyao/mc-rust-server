@@ -23,8 +23,9 @@
 > **真机对比待用户执行**；批次 1A（`p53-batch1-gameplay` / `51ba63f2`）A1–A2/A4/A7
 > 四项已合入（见 §5.36），批次 1B（`p54-batch1-infra` / `93a8996`）
 > A3/A5/A6/A8 四项亦已合入（见 §5.37），**批次 1 全部完成**；
-> B6 工作台 3×3 真 GUI **骨架**已合入（`p55-workbench-gui` / `90323e9`，见 §5.38），
-> menu type 等字节为**推导值、默认关、待实机抓包或逆向 jar 校准**；
+> B6 工作台 3×3 真 GUI 已合入（`p55-workbench-gui` / `90323e9`，见 §5.38），
+> 并已用**官方 26.3 客户端 jar 逆向校准**（menu type=12、标题为完整 NBT tag、无附加字段）；
+> 仍默认关，真机复核后再开；
 > 后台管理面板已用 Vue 3 + Naive UI 重写并**完全离线化**合入（`p34-admin-vue` / `53f1016`、
 > `p35-admin-offline` / `48e14bd`，见 §5.25）。
 
@@ -85,8 +86,8 @@ journal_trim = true           # P54 A5：journal 窗口裁剪（落盘后才裁�
 journal_keep = 10000          # P54 A5：保留条数
 weather_broadcast = false     # P54 A6：天气事件开关（0x27 type 未确认，当前不发包）
 craft_session_persist = true  # P54 A8：工作台会话断线落盘
-workbench_gui = false         # P55 B6：真 3×3 GUI 骨架，默认关（字节待抓包校准，开启后可能断线）
-workbench_menu_id = 12        # P55：wiki 推导的 crafting menu type，抓包后用本键覆盖即可 A/B
+workbench_gui = false         # P55 B6：真 3×3 GUI，默认关（jar 已校准，真机复核后再开）
+workbench_menu_id = 12        # P55：jar 逆向确认 MenuType.CRAFTING=12；改此键即 A/B 且标未校准
 ```
 
 P16 的 seed 示例：默认 seed 视野（radius 10）内只有树林/丘陵、没有水面（P14 高度分布下 h<63 的列约 0.2%，且不在出生视距内）；`seed=42` 出生点朝南约 40 格是沙岸+池塘，`seed=-987654321` 出生点东侧约 25 格水域更大，两者都有大量 oak 树，真机截图见 §4。
@@ -1108,15 +1109,22 @@ $natives = 'C:\Users\qwe\AppData\Local\Temp\mc263natives'
     - **未做/真机待验**：天气包、0x56、seed 派生昼夜循环、客户端工作台 GUI 恢复后的
       `0x12` 补发（B6 骨架见 §5.38，恢复目前仍只到服务端内存）；清单 §2/§5/§11。
 
-38. **B6 工作台 3×3 真 GUI 骨架（已合入，`p55-workbench-gui` / `90323e9`）**：
-    用户决策：做真客户端 GUI，允许从仓库资料推导，后续用实机抓包或逆向 jar 校准；
-    **先交付可快速验证的骨架，不伪称字节已验证**。
-    - 包 ID `open_screen 0x3c` 来自 `data/777/packets.json`（60）；包体按 wiki 26.3
-      `VarInt window_id + VarInt menu_type + Text Component title` 编码，标题目前写成
-      **NBT String 裸 payload**，不写 menu 附加 NBT。`menu_type=12`（`crafting`）来自
-      minecraft.wiki Inventory 页；已逐份解析 `registry_00..31.bin`，**无 `minecraft:menu` 注册表**，
-      仓库也无客户端 jar，故 menu ID / 标题 NBT 形式 / 附加字段均为**待抓包校准的推导值**。
-      可用 `server.toml::workbench_menu_id` 覆盖做 A/B。
+38. **B6 工作台 3×3 真 GUI（已合入 `p55-workbench-gui` / `90323e9`，jar 逆向校准）**：
+    用户决策：做真客户端 GUI，允许从仓库资料推导，后续用实机抓包或逆向 jar 校准。
+    骨架先合入（默认关），随后按用户要求**下载官方 26.3 release 客户端 jar 反编译校准**：
+    manifest `latest.release=26.3`，jar 41,483,720 B，类名未混淆，CFR 0.152 反编译。
+    - **包 ID `open_screen 0x3c`** 来自 `data/777/packets.json`（60）。
+    - **menu type = 12（已确认）**：`MenuType` 静态注册顺序
+      generic_9x1..9x6(0–5)、generic_3x3(6)、crafter_3x3(7)、anvil(8)、beacon(9)、
+      blast_furnace(10)、brewing_stand(11)、**crafting(12)**；内建注册表从 0 递增。
+      `ClientboundOpenScreenPacket.STREAM_CODEC` = `CONTAINER_ID`(VarInt) +
+      `ByteBufCodecs.registry(Registries.MENU)`(VarInt) +
+      `ComponentSerialization.TRUSTED_STREAM_CODEC`，**只有三项、无 menu 附加 NBT**。
+    - **标题 = 完整 NBT tag（初版骨架写错，已修）**：`ComponentSerialization.CODEC`
+      对纯文本经 `tryCollapseToString()` 折叠为 StringTag；
+      `ByteBufCodecs.tagCodec` → `FriendlyByteBuf.writeNbt` → `NbtIo.writeAnyTag`，
+      故字节为 `0x08`(TAG_String) + `0x00 0x00`(空根名) + `0x00 0x08`(长度) + "Crafting"，
+      **不是裸 payload**。校准后 `open_screen` 单测按此逐字节断言。
     - 触发：右键已存在的工作台、或成功放置工作台时发 `0x3c + 0x12`；**放在
       `BlockUpdate→Ack` 之后**，不插在两者中间；交互开 GUI 不产生额外方块编辑/Ack。
       **Join 序列不插任何新包**（八段与 ChunkData 逐字节不变）。
@@ -1125,12 +1133,12 @@ $natives = 'C:\Users\qwe\AppData\Local\Temp\mc263natives'
       C2S `container_click 0x12` 继续走权威 craft9 处理并全量同步，玩家窗口 0 语义不变。
     - 运维：`workbench_gui` 在库/`PlayOptions`/`server.toml` 均默认 **false**（旧 565 测试字节流不变）；
       `POST /api/workbench-gui {"enabled":true|false}` 通过共享 `AtomicBool` **运行时切换、对所有在线连接生效**；
-      `POST /api/screen-open` 给指定玩家发 GUI（关闭时拒绝/零包）；`/api/craft9` 增
-      `screen_open/menu_id/menu_id_verified=false`。面板「工作台会话」卡加开关与"打开 GUI"按钮，
-      离线单文件重建、`check-offline.mjs` 零外链。
-    - 旧 565 测试一字未改，合并后 **575 passed / 0 failed**；`check_budget.sh` 绿。
-      **待校准/真机**：menu type 实际值、Text Component 的 NBT 形式、是否需附加 NBT/Ack；
-      抓包或逆向 jar 后只改常量/编码即可，不需改会话与路由。
+      `POST /api/screen-open` 给指定玩家发 GUI（关闭时拒绝/零包）；`/api/craft9` 的
+      `menu_id_verified` 现按 menu id 是否等于 12 动态给出（覆盖则 false）。
+      面板「工作台会话」卡加开关与"打开 GUI"按钮，离线单文件重建、`check-offline.mjs` 零外链。
+    - 旧 565 测试一字未改，**575 passed / 0 failed**；`check_budget.sh` 绿。
+      jar 未入库（41 MB，临时放 `/tmp/opencode/26.3-client.jar`）。
+      **真机待验**：开启开关后右键工作台是否弹出真界面；若异常，抓包复核或调 `workbench_menu_id`。
 
 ## 6. 关键文件
 

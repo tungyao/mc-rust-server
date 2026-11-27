@@ -47,16 +47,21 @@ pub const PLAY_SET_CONTAINER_SLOT_S2C_ID: i32 = super::packet_id("clientbound.pl
 /// S2C Open Screen：`open_screen`（777 clientbound play = 60 = 0x3c，数据表真值）。
 pub const PLAY_OPEN_SCREEN_S2C_ID: i32 = super::packet_id("clientbound.play", "open_screen");
 
-/// `minecraft:menu` 注册表里 `crafting`（工作台）的菜单类型 ID = **12（推导值，待抓包校准）**。
+/// `minecraft:menu` 注册表里 `crafting`（工作台）的菜单类型 ID = **12（jar 逆向确认）**。
 ///
-/// 依据：minecraft.wiki《Java Edition protocol/Inventory》（页面标注协议 26.3/777，
-/// 2025-10-14 修订）的 Window Type 表：`crafter_3x3`=7、`anvil`=8 … `crafting`=12；
-/// 《Java Edition protocol/Packets》Open Screen 字段为 `VarInt window_id + VarInt menu_type
-/// + Text Component title`，无附加 NBT。仓库内 `data/777/vanilla_config/registry_*.bin`
-/// 共 32 份，逐份解析的资源键里**没有** `minecraft:menu`（只有 biome/chat_type/enchantment
-/// 等），仓库也没有 26.3 客户端 jar，因此 12 不是抓包真值。
-/// 风险：若客户端实际 menu ID 不同，开启 `workbench_gui` 后客户端可能断线；故默认关闭，
-/// 并由 `server.toml` 的 `workbench_menu_id` 配置覆盖，真机抓包/逆向 jar 后再校准。
+/// 依据：官方 26.3 release 客户端 jar（`client.jar` 41,483,720 B，version manifest
+/// `latest.release=26.3`）反编译：
+/// - `net.minecraft.world.inventory.MenuType` 的静态注册顺序为
+///   generic_9x1..9x6(0–5), generic_3x3(6), crafter_3x3(7), anvil(8), beacon(9),
+///   blast_furnace(10), brewing_stand(11), **crafting(12)**, …；内建注册表从 0 递增。
+/// - `ClientboundOpenScreenPacket.STREAM_CODEC` = `CONTAINER_ID`(VarInt) +
+///   `ByteBufCodecs.registry(Registries.MENU)`(VarInt) + `ComponentSerialization.TRUSTED_STREAM_CODEC`，
+///   **只有三个字段，无 menu 附加 NBT**。
+/// - 标题：`ComponentSerialization.CODEC` 对纯文本 component 经 `tryCollapseToString()`
+///   折叠成 StringTag；`ByteBufCodecs.tagCodec` 用 `FriendlyByteBuf.writeNbt` →
+///   `NbtIo.writeAnyTag`，即写完整 tag（类型字节 + 空根名 + payload），
+///   **不是裸 payload**（骨架初版曾写错，已按 jar 校准）。
+/// `server.toml::workbench_menu_id` 仍可覆盖以便 A/B；真机抓包可作为最终复核。
 pub const CRAFTING_MENU_TYPE_ID: i32 = 12;
 /// C2S Set Held Item / Click Container 的 ID 见 `play_block`
 ///（`PLAY_SET_HELD_ITEM_C2S_ID` 0x36 / `PLAY_CLICK_CONTAINER_C2S_ID` 0x12）：
@@ -921,14 +926,15 @@ pub fn encode_set_experience_packet(v: &SetExperience, out: &mut Vec<u8>) {
 // Open Screen（S2C 0x3c）：B6 工作台 GUI 骨架（包 ID 是数据表真值，菜单 ID 推导）。
 // ---------------------------------------------------------------------------
 
-/// 打开客户端容器界面。线格式（wiki 26.3）：VarInt window_id + VarInt menu_type +
-/// Text Component title；**不写任何 menu 附加 NBT**（骨架阶段最保守口径，见
-/// `CRAFTING_MENU_TYPE_ID` 注释；工作台无 horse/beacon 之类的初始数据字段）。
+/// 打开客户端容器界面。线格式（**26.3 客户端 jar 逆向确认**）：
+/// VarInt window_id + VarInt menu_type + 完整 NBT Tag 的 Text Component title，
+/// **无 menu 附加字段**（`StreamCodec.composite` 只有三项）。
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct OpenScreen {
     pub window_id: i32,
     pub menu_type: i32,
-    /// 纯文本标题：按 Text Component 的 String Tag 裸 payload 编码（无样式/事件）。
+    /// 纯文本标题：component 折叠成 StringTag，按 `NbtIo.writeAnyTag` 写完整 tag
+    /// （tag id `0x08` + u16be 空根名 + u16be 长度 + UTF-8），无样式/事件。
     pub title: String,
 }
 
@@ -936,8 +942,9 @@ impl OpenScreen {
     pub fn encode_body(&self, out: &mut Vec<u8>) {
         write_varint(self.window_id, out);
         write_varint(self.menu_type, out);
-        // Text Component = NBT Tag；仅含文本时用 String Tag 的无名 payload：
-        // u16be 字节长 + UTF-8 字节（不写 tag id，也不写根名）。
+        // FriendlyByteBuf.writeNbt → NbtIo.writeAnyTag：类型字节 + 空根名 + payload。
+        out.push(crate::packets::nbt::TAG_STRING);
+        out.extend_from_slice(&0u16.to_be_bytes());
         crate::packets::nbt::NbtTag::String(self.title.clone()).write_payload(out);
     }
 
@@ -947,6 +954,12 @@ impl OpenScreen {
         off += n;
         let (menu_type, n) = read_varint(&buf[off..])?;
         off += n;
+        if buf.get(off) != Some(&crate::packets::nbt::TAG_STRING)
+            || buf.get(off + 1..off + 3) != Some(&[0, 0])
+        {
+            return Err(ProtocolError::UnexpectedEof);
+        }
+        off += 3;
         match crate::packets::nbt::read_nbt_payload(crate::packets::nbt::TAG_STRING, &buf[off..]) {
             Ok((crate::packets::nbt::NbtTag::String(title), n)) => {
                 Ok((Self { window_id, menu_type, title }, off + n))
@@ -1203,13 +1216,12 @@ mod tests {
         assert_eq!(EXPERIENCE_ORB_ENTITY_TYPE_ID, 50);
     }
 
-    /// P55 B6：`open_screen` 包体按 wiki 26.3 字段顺序推导并断言；**菜单 ID 12 与标题
-    /// NBT 形式均为推导值，待真机抓包校准**，这里只断言字节布局自洽，不声称已验证。
+    /// P55 B6：`open_screen` 包体按官方 26.3 客户端 jar 逆向断言（菜单 ID / NBT 形式已确认）。
     #[test]
-    fn open_screen_body_layout_derived_pending_capture() {
-        // 包 ID 是 data/777/packets.json 真值；菜单 ID/标题格式仍是推导值。
+    fn open_screen_body_layout_verified_from_26_3_jar() {
+        // 包 ID 来自 data/777/packets.json；菜单 ID / 标题 tag 形式来自客户端 jar 逆向。
         assert_eq!(PLAY_OPEN_SCREEN_S2C_ID, 0x3c);
-        assert_eq!(CRAFTING_MENU_TYPE_ID, 12, "wiki-derived, must be capture-calibrated");
+        assert_eq!(CRAFTING_MENU_TYPE_ID, 12, "MenuType.CRAFTING is 13th builtin menu (0-based 12)");
         let pkt = OpenScreen {
             window_id: 1, // CRAFT9_WINDOW_ID（mc-world）；协议层不依赖游戏 crate
             menu_type: CRAFTING_MENU_TYPE_ID,
@@ -1217,10 +1229,11 @@ mod tests {
         };
         let mut body = Vec::new();
         pkt.encode_body(&mut body);
-        // 1 (window) + 12 (menu) + NBT String: u16be len=8 + "Crafting"
+        // 1 (window) + 12 (menu) + full NBT String tag:
+        //   0x08 (TAG_String) + 0x00 0x00 (empty root name) + 0x00 0x08 (len) + "Crafting"
         assert_eq!(
             body,
-            [0x01, 0x0c, 0x00, 0x08, b'C', b'r', b'a', b'f', b't', b'i', b'n', b'g']
+            [0x01, 0x0c, 0x08, 0x00, 0x00, 0x00, 0x08, b'C', b'r', b'a', b'f', b't', b'i', b'n', b'g']
         );
         let (decoded, used) = OpenScreen::decode_body(&body).unwrap();
         assert_eq!(decoded, pkt);

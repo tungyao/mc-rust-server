@@ -136,7 +136,7 @@ async fn gui_enabled_place_open_screen_content_and_authoritative_clicks() {
     assert!(screen_idx > ack, "GUI packets must follow BlockUpdate→Ack");
     let open = open.expect("Open Screen body");
     assert_eq!(open.window_id, mc_world::crafting::CRAFT9_WINDOW_ID);
-    assert_eq!(open.menu_type, 12, "wiki-derived, pending capture calibration");
+    assert_eq!(open.menu_type, 12, "26.3 jar: MenuType.CRAFTING is 13th builtin menu");
     assert_eq!(open.title, "Crafting");
     let content = content.expect("window 1 content");
     assert_eq!(content.slots.len(), 46);

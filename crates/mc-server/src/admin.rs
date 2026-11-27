@@ -65,6 +65,11 @@ fn workbench_menu_id() -> i32 {
         .unwrap_or(&mc_protocol::packets::CRAFTING_MENU_TYPE_ID)
 }
 
+/// 26.3 客户端 jar 逆向确认 menu type 12；配置覆盖成其它值时标为未校准。
+fn workbench_menu_id_verified() -> bool {
+    workbench_menu_id() == mc_protocol::packets::CRAFTING_MENU_TYPE_ID
+}
+
 /// P54 后台联动：四项能力共享的启动期注入（与 P52 `SOCKET_MODE` 同口径，
 /// 不给 `AdminState` 加字段，避免破坏穷举字面量的 550 个旧测试）。
 #[derive(Debug, Clone)]
@@ -815,7 +820,7 @@ fn handle_craft9(state: &AdminState) -> AdminResponse {
         "ok": true, "sessions": sessions, "persist_enabled": persist_enabled,
         // P55 B6：GUI 总开关状态 + 菜单 ID 校准提示（false=尚未抓包验证）。
         "screen_open": workbench_gui_flag().load(Ordering::SeqCst),
-        "menu_id": workbench_menu_id(), "menu_id_verified": false,
+        "menu_id": workbench_menu_id(), "menu_id_verified": workbench_menu_id_verified(),
     }))
 }
 
@@ -1134,8 +1139,8 @@ fn workbench_gui_state() -> AdminResponse {
         "ok": true,
         "enabled": workbench_gui_flag().load(Ordering::SeqCst),
         "menu_id": workbench_menu_id(),
-        "menu_id_verified": false,
-        "note": "B6 skeleton: menu type 12 derived from wiki, pending packet capture / jar calibration",
+        "menu_id_verified": workbench_menu_id_verified(),
+        "note": "26.3 client jar verified: MenuType.CRAFTING=12, title=full NBT String tag; no extra NBT",
     }))
 }
 
@@ -1213,7 +1218,7 @@ fn handle_screen_open(state: &AdminState, body: &[u8]) -> AdminResponse {
     }
     AdminResponse::json(200, serde_json::json!({
         "ok": true, "conn_id": conn, "pos": [x, y, z], "sent": sent,
-        "menu_id": workbench_menu_id(), "menu_id_verified": false,
+        "menu_id": workbench_menu_id(), "menu_id_verified": workbench_menu_id_verified(),
     }))
 }
 
@@ -1590,7 +1595,7 @@ mod tests {
         flag.store(false, Ordering::SeqCst);
         let before = body_json(&route(&get("/api/craft9"), &st));
         assert_eq!(before["screen_open"], false);
-        assert_eq!(before["menu_id_verified"], false);
+        assert_eq!(before["menu_id_verified"], true);
         let (tx, rx) = crossbeam_channel::unbounded();
         st.hub.register_with_uuid(
             77,
