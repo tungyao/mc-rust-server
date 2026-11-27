@@ -58,6 +58,47 @@ fn ensure_world_storage_key(path: &Path) {
     let _ = std::fs::write(path, updated);
 }
 
+/// P52 socket 归属默认：**ecs 全量切换**；`socket_mode = "net"` 为紧急回退。
+/// 与 `world_storage`/`generator_version` 一样作为独立 toml 键读取，避免给穷举的
+/// `ServerConfig` 字面量加字段（旧测试一字不改）。
+pub const DEFAULT_SOCKET_MODE: mc_network::SocketMode = mc_network::SocketMode::Ecs;
+
+/// 旧 `server.toml` 缺 `socket_mode` 键时补一行（生产默认 ecs）。
+fn ensure_socket_mode_key(path: &Path) {
+    let Ok(text) = std::fs::read_to_string(path) else { return };
+    if text.contains("socket_mode") {
+        return;
+    }
+    let mut updated = text;
+    if !updated.ends_with('\n') {
+        updated.push('\n');
+    }
+    updated.push_str("\n# P52 socket ownership: \"ecs\" (default, full ECS I/O) or \"net\" (emergency fallback)\nsocket_mode = \"ecs\"\n");
+    let _ = std::fs::write(path, updated);
+}
+
+/// 读取 socket 归属开关：缺键按默认 ecs 补齐到文件；非法值警告后回退 ecs。
+/// 启动期锁定，不做运行时热切（避免同进程两套写路径导致 Ack 双生产者）。
+pub fn load_socket_mode(path: impl AsRef<Path>) -> mc_network::SocketMode {
+    let path = path.as_ref();
+    let Ok(text) = std::fs::read_to_string(path) else { return DEFAULT_SOCKET_MODE };
+    ensure_socket_mode_key(path);
+    let value = match toml::from_str::<toml::Value>(&text) {
+        Ok(v) => v.get("socket_mode").and_then(|x| x.as_str()).map(str::to_string),
+        Err(_) => None,
+    };
+    match value {
+        Some(v) => match v.parse::<mc_network::SocketMode>() {
+            Ok(mode) => mode,
+            Err(e) => {
+                eprintln!("warn: {}: {e}, defaulting to ecs", path.display());
+                DEFAULT_SOCKET_MODE
+            }
+        },
+        None => DEFAULT_SOCKET_MODE,
+    }
+}
+
 /// 生成器版本默认值：v1=legacy 永久冻结；v2 只对新 seed / 显式配置启用。
 pub const DEFAULT_GENERATOR_VERSION: u32 = 1;
 
@@ -172,6 +213,7 @@ impl ServerConfig {
         let cfg = Self::load_or_create_inner(path)?;
         ensure_world_storage_key(path);
         ensure_generator_version_key(path);
+        ensure_socket_mode_key(path);
         Ok(cfg)
     }
 
@@ -294,6 +336,22 @@ mod tests {
     }
 
     /// P38 开关：缺键按默认 redb 补齐到旧 toml，两种模式都能解析，非法值回退默认。
+    #[test]
+    fn socket_mode_defaults_to_ecs_and_allows_net_fallback() {
+        let p = tmp_toml();
+        let _ = std::fs::remove_file(&p);
+        std::fs::write(&p, "seed = 42\n").unwrap();
+        assert_eq!(load_socket_mode(&p), mc_network::SocketMode::Ecs, "production default is full ECS");
+        let filled = std::fs::read_to_string(&p).unwrap();
+        assert!(filled.contains("socket_mode = \"ecs\""), "old toml gets the new key");
+
+        std::fs::write(&p, "seed = 42\nsocket_mode = \"net\"\n").unwrap();
+        assert_eq!(load_socket_mode(&p), mc_network::SocketMode::Net, "net stays as emergency fallback");
+        std::fs::write(&p, "seed = 42\nsocket_mode = \"bogus\"\n").unwrap();
+        assert_eq!(load_socket_mode(&p), mc_network::SocketMode::Ecs, "invalid value falls back to ecs");
+        let _ = std::fs::remove_file(&p);
+    }
+
     #[test]
     fn world_storage_switch_reads_both_modes_and_fills_missing_key() {
         let p = tmp_toml();

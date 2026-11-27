@@ -1,11 +1,11 @@
 //! view_sync: cross-chunk view throttle + SetCenter / Unload / Batch (moved from login_route.rs view section, no logic change).
+use tokio::io::{AsyncRead, AsyncWrite};
 use super::drop_sync::sync_view_entities;
 use super::login::{send_chunk_batch, send_unload_chunks, write_packet_any, PlayOptions};
 use crate::chunk_cache::ChunkCache;
 use crate::chunk_view::ChunkView;
 use mc_protocol::packets;
 use mc_world::{MutableWorld, WorldGen};
-use tokio::net::TcpStream;
 use tracing::info;
 use std::io;
 use std::time::{Duration, Instant};
@@ -55,8 +55,8 @@ pub(crate) fn queue_view_move(pending: &mut Option<PendingViewMove>, current: mc
 /// 由节流窗口在 flush 时调用，传入的是最后一次移动的目标中心；`view.plan` 只在此时执行，
 /// 因此 add/remove 是「旧完整视距 → 新完整视距」的净差，客户端不会缺邻居 section，
 /// `ChunkView.sent` 也与真正发出的包严格一致。
-async fn maybe_move_view(
-    stream: &mut TcpStream,
+async fn maybe_move_view<S: AsyncRead + AsyncWrite + Unpin>(
+    stream: &mut S,
     profile: &mc_core::PlayerProfile,
     opts: &PlayOptions,
     view: &mut ChunkView,
@@ -92,8 +92,8 @@ async fn maybe_move_view(
 
 /// 把待发送视距更新一次性发出，并把掉落物实体同步到新中心（实体包必须排在区块包之后，
 /// 否则客户端还没加载对应区块就收到 Spawn）。
-async fn flush_view_move(
-    stream: &mut TcpStream,
+async fn flush_view_move<S: AsyncRead + AsyncWrite + Unpin>(
+    stream: &mut S,
     profile: &mc_core::PlayerProfile,
     opts: &PlayOptions,
     view: &mut ChunkView,
@@ -111,8 +111,8 @@ async fn flush_view_move(
 
 /// 视距节流入口：窗口到期/跨越次数到上限才真正发包；`force=true` 用于挖掘/放置前
 /// 强制刷新，保证权威判定的中心与客户端已加载区块一致，且 Spawn 排在区块包之后。
-pub(crate) async fn maybe_flush_view(
-    stream: &mut TcpStream,
+pub(crate) async fn maybe_flush_view<S: AsyncRead + AsyncWrite + Unpin>(
+    stream: &mut S,
     profile: &mc_core::PlayerProfile,
     opts: &PlayOptions,
     view: &mut ChunkView,

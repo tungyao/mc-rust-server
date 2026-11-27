@@ -3,6 +3,7 @@
 //! 同时 net 线程自身按玩家跨区块动态补发有效视距区块并卸载越界区块。
 //! 视距来自 `ServerConfig.view_distance`（`clamp_view_radius` 限制 2..=10），
 //! 区块包体优先走共享 `ChunkCache`；连接结束在所有退出路径恰好投递一次 Disconnect。
+use tokio::io::{AsyncRead, AsyncWrite};
 pub mod block_edit;
 pub mod craft9;
 pub mod crops;
@@ -33,15 +34,14 @@ use mc_protocol::packets;
 use mc_world::{MutableWorld, WorldGen};
 use std::net::SocketAddr;
 use std::time::{Duration, Instant};
-use tokio::net::TcpStream;
 use tracing::{debug, info, warn};
 use std::io;
 
 /// P21：排空本连接的广播队列（其它玩家投递的 BlockUpdate/Spawn/Data/Remove/TakeItem），
 ///
 /// 在 tick 间隙写入自己的 socket；队列为空直接返回，写失败则断开并走统一清理路径。
-async fn drain_outbox(
-    stream: &mut TcpStream,
+async fn drain_outbox<S: AsyncRead + AsyncWrite + Unpin>(
+    stream: &mut S,
     opts: &PlayOptions,
     outbox: &Option<crossbeam_channel::Receiver<QueuedPacket>>,
 ) -> io::Result<()> {
@@ -80,8 +80,8 @@ fn queue_destroy_stage(opts: &PlayOptions, x: i32, y: i32, z: i32, stage: u8) {
     );
 }
 
-async fn play_loop(
-    stream: &mut TcpStream,
+async fn play_loop<S: AsyncRead + AsyncWrite + Unpin>(
+    stream: &mut S,
     addr: SocketAddr,
     profile: &mc_core::PlayerProfile,
     opts: &PlayOptions,

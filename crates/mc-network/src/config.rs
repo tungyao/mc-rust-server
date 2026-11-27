@@ -5,6 +5,7 @@ use super::chunk_view::clamp_view_radius;
 use super::drop_state::DropState;
 use super::fluid_sync::FluidState;
 use super::play_events::PlayEvent;
+use super::socket_ecs::{AcceptedSocket, SocketMode};
 use crossbeam_channel::Sender;
 use mc_world::MutableWorld;
 use std::sync::{Arc, atomic::AtomicUsize};
@@ -46,6 +47,10 @@ pub struct NetConfig {
     pub destroy_stage: bool,
     /// P47 工具档位/时运/精准采集开关；默认 false 保持旧掉落口径，生产入口显式打开。
     pub tool_rules: bool,
+    /// P52 socket 归属：库默认 net（历史逐字节基线/单测入口），生产入口由 ServerConfig 设为 ecs。
+    pub socket_mode: SocketMode,
+    /// ECS 模式下的 accept 交接通道；由 `SocketEcsRuntime::incoming_sender()` 注入。
+    pub socket_accept: Option<Sender<AcceptedSocket>>,
 }
 
 impl Default for NetConfig {
@@ -66,6 +71,8 @@ impl Default for NetConfig {
             player_visibility: false,
             destroy_stage: false,
             tool_rules: false,
+            socket_mode: SocketMode::Net,
+            socket_accept: None,
         }
     }
 }
@@ -90,6 +97,8 @@ impl NetConfig {
             player_visibility: false,
             destroy_stage: false,
             tool_rules: false,
+            socket_mode: SocketMode::Net,
+            socket_accept: None,
         }
     }
 
@@ -168,6 +177,18 @@ impl NetConfig {
     /// P47：开启工具等级/时运/精准采集判定；默认关闭保持旧掉落测试逐字节不变。
     pub fn with_tool_rules(mut self, enabled: bool) -> Self {
         self.tool_rules = enabled;
+        self
+    }
+
+    /// P52：启动期锁定 socket 归属；不做运行时热切（Ack 生产者必须唯一）。
+    pub fn with_socket_mode(mut self, mode: SocketMode) -> Self {
+        self.socket_mode = mode;
+        self
+    }
+
+    /// P52：注入 ECS 运行时的 accept 交接通道（仅 ecs 模式需要）。
+    pub fn with_socket_accept(mut self, tx: Sender<AcceptedSocket>) -> Self {
+        self.socket_accept = Some(tx);
         self
     }
 }

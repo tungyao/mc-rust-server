@@ -1,12 +1,18 @@
 //! systems: tick + 连接排空 + 启动log
 use super::play::PlayScaffold;
-use super::resources::{NetReceiver, PlayersOnline, TickCounter};
+use super::resources::{NetReceiver, PlayersOnline, SocketEcs, TickCounter};
 use super::config::ServerConfig;
 use super::movement::{PlayerAddr, PlayerConnId, PlayerKeepAlive, Position};
 use bevy_ecs::prelude::*;
 use std::collections::HashSet;
 use std::sync::atomic::Ordering;
 use tracing::info;
+
+/// P52 方案 B：ECS 每 tick 非阻塞接管 accept 的连接（登记 + 启动 reader/writer/logic 任务）。
+/// 只 `try_recv` + spawn，不做 socket IO、不阻塞 50ms Update；ticker 不在本系统。
+pub fn socket_ecs_system(runtime: Res<SocketEcs>) {
+    runtime.0.drain_accept();
+}
 
 pub fn tick_system(mut counter: ResMut<TickCounter>) {
     counter.0 += 1;

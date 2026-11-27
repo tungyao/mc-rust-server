@@ -1,11 +1,11 @@
 //! block_edit: server-authoritative dig/place decide + apply (moved from login_route.rs P17 section, no logic change).
+use tokio::io::{AsyncRead, AsyncWrite};
 use super::login::{emit_play_event, write_packet_any, PlayOptions};
 use crate::chunk_cache::ChunkCache;
 use crate::play_events::PlayEvent;
 use mc_protocol::packets;
 use mc_world::MutableWorld;
 use std::net::SocketAddr;
-use tokio::net::TcpStream;
 use tracing::info;
 use std::io;
 
@@ -356,8 +356,8 @@ pub fn decide_bonemeal(
 /// 落子后动作：缓存失效 → 发 BlockUpdate → 发 Ack → 投递 BlockEdit 事件。
 /// P21：每个 BlockUpdate 同步广播给视距内其它连接（`Ack` 仍只回操作者本人，
 /// 客户端序列预测是 per-connection 的）；无 hub 时行为与旧版逐字节一致。
-pub(crate) async fn apply_block_outcome(
-    stream: &mut TcpStream,
+pub(crate) async fn apply_block_outcome<S: AsyncRead + AsyncWrite + Unpin>(
+    stream: &mut S,
     addr: SocketAddr,
     profile: &mc_core::PlayerProfile,
     opts: &PlayOptions,
