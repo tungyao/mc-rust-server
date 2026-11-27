@@ -1,13 +1,13 @@
 {
   "id": "p54-batch1-infra",
   "title": "批次1B：广播限流 + journal运维 + 时间/天气 + 工作台会话落盘 (A3/A5/A6/A8)",
-  "status": "todo",
-  "owner": "",
+  "status": "doing",
+  "owner": "subagent-batch1b",
   "priority": "p1",
   "deps": [],
   "branch": "",
   "created": "2026-11-27T02:55:57+00:00",
-  "updated": "2026-11-27T02:55:57+00:00",
+  "updated": "2026-11-27T03:30:18+00:00",
   "detail": "",
   "files": []
 }

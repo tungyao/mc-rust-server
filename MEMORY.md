@@ -132,3 +132,4 @@
 - [2026-11-27 02:55 UTC] agent=subagent-batch1a task=p53-batch1-gameplay status=start detail=claim files=
 - [2026-11-27 02:55 UTC] agent=main task=p54-batch1-infra status=todo detail=批次1B：广播限流 + journal运维 + 时间/天气 + 工作台会话落盘 (A3/A5/A6/A8) files=
 - [2026-11-27 03:30 UTC] agent=subagent-batch1a task=p53-batch1-gameplay status=done detail=A1 XP吸引合并守恒+A2饥饿疲劳度+A4设置持久化+A7统计;四开关库默认关生产开;唯一ticker;存档v4/v3;后台xp/food/stats+e2e;550 passed;merge见main files=crates/mc-world/src/{xp,survival,inventory,store}.rs,crates/mc-network/src/drop_state/gameplay.rs,crates/mc-server/src/admin.rs,admin-ui/src/Dashboard.js,crates/mc-server/tests/gameplay_batch1_e2e.rs
+- [2026-11-27 03:30 UTC] agent=subagent-batch1b task=p54-batch1-infra status=start detail=claim files=
