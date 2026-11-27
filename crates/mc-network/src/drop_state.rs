@@ -15,7 +15,7 @@
 //! - `known`：conn_id → 该连接已见实体（视距过滤：离开视距发 Remove，进入补发）。
 
 use mc_world::crops::PlantKind;
-use mc_world::store::{TimerKind, TimerRecord, WorldStore};
+use mc_world::store::{craft_container_key, CraftSnapshot, TimerKind, TimerRecord, WorldStore};
 use mc_world::survival::Activity;
 use mc_world::{ItemEntities, MutableWorld, PlayerInventory, SurvivalState, XpOrbEntities};
 use std::collections::{HashMap, HashSet};
@@ -25,7 +25,7 @@ use std::sync::{
     atomic::{AtomicBool, AtomicI32, AtomicU64, Ordering},
 };
 use std::time::{Duration, Instant};
-use tracing::warn;
+use tracing::{debug, warn};
 
 use super::broadcast::BroadcastHub;
 use super::chunk_cache::ChunkCache;
@@ -158,6 +158,10 @@ pub struct DropState {
     hunger_detail_enabled: AtomicBool,
     settings_persist_enabled: AtomicBool,
     stats_enabled: AtomicBool,
+    /// P54 A8：工作台会话落盘开关（默认开；仅 redb 模式生效）。
+    craft_persist_enabled: AtomicBool,
+    /// P54 A6：全服时间/天气（挂同一唯一 ticker，不随连接数倍增）。
+    world_time: Mutex<Option<Arc<mc_world::world_time::WorldTimeState>>>,
     /// per-conn 活动标记（连接侧只设置，ticker 才推进疲劳度）。
     activities: Mutex<HashMap<u64, Activity>>,
     /// per-conn 疲劳度浮点伴随状态（与背包 exhaustion 字段同步落盘）。
@@ -223,6 +227,8 @@ impl DropState {
             hunger_detail_enabled: AtomicBool::new(false),
             settings_persist_enabled: AtomicBool::new(false),
             stats_enabled: AtomicBool::new(false),
+            craft_persist_enabled: AtomicBool::new(true),
+            world_time: Mutex::new(None),
             activities: Mutex::new(HashMap::new()),
             exhaustions: Mutex::new(HashMap::new()),
             orb_synced: Mutex::new(HashMap::new()),
@@ -348,6 +354,22 @@ impl DropState {
     /// 全服唯一物理 tick：支撑被挖空的重算与 `ItemEntities::tick()` 在同一把写锁内，
     /// 避免连接侧看到「已解除静息但还没下落」的中间态。
     fn physics_tick(&self, world: &MutableWorld) {
+        // P54 A6：时间/天气随**本唯一 ticker**推进（每连接不重复）；天气到期只切
+        // 服务端状态，`0x27` 天气 type 未真机确认，绝不猜字节发广播。
+        let time = self.world_time();
+        let weather_changed = time.advance_tick();
+        if weather_changed {
+            debug!("world weather expired → clear (server state only; 0x27 type unconfirmed)");
+        }
+        let now_tick = self.tick_count.load(Ordering::Relaxed) + 1;
+        if now_tick % 200 == 0 {
+            if let Some(store) = &self.store {
+                let (tick, weather) = time.snapshot();
+                if let Err(e) = store.set_world_time(tick).and_then(|_| store.set_weather(weather)) {
+                    debug!("world time persist failed ({e})");
+                }
+            }
+        }
         let mut items = self.items.lock().unwrap_or_else(|p| p.into_inner());
         let unsupported = items
             .find_unsupported(|s| world.get(s.0, s.1, s.2) != mc_world::AIR_BLOCK_ID);
@@ -602,6 +624,27 @@ impl DropState {
     /// P22：注入生长缓存失效用 cache（同上）。
     pub fn set_cache(&self, cache: Arc<ChunkCache>) {
         *self.cache.lock().unwrap_or_else(|p| p.into_inner()) = Some(cache);
+    }
+
+    /// P54 A6：注入全局时间/天气状态（与 admin 共用同一 Arc）。
+    pub fn set_world_time(&self, time: Arc<mc_world::world_time::WorldTimeState>) {
+        *self.world_time.lock().unwrap_or_else(|p| p.into_inner()) = Some(time);
+    }
+
+    /// P54 A6：后台读取同一个状态（缺省新建一份，便于单测/legacy 入口）。
+    pub fn world_time(&self) -> Arc<mc_world::world_time::WorldTimeState> {
+        self.world_time.lock().unwrap_or_else(|p| p.into_inner())
+            .clone().unwrap_or_else(|| Arc::new(mc_world::world_time::WorldTimeState::default()))
+    }
+
+    /// P54 A8：工作台会话落盘开关（默认开）。
+    pub fn set_craft_session_persist(&self, enabled: bool) {
+        self.craft_persist_enabled.store(enabled, Ordering::Relaxed);
+    }
+
+    /// P54 A8：读取会话落盘状态（`DropState` 共享给 admin）。
+    pub fn craft_session_persist(&self) -> bool {
+        self.craft_persist_enabled.load(Ordering::Relaxed)
     }
 
     /// P22 测试钩子：把某作物的种下 tick 改写为指定值（模拟流逝），返回是否命中。
@@ -1238,7 +1281,10 @@ impl DropState {
     /// P51：带稳定 UUID 的 Join 读盘（生产入口）。
     pub fn load_inventory_with_uuid(&self, conn_id: u64, user_tag: &str, uuid: &str) -> (usize, u8) {
         self.set_player_identity(conn_id, uuid);
-        self.load_inventory(conn_id, user_tag)
+        let out = self.load_inventory(conn_id, user_tag);
+        // P54 A8：重连 Join 恢复 3×3 会话（只填内存，不补发 0x12，Join 包序不变）。
+        self.restore_craft9(conn_id);
+        out
     }
 
     /// 只读当前后端一个键；缺档/损坏都返回 None（调用方据此开局+石头）。
@@ -1321,6 +1367,9 @@ impl DropState {
 
     /// 断线时刷盘 + 释放连接状态（known/背包内存；手持栈先收回背包再存）。
     pub fn unload_inventory(&self, conn_id: u64, user_tag: &str) {
+        // P54 A8：断线写会话快照（uuid 还在 map 里，取到主键后再清连接态）。
+        self.persist_craft9(conn_id, user_tag);
+        self.craft9.lock().unwrap_or_else(|p| p.into_inner()).remove(&conn_id);
         self.lock_tags().remove(&conn_id);
         self.survival.lock().unwrap_or_else(|p| p.into_inner()).remove(&conn_id);
         // P53：连接级玩法状态随断线清理；背包里的存档字段保留。
@@ -1428,6 +1477,99 @@ impl DropState {
     /// P47：全部工作台会话（后台诊断）。
     pub fn craft9_sessions(&self) -> Vec<Craft9Session> {
         self.craft9.lock().unwrap_or_else(|p| p.into_inner()).values().cloned().collect()
+    }
+
+    // --- P54 A8：工作台会话纯服务端落盘（不发 0x06、不改包流） ---
+
+    fn craft_owner(&self, conn_id: u64, user_tag: &str) -> String {
+        self.lock_uuids().get(&conn_id).cloned().unwrap_or_else(|| user_tag.to_string())
+    }
+
+    /// Join 时按稳定 UUID 恢复上次断开的会话（仅内存，不补发任何包，Join 八段逐字节不变）。
+    pub fn restore_craft9(&self, conn_id: u64) {
+        if !self.craft_session_persist() {
+            return;
+        }
+        let Some(store) = &self.store else { return };
+        let owner = self.craft_owner(conn_id, "");
+        if owner.is_empty() {
+            return;
+        }
+        for snap in store.craft_snapshots().unwrap_or_default() {
+            if snap.owner == owner {
+                let mut grid = [None; mc_world::crafting::GRID9_SIZE];
+                grid.copy_from_slice(&snap.grid[1..=mc_world::crafting::GRID9_SIZE]);
+                self.craft9.lock().unwrap_or_else(|p| p.into_inner()).insert(
+                    conn_id,
+                    Craft9Session { x: snap.pos.0, y: snap.pos.1, z: snap.pos.2, grid },
+                );
+                debug!("craft9 session restored conn_id={conn_id} owner={owner}");
+                return;
+            }
+        }
+    }
+
+    /// 断开时写盘（调用点在 `unload_inventory`，uuid/背包锁已释放后再碰 redb）。
+    fn persist_craft9(&self, conn_id: u64, user_tag: &str) {
+        if !self.craft_session_persist() {
+            return;
+        }
+        let Some(store) = &self.store else { return };
+        let Some(session) = self.craft9_session(conn_id) else { return };
+        let owner = self.craft_owner(conn_id, user_tag);
+        if owner.is_empty() {
+            return;
+        }
+        let last_saved = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_secs())
+            .unwrap_or(0);
+        // window 槽 0 是结果槽（服务端只按配方计算、不落盘），1..=9 才是合成格。
+        let mut grid = [None; 10];
+        grid[1..=mc_world::crafting::GRID9_SIZE].copy_from_slice(&session.grid);
+        let snap = CraftSnapshot {
+            owner,
+            pos: (session.x, session.y, session.z),
+            last_saved,
+            grid,
+        };
+        if let Err(e) = store.save_craft_snapshot(&snap) {
+            warn!("craft9 persist failed conn_id={conn_id} ({e})");
+        }
+    }
+
+    /// 后台 `/api/craft9`：`(是否已落盘, owner, last_saved_unix)`。
+    pub fn craft9_persisted_info(&self, owner: &str) -> (bool, String, u64) {
+        let Some(store) = &self.store else { return (false, owner.to_string(), 0) };
+        for snap in store.craft_snapshots().unwrap_or_default() {
+            if snap.owner == owner {
+                return (true, snap.owner, snap.last_saved);
+            }
+        }
+        (false, owner.to_string(), 0)
+    }
+
+    /// 后台「清空会话」：同时清内存与落盘快照。
+    pub fn clear_craft9(&self, conn_id: u64, owner: &str) -> bool {
+        self.craft9.lock().unwrap_or_else(|p| p.into_inner()).remove(&conn_id);
+        let Some(store) = &self.store else { return false };
+        let mut removed = false;
+        match store.craft_snapshots() {
+            Ok(snaps) => {
+                for snap in snaps {
+                    if snap.owner == owner {
+                        let key = craft_container_key(&snap.owner, snap.pos);
+                        match store.delete_craft_snapshot(&key) {
+                            Ok(true) => removed = true,
+                            Ok(false) => {}
+                            Err(e) => warn!("craft9 delete failed ({e})"),
+                        }
+                    }
+                }
+            }
+            Err(e) => warn!("craft9 list failed ({e})"),
+        }
+        removed
     }
 
     /// 对背包加独占锁执行闭包（调用方负责发包/刷盘）。

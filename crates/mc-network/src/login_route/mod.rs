@@ -49,6 +49,17 @@ async fn drain_outbox<S: AsyncRead + AsyncWrite + Unpin>(
     opts: &PlayOptions,
     outbox: &Option<crossbeam_channel::Receiver<QueuedPacket>>,
 ) -> io::Result<()> {
+    // P54 A3：限流开启时先排合并队列（视距 flush 在调用方已先于此完成）；
+    // 关闭时 `drain_throttled` 返回空，包流逐字节不变。Ack 走本人 socket 直写，
+    // 从不进 hub/合并队列（P52 红线）。
+    if let (Some(hub), true) = (&opts.hub, outbox.is_some()) {
+        for pkt in hub.drain_throttled(opts.conn_id) {
+            if pkt.id == ADMIN_KICK_PACKET_ID {
+                return Err(io::Error::new(io::ErrorKind::ConnectionAborted, "kicked by admin"));
+            }
+            write_packet_any(stream, pkt.id, &pkt.body, opts.threshold).await?;
+        }
+    }
     let Some(rx) = outbox else { return Ok(()) };
     while let Ok(pkt) = rx.try_recv() {
         // P25 踢人信号：不是真实包，直接把错误抛给 `play_loop` 走统一清理
@@ -405,16 +416,18 @@ async fn play_loop<S: AsyncRead + AsyncWrite + Unpin>(
                             } else {
                                 mc_world::tools::ToolEnchant::None
                             };
-                            decide_dig_with_tool(
-                                mutable,
-                                eye_of(last_pos),
-                                view.center(),
-                                view.radius(),
-                                &act,
-                                held,
-                                enchant,
-                                opts.tool_rules,
-                            )
+                            mc_world::with_journal_actor(opts.conn_id, || {
+                                decide_dig_with_tool(
+                                    mutable,
+                                    eye_of(last_pos),
+                                    view.center(),
+                                    view.radius(),
+                                    &act,
+                                    held,
+                                    enchant,
+                                    opts.tool_rules,
+                                )
+                            })
                         } {
                             // P47：START(0) 合法才给视者发进度 0；非法回滚不发动画。
                             if act.status == packets::PLAYER_ACTION_START_DIG && outcome.changes.is_empty() {
@@ -441,7 +454,9 @@ async fn play_loop<S: AsyncRead + AsyncWrite + Unpin>(
                                 // 新作物、竖著作物连根、原木登记树叶 decay）。必须在
                                 // apply/spawn 之前改 outcome，广播与掉落才能一次下发。
                                 if let Some(ds) = &opts.drops {
-                                    crops::apply_dig_effects(world, ds, &mut outcome);
+                                    mc_world::with_journal_actor(opts.conn_id, || {
+                                        crops::apply_dig_effects(world, ds, &mut outcome)
+                                    });
                                 }
                                 if let Err(e) =
                                     apply_block_outcome(stream, addr, profile, opts, cache, &outcome).await
@@ -511,13 +526,15 @@ async fn play_loop<S: AsyncRead + AsyncWrite + Unpin>(
                             .map(|(item_id, _)| item_id == mc_world::drops::ITEM_BONE_MEAL)
                             .unwrap_or(false);
                         if held_bonemeal {
-                            if let Some(action) = decide_bonemeal(
-                                mutable,
-                                eye_of(last_pos),
-                                view.center(),
-                                view.radius(),
-                                &act,
-                            ) {
+                            if let Some(action) = mc_world::with_journal_actor(opts.conn_id, || {
+                                decide_bonemeal(
+                                    mutable,
+                                    eye_of(last_pos),
+                                    view.center(),
+                                    view.radius(),
+                                    &act,
+                                )
+                            }) {
                                 if mutable.is_some() {
                                     match action {
                                         BonemealAction::Wheat(outcome) => {
@@ -579,12 +596,14 @@ async fn play_loop<S: AsyncRead + AsyncWrite + Unpin>(
                                                 .drops
                                                 .as_ref()
                                                 .map(|ds| {
-                                                    ds.grow_sapling_now(
-                                                        mutable.unwrap(),
-                                                        x,
-                                                        y,
-                                                        z,
-                                                    )
+                                                    mc_world::with_journal_actor(opts.conn_id, || {
+                                                        ds.grow_sapling_now(
+                                                            mutable.unwrap(),
+                                                            x,
+                                                            y,
+                                                            z,
+                                                        )
+                                                    })
                                                 })
                                                 .unwrap_or(false);
                                             if grew {
@@ -651,13 +670,15 @@ async fn play_loop<S: AsyncRead + AsyncWrite + Unpin>(
                                                 .drops
                                                 .as_ref()
                                                 .map(|ds| {
-                                                    ds.grow_tree_kind_now(
-                                                        mutable.unwrap(),
-                                                        x,
-                                                        y,
-                                                        z,
-                                                        spec,
-                                                    )
+                                                    mc_world::with_journal_actor(opts.conn_id, || {
+                                                        ds.grow_tree_kind_now(
+                                                            mutable.unwrap(),
+                                                            x,
+                                                            y,
+                                                            z,
+                                                            spec,
+                                                        )
+                                                    })
                                                 })
                                                 .unwrap_or(false);
                                             if grew {
@@ -748,7 +769,9 @@ async fn play_loop<S: AsyncRead + AsyncWrite + Unpin>(
                         let mut plant_outcome: Option<BlockEditOutcome> = None;
                         let mut legacy_id: Option<u16> = None;
                         let mut new_plant: Option<(mc_world::crops::PlantKind, u8)> = None;
-                        match routed {
+                        // P54 A5：本段是同步判定 + 落子，全部标注 actor=conn_id；
+                        // 跨越 await 的发包不在此闭包内（P52 线程模型不变）。
+                        mc_world::with_journal_actor(opts.conn_id, || match routed {
                             crops::HeldPlant::Legacy(plant_id) => {
                                 legacy_id = Some(plant_id);
                                 plant_outcome = decide_plant(
@@ -822,7 +845,7 @@ async fn play_loop<S: AsyncRead + AsyncWrite + Unpin>(
                                 new_plant = Some((mc_world::crops::PlantKind::Side(&mc_world::crops::COCOA), facing));
                             }
                             crops::HeldPlant::None => {}
-                        }
+                        });
                         if let Some(outcome) = plant_outcome {
                             if let Some(plant_id) = legacy_id {
                                 if let Some(_world) = mutable {
@@ -916,13 +939,15 @@ async fn play_loop<S: AsyncRead + AsyncWrite + Unpin>(
                             .map(|(item_id, _)| mc_world::drops::is_hoe_item(item_id))
                             .unwrap_or(false);
                         if held_hoe {
-                            if let Some(outcome) = decide_till(
-                                mutable,
-                                eye_of(last_pos),
-                                view.center(),
-                                view.radius(),
-                                &act,
-                            ) {
+                            if let Some(outcome) = mc_world::with_journal_actor(opts.conn_id, || {
+                                decide_till(
+                                    mutable,
+                                    eye_of(last_pos),
+                                    view.center(),
+                                    view.radius(),
+                                    &act,
+                                )
+                            }) {
                                 if mutable.is_some() {
                                     if let Err(e) = apply_block_outcome(
                                         stream, addr, profile, opts, cache, &outcome,
@@ -966,14 +991,16 @@ async fn play_loop<S: AsyncRead + AsyncWrite + Unpin>(
                             }
                             continue;
                         };
-                        if let Some(outcome) = decide_place(
-                            mutable,
-                            eye_of(last_pos),
-                            view.center(),
-                            view.radius(),
-                            &act,
-                            place_id,
-                        ) {
+                        if let Some(outcome) = mc_world::with_journal_actor(opts.conn_id, || {
+                            decide_place(
+                                mutable,
+                                eye_of(last_pos),
+                                view.center(),
+                                view.radius(),
+                                &act,
+                                place_id,
+                            )
+                        }) {
                             if let Some(_world) = mutable {
                                 let placed = outcome
                                     .changes

@@ -56,6 +56,8 @@ pub struct PlayOptions {
     pub hunger_detail: bool,
     pub settings_persist: bool,
     pub stats: bool,
+    /// P54 A8：工作台会话断开写盘/重连恢复（默认开；仅 redb 模式生效）。
+    pub craft_session_persist: bool,
 }
 
 impl PlayOptions {
@@ -78,6 +80,7 @@ impl PlayOptions {
             hunger_detail: false,
             settings_persist: false,
             stats: false,
+            craft_session_persist: true,
         }
     }
 
@@ -137,6 +140,12 @@ impl PlayOptions {
     /// P47：打开工具等级/时运/精准采集判定。
     pub fn with_tool_rules(mut self, enabled: bool) -> Self {
         self.tool_rules = enabled;
+        self
+    }
+
+    /// P54 A8：透传工作台会话落盘开关。
+    pub fn with_craft_session_persist(mut self, enabled: bool) -> Self {
+        self.craft_session_persist = enabled;
         self
     }
 

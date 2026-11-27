@@ -15,7 +15,67 @@ const dashboardTemplate = `
         <n-button size="tiny" :loading="saving" @click="saveNow">立即存档</n-button>
       </template>
       <pre class="kv">{{ worldText }}</pre>
+      <div class="row">
+        <span class="label">时间滑块</span>
+        <n-slider v-model:value="timeTick" :min="0" :max="23999" :step="100" style="width: 220px" />
+        <n-button size="tiny" @click="setCustomTime">应用时间</n-button>
+        <span class="label">天气（待真机确认）</span>
+        <n-select v-model:value="weatherPreset" :options="weatherOptions" size="tiny" style="width: 110px" />
+        <n-button size="tiny" @click="setWeatherNow">应用天气</n-button>
+      </div>
+      <div class="row">
+        <span class="label">广播队列</span><code>{{ world?.broadcast_queue ?? 0 }}</code>
+        <span class="label">丢弃</span><code>{{ world?.broadcast_dropped ?? 0 }}</code>
+        <span class="label">合并方块</span><code>{{ world?.merged_blocks ?? 0 }}</code>
+        <span class="muted">A3 限流默认关：{{ world?.broadcast_throttle ? '开' : '关' }}</span>
+      </div>
       <div v-if="saveMsg" class="muted">{{ saveMsg }}</div>
+    </n-card>
+
+    <n-card size="small" title="时间 / 天气（P54 A6，天气待真机确认）">
+      <n-alert type="info" :show-icon="false">
+        set_time 0x73（Long + Bool）已验证；天气 game_event 0x27 的 type 值未抓包确认，
+        只做服务端状态 + 后台显示，<b>不发天气包</b>。夜间天空光由 v2 逐列实现。
+      </n-alert>
+      <div class="row">
+        <span class="label">时刻 tick</span>
+        <n-input-number v-model:value="timeTick" :min="0" :max="23999" size="small" style="width: 140px" />
+        <n-button size="small" @click="setTimePreset('day')">设为白天</n-button>
+        <n-button size="small" @click="setTimePreset('night')">设为夜晚</n-button>
+        <n-button type="primary" size="small" @click="setCustomTime">自定义 tick</n-button>
+        <span class="muted">{{ timeMsg }}</span>
+      </div>
+      <div class="row">
+        <span class="label">天气</span>
+        <n-select v-model:value="weatherPreset" :options="weatherOptions" size="small" style="width: 130px" />
+        <span class="label">持续 tick</span>
+        <n-input-number v-model:value="weatherDuration" :min="1" :max="23999" size="small" style="width: 140px" />
+        <n-button size="small" @click="setWeatherNow">设置天气</n-button>
+        <span class="muted">{{ weatherMsg }}</span>
+      </div>
+    </n-card>
+
+    <n-card size="small" title="存档运维（P54 A5）">
+      <div class="row">
+        <span class="label">journal seq</span><code>{{ world?.journal_seq ?? 0 }}</code>
+        <span class="label">保留条数</span><code>{{ world?.journal_kept ?? 0 }}</code>
+        <span class="label">最老 seq</span><code>{{ world?.oldest_kept ?? 0 }}</code>
+        <span class="label">字节</span><code>{{ world?.journal_bytes ?? 0 }}</code>
+      </div>
+      <div class="row">
+        <span class="label">保留窗口</span>
+        <n-input-number v-model:value="journalKeep" :min="1" size="small" style="width: 140px" />
+        <n-button size="small" :loading="trimming" @click="trimNow">裁剪 journal</n-button>
+        <span class="muted">{{ journalMsg }}</span>
+      </div>
+      <div class="row">
+        <span class="label">A3 限流</span>
+        <n-select v-model:value="throttleEnabled" :options="boolOptions" size="small" style="width: 90px" />
+        <span class="label">队列上限</span>
+        <n-input-number v-model:value="throttleMax" :min="1" :max="65536" size="small" style="width: 130px" />
+        <n-button size="small" @click="applyThrottle">应用（改包序需真机确认）</n-button>
+        <span class="muted">{{ throttleMsg }}</span>
+      </div>
     </n-card>
 
     <n-card size="small" title="在线玩家（2s 轮询）">
@@ -205,9 +265,20 @@ const dashboardTemplate = `
       <template #footer><span class="muted">{{ selectedRecipeDetail }}</span></template>
     </n-card>
 
-    <n-card size="small" title="工作台会话（P47，仅内存）">
+    <n-card size="small" title="工作台会话（P54 A8，服务端落盘）">
+      <div class="row">
+        <span class="label">落盘</span>
+        <n-tag :type="craft9?.persist_enabled ? 'success' : 'default'" size="small" :bordered="false">
+          {{ craft9?.persist_enabled ? '已启用' : '未启用' }}
+        </n-tag>
+        <span class="label">清空会话</span>
+        <n-select v-model:value="craftClearUser" :options="userOptions" filterable clearable
+                  placeholder="选择会话 owner" size="small" style="width: 220px" />
+        <n-button size="tiny" type="error" secondary :disabled="!craftClearUser" @click="clearCraft9">清空</n-button>
+        <span class="muted">{{ craftMsg }}</span>
+      </div>
       <pre class="kv">{{ craft9Text }}</pre>
-      <template #footer><span class="muted">右键放置 crafting_table 后登记；离开/断线即丢，无 block entity 存档。</span></template>
+      <template #footer><span class="muted">断线写 redb block_entities 表，重进 Join 恢复；不发 0x06，不改包流。快照含 persisted/owner/last_saved。</span></template>
     </n-card>
 
     <n-card size="small" title="广播">
@@ -315,6 +386,31 @@ export const Dashboard = {
     const selectedRecipe = ref('');
     const craft9 = ref(null);
 
+    // P54：时间/天气、存档运维、广播限流、工作台会话清空。
+    const timeTick = ref(1000);
+    const timeMsg = ref('');
+    const weatherPreset = ref('clear');
+    const weatherDuration = ref(120);
+    const weatherMsg = ref('');
+    const weatherOptions = [
+      { label: '晴', value: 'clear' },
+      { label: '雨', value: 'rain' },
+      { label: '雷暴', value: 'thunder' },
+    ];
+    const boolOptions = [
+      { label: '关', value: false },
+      { label: '开', value: true },
+    ];
+    const journalKeep = ref(10000);
+    const journalMsg = ref('');
+    const trimming = ref(false);
+    const throttleEnabled = ref(false);
+    const throttleMax = ref(256);
+    const throttleMsg = ref('');
+    const craftClearUser = ref(null);
+    const craftMsg = ref('');
+    const worldSynced = ref(false);
+
     // P53：经验发放 / 生存调试 / 本地统计（在线玩家身份仍以稳定 UUID 为准）。
     const xpUser = ref(null);
     const xpAmount = ref(1);
@@ -410,6 +506,62 @@ export const Dashboard = {
         craft9.value = await jget('/api/craft9');
       } catch (e) { /* 下次轮询重试 */ }
     }
+    async function setTimePreset(preset) {
+      try {
+        const r = await jpost('/api/time', { preset });
+        timeMsg.value = r.body.ok ? `tick=${r.body.tick}` : 'HTTP ' + r.status + ' ' + JSON.stringify(r.body);
+        if (r.status === 200 && r.body.ok) message.success('时间已设置');
+        else message.error(timeMsg.value);
+      } catch (e) { timeMsg.value = 'time failed: ' + e; message.error(timeMsg.value); }
+      await refreshWorld();
+    }
+    async function setCustomTime() {
+      try {
+        const r = await jpost('/api/time', { tick: Number(timeTick.value) });
+        timeMsg.value = 'HTTP ' + r.status + ' ' + JSON.stringify(r.body);
+        if (r.status === 200 && r.body.ok) timeTick.value = r.body.tick;
+        else message.error(timeMsg.value);
+      } catch (e) { timeMsg.value = 'time failed: ' + e; message.error(timeMsg.value); }
+      await refreshWorld();
+    }
+    async function setWeatherNow() {
+      try {
+        const r = await jpost('/api/weather', {
+          weather: weatherPreset.value, duration_ticks: Number(weatherDuration.value),
+        });
+        weatherMsg.value = r.body.ok ? `已设 ${r.body.weather}（待真机确认，未发包）` : JSON.stringify(r.body);
+        if (!r.body.ok) message.error(weatherMsg.value);
+      } catch (e) { weatherMsg.value = 'weather failed: ' + e; message.error(weatherMsg.value); }
+      await refreshWorld();
+    }
+    async function trimNow() {
+      trimming.value = true;
+      try {
+        const r = await jpost('/api/journal-trim', { keep: Number(journalKeep.value) });
+        journalMsg.value = r.body.ok ? `已裁剪 ${r.body.removed} 条` : JSON.stringify(r.body);
+        if (!r.body.ok) message.error(journalMsg.value);
+      } catch (e) { journalMsg.value = 'trim failed: ' + e; message.error(journalMsg.value); }
+      finally { trimming.value = false; await refreshWorld(); }
+    }
+    async function applyThrottle() {
+      try {
+        const r = await jpost('/api/broadcast-throttle', {
+          enabled: !!throttleEnabled.value, max_queue: Number(throttleMax.value),
+        });
+        throttleMsg.value = r.body.ok ? `限流 ${r.body.enabled ? '开' : '关'}` : JSON.stringify(r.body);
+        if (!r.body.ok) message.error(throttleMsg.value);
+      } catch (e) { throttleMsg.value = 'throttle failed: ' + e; message.error(throttleMsg.value); }
+      await refreshWorld();
+    }
+    async function clearCraft9() {
+      if (!craftClearUser.value) { message.warning('请选择会话 owner'); return; }
+      try {
+        const r = await jpost('/api/craft9-clear', { uuid: craftClearUser.value });
+        craftMsg.value = r.body.ok ? `已清空 ${r.body.owner}` : JSON.stringify(r.body);
+        if (!r.body.ok) message.error(craftMsg.value);
+      } catch (e) { craftMsg.value = 'clear failed: ' + e; message.error(craftMsg.value); }
+      await Promise.all([loadCraft9(), refreshWorld()]);
+    }
     async function giveTool() {
       if (!toolUser.value || !selectedTool.value) {
         message.warning('请选择玩家与镐子');
@@ -483,6 +635,15 @@ export const Dashboard = {
         world.value = await jget('/api/world');
       } catch (e) {
         world.value = { ok: false, error: String(e) };
+      }
+      const w = world.value;
+      if (w && w.ok && !worldSynced.value) {
+        timeTick.value = w.world_time ?? 1000;
+        weatherPreset.value = w.weather || 'clear';
+        journalKeep.value = w.journal_keep || 10000;
+        throttleEnabled.value = !!w.broadcast_throttle;
+        throttleMax.value = w.broadcast_max_queue || 256;
+        worldSynced.value = true;
       }
     }
     async function refreshOnline() {
@@ -568,7 +729,7 @@ export const Dashboard = {
     onBeforeUnmount(() => timers.forEach(clearInterval));
 
     return {
-      worldText, online, saving, saveMsg, fmtPos, fmtNum, fmtSurvival, shortUuid, kick, saveNow,
+      world, worldText, online, saving, saveMsg, fmtPos, fmtNum, fmtSurvival, shortUuid, kick, saveNow,
       userOptions, giveUser, giveCount, giveCat, giveQuery, categoryOptions,
       selectedItem, filteredItems, visibleItems, giveHint, giveMsg, giveItem,
       invUser, invCat, invQuery, invSlots, invEmptySlots, invHint, showInv,
@@ -577,6 +738,11 @@ export const Dashboard = {
       enchantOptions, toolMsg, toolBlocks, giveTool, applyToolEnchant,
       recipeCat, recipeCatOptions, recipeQuery, recipes, filteredRecipes,
       visibleRecipes, recipeHint, selectedRecipe, selectedRecipeDetail, craft9Text,
+      timeTick, timeMsg, setTimePreset, setCustomTime,
+      weatherPreset, weatherOptions, weatherDuration, weatherMsg, setWeatherNow,
+      journalKeep, journalMsg, trimming, trimNow,
+      throttleEnabled, throttleMax, boolOptions, throttleMsg, applyThrottle,
+      craftClearUser, craftMsg, clearCraft9,
       xpUser, xpAmount, xpMsg, grantXp,
       foodUser, foodValue, satValue, foodMsg, setFood,
       statUser, statFrom, statTo, statRows, statMsg, loadStats,

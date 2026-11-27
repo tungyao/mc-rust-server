@@ -29,6 +29,32 @@ use std::collections::{HashMap, HashSet};
 use std::io::{Read, Write};
 use std::path::Path;
 use std::sync::{Arc, RwLock};
+use std::cell::Cell;
+
+thread_local! {
+    /// P54 A5：net 判定同步区间内的 actor（conn_id）。ticker/后台线程不设置，
+    /// 因此系统编辑仍是 0；`with_journal_actor` 用 RAII 恢复上一层值（可重入）。
+    static JOURNAL_ACTOR: Cell<u64> = const { Cell::new(0) };
+}
+
+/// 在**同步**判定区间给后续 `set`/`set_if` 标注 actor=conn_id。绝不跨 `.await`
+/// 使用：tokio task 可能在 await 前后换线程，本闭包内只做内存判定/落子。
+pub fn with_journal_actor<R>(actor: u64, f: impl FnOnce() -> R) -> R {
+    JOURNAL_ACTOR.with(|slot| {
+        let prev = slot.replace(actor);
+        let out = f();
+        slot.set(prev);
+        out
+    })
+}
+
+fn current_journal_actor(explicit: u64) -> u64 {
+    if explicit != 0 {
+        explicit
+    } else {
+        JOURNAL_ACTOR.with(|slot| slot.get())
+    }
+}
 
 /// 世界纵向有效范围：y ∈ [MIN_Y, WORLD_TOP_Y]，section y=-64..319。
 pub const WORLD_TOP_Y: i32 = MIN_Y + SECTION_COUNT as i32 * 16 - 1;
@@ -299,7 +325,10 @@ impl MutableWorld {
         }
         let new_override = if id == base { u16::MAX } else { id };
         if self.store.is_some() && old_override != new_override {
-            inner.edits.push(BlockEdit { x, y, z, old: old_override, new: new_override, actor, tick });
+            inner.edits.push(BlockEdit {
+                x, y, z, old: old_override, new: new_override,
+                actor: current_journal_actor(actor), tick,
+            });
         }
         inner.dirty.insert(chunk_of_block(x, z));
         old
@@ -340,7 +369,10 @@ impl MutableWorld {
         }
         let new_override = if id == base { u16::MAX } else { id };
         if self.store.is_some() && old_override != new_override {
-            inner.edits.push(BlockEdit { x, y, z, old: old_override, new: new_override, actor, tick });
+            inner.edits.push(BlockEdit {
+                x, y, z, old: old_override, new: new_override,
+                actor: current_journal_actor(actor), tick,
+            });
         }
         inner.dirty.insert(chunk_of_block(x, z));
         Some(old)
@@ -932,6 +964,18 @@ mod tests {
         assert_eq!((recs[1].actor, recs[1].tick), (12, 56));
         assert!(store.blocks().unwrap().is_empty(), "materialized view agrees with replay");
         assert_eq!(world.flush_to_store(78).unwrap(), 0, "no edits after successful flush");
+
+        // P54 A5：net 判定同步区间标注 actor=conn_id；ticker 系统写仍是 0。
+        with_journal_actor(4242, || {
+            world.set(4, 100, 4, STONE_BLOCK_ID);
+            assert_eq!(current_journal_actor(0), 4242);
+        });
+        assert_eq!(current_journal_actor(0), 0, "actor scope restores outer value");
+        world.set(5, 100, 5, STONE_BLOCK_ID);
+        world.flush_to_store(79).unwrap();
+        let recs = store.replay().unwrap();
+        assert_eq!(recs[recs.len() - 2].actor, 4242);
+        assert_eq!(recs[recs.len() - 1].actor, 0);
         let _ = std::fs::remove_dir_all(&dir);
     }
 
