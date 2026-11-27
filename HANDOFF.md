@@ -20,9 +20,10 @@
 > **真机复验仍未做**；用户决策：`p32` 保持 blocked、v2 较慢可接受（不强制回退 v1）、
 > UUID 稳定化 + 存档/后台迁移（`p51-uuid-identity`）已合入（见 §5.35）；
 > `p50` 立项评估已完成，`p52-socket-ecs-b` 方案 B 全量切换已合入（见 §5.34），
-> **真机对比待用户执行**；
+> **真机对比待用户执行**；批次 1A（`p53-batch1-gameplay` / `51ba63f2`）A1–A2/A4/A7
+> 四项已合入（见 §5.36），批次 1B（`p54-batch1-infra`：A3/A5/A6/A8）待派发；
 > 后台管理面板已用 Vue 3 + Naive UI 重写并**完全离线化**合入（`p34-admin-vue` / `53f1016`、
-> `p35-admin-offline` / `48e14bd`，见 §5.25）；当前无进行中的派发任务。
+> `p35-admin-offline` / `48e14bd`，见 §5.25）。
 
 ## 1. 一句话现状
 
@@ -72,6 +73,10 @@ world_dir = "world"           # P17/P36：存档目录；redb 模式为 state-<s
 world_storage = "redb"        # P38：新格式（默认）；"legacy" 回退到 overrides/player .dat，旧 toml 缺键补 redb
 generator_version = 1         # P44：1=v1 永久冻结（默认，老 seed 逐字节不变）；2=v2 仅新 seed/显式开启
 socket_mode = "ecs"           # P52：默认全量 ECS 持有 socket；"net" 为紧急回退（启动期锁定，旧 toml 缺键补 ecs）
+xp_merge = true               # P53 A1：经验球 7.25 格吸引 + 邻近合并（总经验守恒）
+hunger_detail = true          # P53 A2：疾跑/跳跃/游泳疲劳度
+settings_persist = true       # P53 A4：gamemode/tool_enchant 跨重连持久化
+stats = true                  # P53 A7：本地统计（不发包；B13 才推 award_stats）
 ```
 
 P16 的 seed 示例：默认 seed 视野（radius 10）内只有树林/丘陵、没有水面（P14 高度分布下 h<63 的列约 0.2%，且不在出生视距内）；`seed=42` 出生点朝南约 40 格是沙岸+池塘，`seed=-987654321` 出生点东侧约 25 格水域更大，两者都有大量 oak 树，真机截图见 §4。
@@ -420,10 +425,10 @@ $natives = 'C:\Users\qwe\AppData\Local\Temp\mc263natives'
 
 ### 本地检查
 
-- `cargo test --workspace`：全部通过（2026-11-27 实跑 **528 passed / 0 failed**；
-  P18 当时 215，之后 P18.1–P52 又追加单测与 play_stream / play_actions / play_crops /
+- `cargo test --workspace`：全部通过（2026-11-27 实跑 **550 passed / 0 failed**；
+  P18 当时 215，之后 P18.1–P53 又追加单测与 play_stream / play_actions / play_crops /
   play_all_crops / timer_persist / play_survival / play_recipes / player_visibility /
-  fluid / play_tools / socket_ecs_e2e / uuid_identity / admin_e2e 集成测试）。
+  fluid / play_tools / socket_ecs_e2e / uuid_identity / gameplay_batch1_e2e / admin_e2e 集成测试）。
   已知 flake：`p27_bonemeal_advances_wheat_and_grows_sapling` 在并行负载下偶发失败一次
   （ticker/骨粉跟踪竞态，测试未改、隔离与复跑全过），多轮全量中出现过 2–3 次，继续观察。
 - redb 生产核心真机进程冒烟（2026-11-26）：临时 `server.toml` 设 `world_storage="redb"`、
@@ -1042,6 +1047,29 @@ $natives = 'C:\Users\qwe\AppData\Local\Temp\mc263natives'
     （本轮审查时 `p27_bonemeal_advances_wheat_and_grows_sapling` 偶发失败一次，隔离/复跑全绿）。
     未做：真实在线模式 UUID、`player_info_update 0x47` 名字/皮肤、挖掘动画 0x05（无抓包不猜字节）。
 
+36. **批次 1A：经验球/饥饿/设置持久化/统计（已合入，`p53-batch1-gameplay` / `51ba63f2`）**：
+    四项各自独立开关，`server.toml` 生产默认全开，`NetConfig::default()` 库默认全关以保住
+    旧 e2e 逐字节包流；`serve()` 在启动唯一 ticker 前经 `set_p53_features` + `PlayOptions` 注入。
+    - **A1** 经验球：`mc-world::xp` 全局池，7.25 格吸引 + 邻近合并（每组上限 16、距离 0.6），
+      **总经验严格守恒**，溢出则整组放弃合并；只在 `physics_tick` 的唯一 50ms ticker 做，
+      连接侧按快照差集只发已验证 `0x23/0x4E`（新实体走 `0x01/0x65`），无新包、无每连接 ticker。
+    - **A2** 饥饿：C2S 移动包推断疾跑/跳跃/游泳标记（只写 per-conn），ticker 累加疲劳度，
+      跨 4.0 消耗饱和/饥饿；为保住既有 `SurvivalState` 穷举字面量测试，exhaustion 实现为
+      同存浮点伴随状态（`DropState.exhaustions` + `PlayerInventory.exhaustion`），语义等价。
+    - **A4** 设置持久化：gamemode/tool_enchant 写入背包存档，登录时 `apply_persisted_settings`
+      以落盘值为 hub/DropState 权威内存初值（**不插 Join 包**）；UUID 主键 + username 兼容镜像。
+      未做客户端 `PlayerAbilities 0x6A` 补发（本仓无该包实现，与 P47 服务端权威口径一致）。
+    - **A7** 统计：redb 新表 `stats`（`uuid|stat_id|day → u64` + username 镜像），
+      在既有 `PlayEvent::BlockEdit` / 死亡路径累加挖掘/放置/死亡；**不发包、不新增 ticker**。
+    - 存档：`.dat` v3→v4、redb `players` v2→v3（+6B：exhaustion f32 + gamemode u8 + enchant u8），
+      v1–v3 兼容读（缺省 0/survival/none）；旧库缺 `stats` 表视为空。
+      后台：`/api/online` 增 xp/health/food/saturation/exhaustion/persisted_*，
+      `/api/world.p53_features`，新增 `POST /api/xp`、`POST /api/set-food`、`GET /api/stats`；
+      Vue 增 3 卡与在线列，离线单文件重建、`check-offline.mjs` 零外链。
+    旧 528 测试一字未改；合并后 **550 passed / 0 failed**。进程冒烟：启动日志
+    `p53 features all=true → socket_mode=ecs → redb opened → global ticker → keepalive`，无 panic。
+    **真机待验**：吸引手感、疲劳度平衡、重进模式/统计显示（清单 §4/§7/§9）。
+
 ## 6. 关键文件
 
 ```
@@ -1071,6 +1099,7 @@ crates/mc-network/src/
   tests/fluid.rs              P46 流体存档/广播/游泳互见 e2e
   tests/socket_ecs_e2e.rs     P52 ECS/net Join 逐字节、Ack 相邻无广播、断线清理 e2e
   tests/uuid_identity.rs      P51 稳定 UUID、迁移兜底、双用户与面板按 uuid e2e
+  tests/gameplay_batch1_e2e.rs P53 XP/模式/食物/统计同名重进、ticker 吸引合并守恒 e2e
   chunk_view.rs              clamp_view_radius/view_chunk_count、per-connection 视距集合/去重/跨区块 add/remove 规划
   chunk_cache.rs             共享已编码 ChunkData 0x2E 包体缓存（Mutex+HashMap+FIFO，默认 1024；`bodies` rayon 并行批量；P17 `with_mutable` + `invalidate`）
   play_events.rs             net 线程 → ECS 的移动/KeepAlive/Disconnect/BlockEdit 事件（conn_id 实体键）
@@ -1088,6 +1117,9 @@ crates/mc-world/src/
   survival.rs                P40 生存状态（health/food/saturation）与食物表纯逻辑
   store.rs                   P36/P38/P39 redb 存储（生产核心 + 计时）
   uuid_migration.rs          P51 用户名→稳定 UUID 存档迁移（幂等/回退/报告）
+  xp.rs                      P31 经验球 + P53 A1 吸引/合并（总经验守恒） A1 牵引只在唯一 ticker
+  survival.rs                P40 生存 + P53 A2 疲劳度推进（4.0 阈值）
+  drop_state/gameplay.rs     P53 四开关、ticker 内 XP/疲劳度推进、统计与设置持久化
   worldgen/
     mod.rs                   WorldGen + GeneratorVersion(v1 冻结/v2 显式)、高度/出生保护/biome/洞穴/树、跨 chunk 扫描
     ores.rs / features.rs    P44 v2 矿种高度带 / 地表材质·多树种·草花水岸植被
