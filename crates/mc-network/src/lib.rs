@@ -25,7 +25,10 @@ pub use chunk_view::{
     MIN_VIEW_RADIUS, PLAY_VIEW_CHUNK_COUNT, PLAY_VIEW_RADIUS,
 };
 pub use config::{NetConfig, STATUS_MAX_PLAYERS, STATUS_MOTD};
-pub use drop_state::{DropState, FIRST_DROP_ENTITY_ID, PLAYER_ENTITY_ID, STARTER_STONE_COUNT};
+pub use drop_state::{
+    enchant_code, gamemode_code, stat_name, DropState, FIRST_DROP_ENTITY_ID, PLAYER_ENTITY_ID,
+    STARTER_STONE_COUNT,
+};
 pub use fluid_sync::{FluidState, FLUID_TICK_MS, MAX_TASKS_PER_TICK, MAX_WRITES_PER_TICK};
 pub use framing::{MAX_PACKET_LEN, READ_TIMEOUT};
 pub use login_route::{
@@ -73,6 +76,13 @@ pub async fn serve(listener: TcpListener, tx: Sender<NewConnection>, config: Net
     // 只做拾取/视距同步，绝不调用 ItemEntities::tick()，否则 N 连接 = N 倍速物理。
     // 独立 std::thread，不依赖 tokio runtime；DropState::new 在单测里依然无副作用。
     if let (Some(drops), Some(world)) = (&config.drops, &config.mutable_world) {
+        // P53：四项开关在启动唯一的 ticker 之前注入（连接侧由 PlayOptions 独立透传）。
+        drops.set_p53_features(
+            config.xp_merge,
+            config.hunger_detail,
+            config.settings_persist,
+            config.stats,
+        );
         // P22 生长广播/缓存失效：hub 与 cache 齐备时注入 DropState，生长变更才能
         // fan-out 到视距内连接并使 chunk 缓存失效；缺谁都不影响落子本身。
         if let Some(hub) = &config.hub {

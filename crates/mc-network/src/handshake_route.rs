@@ -52,6 +52,10 @@ pub async fn handle_connection<S: AsyncRead + AsyncWrite + Unpin>(
                 player_visibility: config.player_visibility,
                 destroy_stage: config.destroy_stage,
                 tool_rules: config.tool_rules,
+                xp_merge: config.xp_merge,
+                hunger_detail: config.hunger_detail,
+                settings_persist: config.settings_persist,
+                stats: config.stats,
             };
             handle_login_with_options(stream, addr, &tx, opts).await?;
         }

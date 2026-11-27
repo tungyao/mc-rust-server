@@ -12,6 +12,8 @@
 //!
 //! P40：加入生存三字段（health/food/saturation）并设存档 v3（= v2 + 12B 尾部生存字段），
 //! v1/v2 旧档仍可读、生存值取默认满状态；redb `players` 表对应 v2 记录（见 store.rs）。
+//! P53：v4 = v3 + 尾部 6B（exhaustion f32 BE + gamemode u8 + tool_enchant u8）；
+//! v1–v3 旧档兼容读，缺省 0 / survival / none；redb `players` v3 同口径。
 //! P40 合成：槽 1–4 现在允许 PICKUP 放入/取出原料，槽 0 是只读结果槽（点击走
 //! `craft_result`）；9–45 的 PICKUP/SWAP/QUICK_MOVE/THROW 语义一字未改。
 
@@ -31,12 +33,22 @@ pub const HOTBAR_END: usize = 44;
 
 /// 存档魔数 + 版本（自有格式，与 P17 overrides 存档同目录、seed 隔离）。
 /// v2 = v1 + 尾部 4 字节总经验（P31）；v3 = v2 + 尾部 12 字节生存状态（P40：
-/// health f32 BE + food i32 BE + saturation f32 BE）。v1/v2 旧档仍可读，
-/// XP/生存值分别缺省 0 / 满状态（向后兼容）。
+/// health f32 BE + food i32 BE + saturation f32 BE）；v4 = v3 + 尾部 6 字节
+/// （P53：exhaustion f32 BE + gamemode u8 + tool_enchant u8）。
+/// v1–v3 旧档仍可读，XP/生存/疲劳/设置分别缺省 0 / 满状态 / 0 / survival,none。
 const SAVE_MAGIC: [u8; 4] = *b"P18I";
-const SAVE_VERSION: u8 = 3;
+const SAVE_VERSION: u8 = 4;
 const LEGACY_SAVE_VERSION: u8 = 1;
 const LEGACY_SAVE_VERSION_V2: u8 = 2;
+const LEGACY_SAVE_VERSION_V3: u8 = 3;
+
+/// P53 A4：游戏模式存档码（与 `mc_network::GameMode` 的 as_str 顺序无关，固定映射）。
+pub const SETTINGS_GAMEMODE_SURVIVAL: u8 = 0;
+pub const SETTINGS_GAMEMODE_CREATIVE: u8 = 1;
+/// P53 A4：工具附魔存档码（none / fortune / silk_touch）。
+pub const SETTINGS_ENCHANT_NONE: u8 = 0;
+pub const SETTINGS_ENCHANT_FORTUNE: u8 = 1;
+pub const SETTINGS_ENCHANT_SILK_TOUCH: u8 = 2;
 /// 新背包开局石头数（hotbar 槽 36）。
 pub const STARTER_COUNT: i32 = 64;
 
@@ -52,6 +64,11 @@ pub struct PlayerInventory {
     total_xp: i32,
     /// P40 生存状态（与背包同文件/同 redb 记录存盘；旧档默认满血满饥饿）。
     survival: crate::survival::SurvivalState,
+    /// P53 A2：疲劳度浮点伴随状态（旧档缺字段按 0 处理）。
+    exhaustion: f32,
+    /// P53 A4：跨重连持久化的后台设置（旧档默认 survival / none）。
+    gamemode: u8,
+    tool_enchant: u8,
 }
 
 impl Default for PlayerInventory {
@@ -63,6 +80,9 @@ impl Default for PlayerInventory {
             cursor: None,
             total_xp: 0,
             survival: crate::survival::SurvivalState::full(),
+            exhaustion: 0.0,
+            gamemode: SETTINGS_GAMEMODE_SURVIVAL,
+            tool_enchant: SETTINGS_ENCHANT_NONE,
         }
     }
 }
@@ -353,6 +373,50 @@ impl PlayerInventory {
         f(&mut self.survival)
     }
 
+    // ---- P53：疲劳度 + 跨重连设置（与背包同存档） ----
+
+    pub fn exhaustion(&self) -> f32 {
+        self.exhaustion
+    }
+
+    pub fn set_exhaustion(&mut self, value: f32) {
+        self.exhaustion = crate::survival::sanitize_exhaustion(value);
+    }
+
+    /// P53 A4：模式存档码（0=survival，1=creative；非法值归零）。
+    pub fn persisted_gamemode(&self) -> u8 {
+        if self.gamemode == SETTINGS_GAMEMODE_CREATIVE {
+            SETTINGS_GAMEMODE_CREATIVE
+        } else {
+            SETTINGS_GAMEMODE_SURVIVAL
+        }
+    }
+
+    pub fn set_persisted_gamemode(&mut self, code: u8) {
+        self.gamemode = if code == SETTINGS_GAMEMODE_CREATIVE {
+            SETTINGS_GAMEMODE_CREATIVE
+        } else {
+            SETTINGS_GAMEMODE_SURVIVAL
+        };
+    }
+
+    /// P53 A4：附魔存档码（0=none，1=fortune，2=silk_touch；非法值归零）。
+    pub fn persisted_tool_enchant(&self) -> u8 {
+        match self.tool_enchant {
+            SETTINGS_ENCHANT_FORTUNE => SETTINGS_ENCHANT_FORTUNE,
+            SETTINGS_ENCHANT_SILK_TOUCH => SETTINGS_ENCHANT_SILK_TOUCH,
+            _ => SETTINGS_ENCHANT_NONE,
+        }
+    }
+
+    pub fn set_persisted_tool_enchant(&mut self, code: u8) {
+        self.tool_enchant = match code {
+            SETTINGS_ENCHANT_FORTUNE => SETTINGS_ENCHANT_FORTUNE,
+            SETTINGS_ENCHANT_SILK_TOUCH => SETTINGS_ENCHANT_SILK_TOUCH,
+            _ => SETTINGS_ENCHANT_NONE,
+        };
+    }
+
     /// 清空所有槽（死亡掉落用；光标也收回后丢弃）。
     pub fn clear_all(&mut self) {
         for slot in self.slots.iter_mut() {
@@ -542,7 +606,7 @@ impl PlayerInventory {
     }
 
     /// 落盘（tmp+rename 原子替换）：魔数/版本/selected/state/条目(槽u8+物品i32+数量i32)
-    /// + 尾部 4 字节总经验（P31 v2）+ 12 字节生存状态（P40 v3）。
+    /// + 尾部 4B 总经验（v2）+ 12B 生存状态（v3）+ 6B 疲劳/设置（v4，P53）。
     pub fn save_to_dir(&self, dir: &Path, user_tag: &str, seed: i64) -> std::io::Result<usize> {
         std::fs::create_dir_all(dir)?;
         let mut entries = Vec::new();
@@ -553,7 +617,7 @@ impl PlayerInventory {
         }
         let path = Self::save_path(dir, user_tag, seed);
         let tmp = path.with_extension("tmp");
-        let mut buf = Vec::with_capacity(12 + entries.len() * 9 + 4 + 12);
+        let mut buf = Vec::with_capacity(12 + entries.len() * 9 + 4 + 12 + 6);
         buf.extend_from_slice(&SAVE_MAGIC);
         buf.push(SAVE_VERSION);
         buf.push(self.selected);
@@ -570,6 +634,10 @@ impl PlayerInventory {
         buf.extend_from_slice(&self.survival.health.to_be_bytes());
         buf.extend_from_slice(&self.survival.food.to_be_bytes());
         buf.extend_from_slice(&self.survival.saturation.to_be_bytes());
+        // v4（P53）：exhaustion f32 BE + gamemode u8 + tool_enchant u8。
+        buf.extend_from_slice(&self.exhaustion.to_be_bytes());
+        buf.push(self.gamemode);
+        buf.push(self.tool_enchant);
         {
             let mut f = std::fs::File::create(&tmp)?;
             f.write_all(&buf)?;
@@ -600,6 +668,7 @@ impl PlayerInventory {
         if head[4] != SAVE_VERSION
             && head[4] != LEGACY_SAVE_VERSION
             && head[4] != LEGACY_SAVE_VERSION_V2
+            && head[4] != LEGACY_SAVE_VERSION_V3
         {
             return Err(std::io::Error::new(
                 std::io::ErrorKind::InvalidData,
@@ -629,7 +698,7 @@ impl PlayerInventory {
             }
         }
         // v2+ 尾部 4 字节总经验；v1 无此字段，XP 缺省 0（向后兼容旧存档）。
-        if head[4] == SAVE_VERSION || head[4] == LEGACY_SAVE_VERSION_V2 {
+        if head[4] == SAVE_VERSION || head[4] == LEGACY_SAVE_VERSION_V2 || head[4] == LEGACY_SAVE_VERSION_V3 {
             let mut xp = [0u8; 4];
             f.read_exact(&mut xp).map_err(|e| {
                 std::io::Error::new(e.kind(), format!("{}: 经验字段截断 ({e})", path.display()))
@@ -637,7 +706,7 @@ impl PlayerInventory {
             inv.total_xp = i32::from_be_bytes(xp).max(0);
         }
         // v3+ 生存三字段；v1/v2 无此字段，生存状态取默认满值（向后兼容）。
-        if head[4] == SAVE_VERSION {
+        if head[4] == SAVE_VERSION || head[4] == LEGACY_SAVE_VERSION_V3 {
             let mut health = [0u8; 4];
             let mut food = [0u8; 4];
             let mut sat = [0u8; 4];
@@ -655,6 +724,20 @@ impl PlayerInventory {
                 food: i32::from_be_bytes(food),
                 saturation: f32::from_be_bytes(sat),
             });
+        }
+        // v4+ 疲劳/设置；v1–v3 旧档缺字段按 0 / survival / none（向后兼容）。
+        if head[4] == SAVE_VERSION {
+            let mut ex = [0u8; 4];
+            f.read_exact(&mut ex).map_err(|e| {
+                std::io::Error::new(e.kind(), format!("{}: 疲劳字段截断 ({e})", path.display()))
+            })?;
+            let mut flags = [0u8; 2];
+            f.read_exact(&mut flags).map_err(|e| {
+                std::io::Error::new(e.kind(), format!("{}: 设置字段截断 ({e})", path.display()))
+            })?;
+            inv.set_exhaustion(f32::from_be_bytes(ex));
+            inv.set_persisted_gamemode(flags[0]);
+            inv.set_persisted_tool_enchant(flags[1]);
         }
         let mut tail = [0u8; 1];
         if f.read(&mut tail)? != 0 {
@@ -948,6 +1031,39 @@ mod tests {
         let (old, _) = PlayerInventory::load_from_dir(&dir, "v2", 88).unwrap();
         assert_eq!(old.total_xp(), 5);
         assert_eq!(old.survival(), crate::survival::SurvivalState::full());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// P53：v4 疲劳/设置 roundtrip；v3 旧档缺 6B 时按 0/survival/none 兼容读。
+    #[test]
+    fn p53_exhaustion_and_settings_save_load_legacy_v3() {
+        let dir = std::env::temp_dir().join(format!("mc-p53-inv-{}-rt", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let mut inv = PlayerInventory::new();
+        inv.set_exhaustion(2.25);
+        inv.set_persisted_gamemode(SETTINGS_GAMEMODE_CREATIVE);
+        inv.set_persisted_tool_enchant(SETTINGS_ENCHANT_SILK_TOUCH);
+        inv.save_to_dir(&dir, "p53", 99).unwrap();
+        let (back, _) = PlayerInventory::load_from_dir(&dir, "p53", 99).unwrap();
+        assert_eq!(back.exhaustion(), 2.25);
+        assert_eq!(back.persisted_gamemode(), SETTINGS_GAMEMODE_CREATIVE);
+        assert_eq!(back.persisted_tool_enchant(), SETTINGS_ENCHANT_SILK_TOUCH);
+        // 手写 v3（XP + 生存 12B，无 P53 尾部）。
+        let mut v3 = b"P18I".to_vec();
+        v3.push(3);
+        v3.push(0);
+        v3.extend_from_slice(&1i32.to_be_bytes());
+        v3.extend_from_slice(&0u16.to_be_bytes());
+        v3.extend_from_slice(&7i32.to_be_bytes());
+        v3.extend_from_slice(&9.5f32.to_be_bytes());
+        v3.extend_from_slice(&6i32.to_be_bytes());
+        v3.extend_from_slice(&1.5f32.to_be_bytes());
+        std::fs::write(PlayerInventory::save_path(&dir, "old", 99), &v3).unwrap();
+        let (old, _) = PlayerInventory::load_from_dir(&dir, "old", 99).unwrap();
+        assert_eq!(old.total_xp(), 7);
+        assert_eq!(old.exhaustion(), 0.0);
+        assert_eq!(old.persisted_gamemode(), SETTINGS_GAMEMODE_SURVIVAL);
+        assert_eq!(old.persisted_tool_enchant(), SETTINGS_ENCHANT_NONE);
         let _ = std::fs::remove_dir_all(&dir);
     }
 

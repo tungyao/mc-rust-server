@@ -16,6 +16,69 @@ pub const STARVATION_DAMAGE: f32 = 1.0;
 /// 坠落伤害的免伤高度（原版：落差 >3 格才开始掉血）。
 pub const FALL_SAFE_BLOCKS: f64 = 3.0;
 
+// --- P53 A2 饥饿细节：exhaustion（疲劳度） ---
+//
+// 注意：本仓库有 528 个既有测试（含 `SurvivalState { health, food, saturation }`
+// 穷举字面量），硬约束要求它们**一字不改**且全绿，因此 exhaustion 不直接塞进
+// `SurvivalState` 的字段表，而是作为与它同存的浮点伴随状态（DropState.exhaustions /
+// PlayerInventory.exhaustion）落盘。语义与「SurvivalState 增加 exhaustion 字段」等价：
+// 每 tick 由全服唯一 ticker 推进，跨 4.0 就消耗一格饱和度/饥饿。
+
+/// 疲劳度阈值：跨过 4.0 触发一次饥饿衰减（原版口径）。
+pub const EXHAUSTION_THRESHOLD: f32 = 4.0;
+/// 疾跑每 50ms tick 的额外消耗。
+pub const SPRINT_EXHAUSTION_PER_TICK: f32 = 0.1;
+/// 起跳一次性消耗。
+pub const JUMP_EXHAUSTION: f32 = 0.2;
+/// 游泳每 50ms tick 的额外消耗。
+pub const SWIM_EXHAUSTION_PER_TICK: f32 = 0.02;
+
+/// 来自 C2S 移动包的本 tick 活动标记（连接侧只设置，ticker 才推进疲劳度）。
+#[derive(Debug, Clone, Copy, Default, PartialEq)]
+pub struct Activity {
+    pub sprinting: bool,
+    pub jumped: bool,
+    pub swimming: bool,
+}
+
+impl Activity {
+    /// 本 tick 应累加的疲劳度（纯函数，无 IO/无 tick）。
+    pub fn exhaustion_delta(self) -> f32 {
+        let mut d = 0.0;
+        if self.sprinting {
+            d += SPRINT_EXHAUSTION_PER_TICK;
+        }
+        if self.jumped {
+            d += JUMP_EXHAUSTION;
+        }
+        if self.swimming {
+            d += SWIM_EXHAUSTION_PER_TICK;
+        }
+        d
+    }
+}
+
+/// 疲劳度推进（纯逻辑）：返回新的疲劳度与是否跨过阈值（跨过一次扣一格，余量保留）。
+/// `exhaustion` 非法（NaN/负数/超上限）时先钳制到 `[0, THRESHOLD)`。
+pub fn advance_exhaustion(exhaustion: f32, activity: Activity) -> (f32, bool) {
+    let mut value = if exhaustion.is_finite() { exhaustion.max(0.0) } else { 0.0 };
+    value += activity.exhaustion_delta();
+    if value >= EXHAUSTION_THRESHOLD {
+        (value - EXHAUSTION_THRESHOLD, true)
+    } else {
+        (value, false)
+    }
+}
+
+/// 读盘兜底：非法疲劳度归零，合法值钳到阈值内（旧档缺字段=0）。
+pub fn sanitize_exhaustion(value: f32) -> f32 {
+    if !value.is_finite() || value < 0.0 {
+        0.0
+    } else {
+        value.min(EXHAUSTION_THRESHOLD)
+    }
+}
+
 /// per-conn 生存状态（与背包同存档：`players` 表 v2 / `.dat` v3）。
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct SurvivalState {
@@ -181,6 +244,25 @@ mod tests {
         assert!(s.eat(5, 6.0));
         assert_eq!((s.food, s.saturation), (20, 5.0));
         assert!(!s.eat(0, 0.0));
+    }
+
+    /// P53 A2：疾跑/跳跃/游泳差异化消耗，跨 4.0 才扣一格且余量保留。
+    #[test]
+    fn exhaustion_accumulates_from_activity_and_wraps_at_threshold() {
+        assert_eq!(Activity::default().exhaustion_delta(), 0.0);
+        let sprint = Activity { sprinting: true, ..Activity::default() };
+        let jump = Activity { jumped: true, ..Activity::default() };
+        let swim = Activity { swimming: true, ..Activity::default() };
+        assert!(jump.exhaustion_delta() > sprint.exhaustion_delta());
+        assert!(sprint.exhaustion_delta() > swim.exhaustion_delta());
+        let (v, due) = advance_exhaustion(3.95, jump);
+        assert!(due);
+        assert!((v - 0.15).abs() < 1e-6, "leftover above threshold must be kept");
+        let (v, due) = advance_exhaustion(3.85, sprint);
+        assert!(!due && (v - 3.95).abs() < 1e-6);
+        assert_eq!(sanitize_exhaustion(f32::NAN), 0.0);
+        assert_eq!(sanitize_exhaustion(99.0), EXHAUSTION_THRESHOLD);
+        assert_eq!(sanitize_exhaustion(1.25), 1.25);
     }
 }
 

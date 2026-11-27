@@ -42,6 +42,16 @@ const BLOCKS: TableDefinition<&[u8], &[u8]> = TableDefinition::new("blocks");
 const JOURNAL: TableDefinition<u64, &[u8]> = TableDefinition::new("journal");
 const PLAYERS: TableDefinition<&str, &[u8]> = TableDefinition::new("players");
 const TIMERS: TableDefinition<&[u8], &[u8]> = TableDefinition::new("timers");
+/// P53 A7：本地统计表（无客户端包）。key = `uuid|stat_id|day_bucket`，value = u64；
+/// 同时按用户名写兼容镜像键（与 players 表同口径），旧库缺表视为空。
+const STATS: TableDefinition<&str, u64> = TableDefinition::new("stats");
+
+/// stat_id 是本服内部口径（不占用客户端 stat 注册表，也不发包）。
+pub mod stat_id {
+    pub const MINED: u32 = 1;
+    pub const PLACED: u32 = 2;
+    pub const DEATHS: u32 = 3;
+}
 
 const META_SCHEMA: &str = "schema";
 const META_SEED: &str = "seed";
@@ -325,11 +335,12 @@ fn decode_journal(seq: u64, b: &[u8]) -> Result<JournalRecord, StoreError> {
 /// - v1：`version u8(1) | selected u8 | state i32 | xp i32 | slot_count u8`
 /// - v2（P40）：`version u8(2) | selected u8 | state i32 | xp i32 |
 ///   health f32 | food i32 | saturation f32 | slot_count u8`
-/// 之后都是每个非空槽 `slot u8 | item i32 | count i32`（9B）。v1 旧记录仍可读，
-/// 生存字段缺省为满状态（与 `.dat` v1/v2 同口径）。
+/// - v3（P53）：v2 + `exhaustion f32 | gamemode u8 | tool_enchant u8`（在 slot_count 前）。
+/// 之后都是每个非空槽 `slot u8 | item i32 | count i32`（9B）。v1/v2 旧记录仍可读，
+/// 生存/疲劳/设置分别缺省满状态 / 0 / survival,none（与 `.dat` 同口径）。
 fn encode_player(inv: &PlayerInventory) -> Vec<u8> {
-    let mut b = Vec::with_capacity(23 + SLOT_COUNT * 9);
-    b.push(2);
+    let mut b = Vec::with_capacity(29 + SLOT_COUNT * 9);
+    b.push(3);
     b.push(inv.selected());
     b.extend_from_slice(&inv.state_id().to_be_bytes());
     b.extend_from_slice(&inv.total_xp().to_be_bytes());
@@ -337,6 +348,9 @@ fn encode_player(inv: &PlayerInventory) -> Vec<u8> {
     b.extend_from_slice(&surv.health.to_be_bytes());
     b.extend_from_slice(&surv.food.to_be_bytes());
     b.extend_from_slice(&surv.saturation.to_be_bytes());
+    b.extend_from_slice(&inv.exhaustion().to_be_bytes());
+    b.push(inv.persisted_gamemode());
+    b.push(inv.persisted_tool_enchant());
     let entries: Vec<(usize, i32, i32)> = (0..SLOT_COUNT)
         .filter_map(|i| inv.get(i).map(|(id, c)| (i, id, c)))
         .collect();
@@ -353,6 +367,7 @@ fn decode_player(b: &[u8]) -> Result<PlayerInventory, StoreError> {
     let (version, header_len) = match b.first().copied() {
         Some(1) => (1u8, 11usize),
         Some(2) => (2u8, 23usize),
+        Some(3) => (3u8, 29usize),
         _ => return Err(StoreError::BadRecord("bad player record header".into())),
     };
     if b.len() < header_len {
@@ -369,11 +384,16 @@ fn decode_player(b: &[u8]) -> Result<PlayerInventory, StoreError> {
     inv.set_selected(selected);
     inv.set_state_id(state);
     inv.set_total_xp(xp);
-    if version == 2 {
+    if version >= 2 {
         let health = f32::from_be_bytes(take::<4>(b, 10)?);
         let food = i32::from_be_bytes(take::<4>(b, 14)?);
         let saturation = f32::from_be_bytes(take::<4>(b, 18)?);
         inv.set_survival(crate::survival::SurvivalState { health, food, saturation });
+    }
+    if version == 3 {
+        inv.set_exhaustion(f32::from_be_bytes(take::<4>(b, 22)?));
+        inv.set_persisted_gamemode(b[26]);
+        inv.set_persisted_tool_enchant(b[27]);
     }
     let mut off = header_len;
     for _ in 0..count {
@@ -519,6 +539,7 @@ impl WorldStore {
             let _ = tx.open_table(JOURNAL)?;
             let _ = tx.open_table(PLAYERS)?;
             let _ = tx.open_table(TIMERS)?;
+            let _ = tx.open_table(STATS)?;
             let v = SCHEMA_VERSION.to_be_bytes();
             meta_put(&tx, META_SCHEMA, v.as_slice())?;
             let s = seed.to_be_bytes();
@@ -850,6 +871,64 @@ impl WorldStore {
         let Some(inv) = self.load_player(old)? else { return Ok(false) };
         self.save_player(new, &inv)?;
         Ok(true)
+    }
+
+    // --- P53 A7：本地统计（只服务端累积；B13 才推 award_stats） ---
+
+    /// 统计键：`身份|stat_id|距 epoch 天数`（身份为稳定 UUID；用户名兼容镜像另写一份）。
+    pub fn stat_key(identity: &str, stat: u32, day: u32) -> String {
+        format!("{identity}|{stat}|{day}")
+    }
+
+    /// 当前 UTC 天数（面板时间范围筛选按天，避免引入时间戳列）。
+    pub fn current_stat_day() -> u32 {
+        let secs = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_secs())
+            .unwrap_or(0);
+        (secs / 86_400) as u32
+    }
+
+    /// 累加一条统计（旧库缺 `stats` 表时由 `open_table` 惰性建表）。
+    pub fn record_stat(&self, identity: &str, stat: u32, delta: u64) -> Result<(), StoreError> {
+        if identity.is_empty() || delta == 0 {
+            return Ok(());
+        }
+        let key = Self::stat_key(identity, stat, Self::current_stat_day());
+        self.with_write(|tx, _seq| {
+            let mut t = tx.open_table(STATS)?;
+            let old = t.get(key.as_str())?.map(|v| v.value()).unwrap_or(0);
+            t.insert(key.as_str(), old.saturating_add(delta))?;
+            Ok(())
+        })
+    }
+
+    /// 按身份与 [from_day, to_day]（含端点）读统计；缺表/越界都视为空。
+    /// 返回 `(stat_id, day, count)`，按 stat_id/day 排序，面板可直接作表格。
+    pub fn stats_between(
+        &self,
+        identity: &str,
+        from_day: Option<u32>,
+        to_day: Option<u32>,
+    ) -> Result<Vec<(u32, u32, u64)>, StoreError> {
+        let tx = self.db.begin_read()?;
+        let Ok(t) = tx.open_table(STATS) else { return Ok(Vec::new()) };
+        let prefix = format!("{identity}|");
+        let mut out = Vec::new();
+        for entry in t.iter()? {
+            let (k, v) = entry?;
+            let key = k.value();
+            let Some(rest) = key.strip_prefix(&prefix) else { continue };
+            let mut parts = rest.split('|');
+            let (Some(stat), Some(day)) = (parts.next(), parts.next()) else { continue };
+            let (Ok(stat), Ok(day)) = (stat.parse::<u32>(), day.parse::<u32>()) else { continue };
+            if from_day.is_some_and(|f| day < f) || to_day.is_some_and(|t| day > t) {
+                continue;
+            }
+            out.push((stat, day, v.value()));
+        }
+        out.sort();
+        Ok(out)
     }
 
     /// 写成长计时（作物/树苗/树叶观察），让 §5.18–20 的跨重启计时可恢复。
@@ -1582,6 +1661,72 @@ mod tests {
             ),
             Err(StoreError::GeneratorVersion(2, 1))
         ));
+        cleanup(&dir);
+    }
+
+    /// P53：players v3 疲劳/设置 roundtrip；v2 旧记录读回缺省值。
+    #[test]
+    fn player_v3_exhaustion_and_settings_roundtrip_and_v2_compat() {
+        let dir = tmp("p53-player-v3");
+        let seed = 911;
+        let s = WorldStore::open(&dir, seed).unwrap();
+        let mut inv = PlayerInventory::new();
+        inv.set_total_xp(12);
+        inv.set_exhaustion(3.5);
+        inv.set_persisted_gamemode(crate::inventory::SETTINGS_GAMEMODE_CREATIVE);
+        inv.set_persisted_tool_enchant(crate::inventory::SETTINGS_ENCHANT_FORTUNE);
+        s.save_player("uuid-p53", &inv).unwrap();
+        let back = s.load_player("uuid-p53").unwrap().unwrap();
+        assert_eq!(back.exhaustion(), 3.5);
+        assert_eq!(back.persisted_gamemode(), crate::inventory::SETTINGS_GAMEMODE_CREATIVE);
+        assert_eq!(back.persisted_tool_enchant(), crate::inventory::SETTINGS_ENCHANT_FORTUNE);
+        let raw = s.db.begin_read().unwrap();
+        let t = raw.open_table(PLAYERS).unwrap();
+        let mut v2 = t.get("uuid-p53").unwrap().unwrap().value().to_vec();
+        drop(t);
+        drop(raw);
+        v2[0] = 2;
+        v2.drain(22..28); // 去掉 v3 的 6B 尾部（从 exhaustion 到 flags）
+        drop(s);
+        {
+            let db = Database::open(&WorldStore::store_path(&dir, seed)).unwrap();
+            let tx = db.begin_write().unwrap();
+            {
+                let mut t = tx.open_table(PLAYERS).unwrap();
+                t.insert("legacy-v2", v2.as_slice()).unwrap();
+            }
+            tx.commit().unwrap();
+        }
+        let again = WorldStore::open(&dir, seed).unwrap();
+        let old = again.load_player("legacy-v2").unwrap().unwrap();
+        assert_eq!(old.total_xp(), 12);
+        assert_eq!(old.exhaustion(), 0.0);
+        assert_eq!(old.persisted_gamemode(), crate::inventory::SETTINGS_GAMEMODE_SURVIVAL);
+        assert_eq!(old.persisted_tool_enchant(), crate::inventory::SETTINGS_ENCHANT_NONE);
+        cleanup(&dir);
+    }
+
+    /// P53 A7：stats 表累加/范围筛选/旧库缺表视为空。
+    #[test]
+    fn stats_accumulate_and_filter_by_day() {
+        let dir = tmp("p53-stats");
+        let seed = 912;
+        let s = WorldStore::open(&dir, seed).unwrap();
+        assert!(s.stats_between("nobody", None, None).unwrap().is_empty());
+        let day = WorldStore::current_stat_day();
+        s.record_stat("uuid-a", stat_id::MINED, 2).unwrap();
+        s.record_stat("uuid-a", stat_id::MINED, 3).unwrap();
+        s.record_stat("uuid-a", stat_id::DEATHS, 1).unwrap();
+        s.record_stat("PlayerA", stat_id::MINED, 2).unwrap();
+        let all = s.stats_between("uuid-a", None, None).unwrap();
+        assert_eq!(all.len(), 2);
+        assert_eq!(all[0], (stat_id::MINED, day, 5));
+        assert_eq!(all[1], (stat_id::DEATHS, day, 1));
+        assert!(s.stats_between("uuid-a", Some(day + 1), None).unwrap().is_empty());
+        assert_eq!(s.stats_between("uuid-a", None, Some(day)).unwrap().len(), 2);
+        drop(s);
+        let reopened = WorldStore::open(&dir, seed).unwrap();
+        assert_eq!(reopened.stats_between("PlayerA", None, None).unwrap()[0].2, 2);
         cleanup(&dir);
     }
 

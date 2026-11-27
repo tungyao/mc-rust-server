@@ -37,6 +37,10 @@ use std::time::{Duration, Instant};
 use tracing::{debug, info, warn};
 use std::io;
 
+/// P53 A2：单次移动包的水平位移超过 0.25 格才记为疾跑（步行约 0.216/50ms，
+/// 疾跑约 0.28/50ms）；协议本身无 sprint 位，这里只做保守推断，不猜新字节。
+const SPRINT_MOVE_THRESHOLD_SQ: f64 = 0.25 * 0.25;
+
 /// P21：排空本连接的广播队列（其它玩家投递的 BlockUpdate/Spawn/Data/Remove/TakeItem），
 ///
 /// 在 tick 间隙写入自己的 socket；队列为空直接返回，写失败则断开并走统一清理路径。
@@ -198,9 +202,18 @@ async fn play_loop<S: AsyncRead + AsyncWrite + Unpin>(
                         // 这样连续跨区块会合并成一次 SetCenterChunk/Unload/ChunkBatch，
                         // 掉落 Spawn 不再排在几十个边界批次后面。
                         let mut fall_blocks: Option<f64> = None;
+                        // P53 A2：从移动包推断疾跑/跳跃（协议 0x1E–0x21 无 sprint 位，
+                        // 只用水平位移与离地时的向上速度；不猜新字节、不解析新包）。
+                        let prev_pos = last_pos;
+                        let mut sprinting = false;
+                        let mut jumped = false;
                         let on_ground;
                         match m {
                             packets::C2SMovement::Pos(p) => {
+                                let dx = p.x - prev_pos.0;
+                                let dz = p.z - prev_pos.2;
+                                sprinting = dx * dx + dz * dz > SPRINT_MOVE_THRESHOLD_SQ;
+                                jumped = !p.on_ground && was_on_ground && p.y > prev_pos.1;
                                 last_pos = (p.x, p.y, p.z);
                                 on_ground = p.on_ground;
                                 if p.on_ground {
@@ -215,6 +228,10 @@ async fn play_loop<S: AsyncRead + AsyncWrite + Unpin>(
                                 queue_view_move(&mut pending_view, view.center(), p.x, p.z);
                             }
                             packets::C2SMovement::PosRot(p) => {
+                                let dx = p.x - prev_pos.0;
+                                let dz = p.z - prev_pos.2;
+                                sprinting = dx * dx + dz * dz > SPRINT_MOVE_THRESHOLD_SQ;
+                                jumped = !p.on_ground && was_on_ground && p.y > prev_pos.1;
                                 last_pos = (p.x, p.y, p.z);
                                 last_look = (p.yaw, p.pitch);
                                 on_ground = p.on_ground;
@@ -284,6 +301,19 @@ async fn play_loop<S: AsyncRead + AsyncWrite + Unpin>(
                         // P46：水中不结算坠落伤害（浮力 MVP 口径）。
                         if in_water {
                             fall_blocks = None;
+                        }
+                        // P53 A2：连接侧只写活动标记，疲劳度由全服唯一 ticker 推进。
+                        if opts.hunger_detail {
+                            if let Some(ds) = &opts.drops {
+                                ds.apply_activity(
+                                    opts.conn_id,
+                                    mc_world::survival::Activity {
+                                        sprinting,
+                                        jumped,
+                                        swimming: in_water,
+                                    },
+                                );
+                            }
                         }
                         if let Some(blocks) = fall_blocks {
                             if blocks > mc_world::survival::FALL_SAFE_BLOCKS {

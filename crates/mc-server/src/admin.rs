@@ -317,6 +317,17 @@ struct GamemodeReq {
     gamemode: Option<String>,
 }
 
+/// P53 A4：把模式同时写入内存与背包存档字段（设置落盘由 `save_inventory` 完成）。
+fn persist_gamemode(state: &AdminState, conn: u64, user: &str, mode: mc_network::broadcast::GameMode) {
+    if !state.drops.p53_features().2 {
+        return;
+    }
+    let code = mc_network::gamemode_code(mode);
+    if state.drops.set_persisted_settings(conn, code, state.drops.with_inventory(conn, |inv| inv.persisted_tool_enchant()).unwrap_or(0)) {
+        state.drops.save_inventory(conn, user);
+    }
+}
+
 fn handle_gamemode(state: &AdminState, body: &[u8]) -> AdminResponse {
     let req: GamemodeReq = match serde_json::from_slice(body) {
         Ok(r) => r,
@@ -336,9 +347,10 @@ fn handle_gamemode(state: &AdminState, body: &[u8]) -> AdminResponse {
     if !state.hub.set_gamemode(conn, mode) {
         return AdminResponse::err(400, format!("offline conn {conn}"));
     }
+    persist_gamemode(state, conn, &user, mode);
     AdminResponse::json(
         200,
-        serde_json::json!({"ok": true, "conn_id": conn, "username": user, "gamemode": mode.as_str()}),
+        serde_json::json!({"ok": true, "conn_id": conn, "username": user, "gamemode": mode.as_str(), "persisted": state.drops.p53_features().2}),
     )
 }
 
@@ -414,9 +426,15 @@ fn handle_tool_enchant(state: &AdminState, body: &[u8]) -> AdminResponse {
         Err(e) => return AdminResponse::err(400, e),
     };
     state.drops.set_tool_enchant(conn, name);
+    if state.drops.p53_features().2 {
+        let mode = state.drops.with_inventory(conn, |inv| inv.persisted_gamemode()).unwrap_or(0);
+        if state.drops.set_persisted_settings(conn, mode, mc_network::enchant_code(name)) {
+            state.drops.save_inventory(conn, &user);
+        }
+    }
     AdminResponse::json(
         200,
-        serde_json::json!({"ok": true, "conn_id": conn, "username": user, "enchant": name.as_str()}),
+        serde_json::json!({"ok": true, "conn_id": conn, "username": user, "enchant": name.as_str(), "persisted": state.drops.p53_features().2}),
     )
 }
 
@@ -427,6 +445,19 @@ fn handle_online(state: &AdminState) -> AdminResponse {
     let online: Vec<serde_json::Value> = entries
         .iter()
         .map(|e| {
+            // P53：背包内的 XP/生存/疲劳/落盘设置一次拷贝，锁外组 JSON。
+            let (xp, surv, exhaustion, pgm, pen) = state
+                .drops
+                .with_inventory(e.conn_id, |inv| {
+                    (
+                        inv.total_xp(),
+                        inv.survival(),
+                        inv.exhaustion(),
+                        inv.persisted_gamemode(),
+                        inv.persisted_tool_enchant(),
+                    )
+                })
+                .unwrap_or((0, mc_world::SurvivalState::full(), 0.0, 0, 0));
             serde_json::json!({
                 "conn_id": e.conn_id,
                 "username": e.username,
@@ -437,6 +468,15 @@ fn handle_online(state: &AdminState) -> AdminResponse {
                 "online_secs": e.online_secs,
                 "gamemode": e.gamemode.as_str(),
                 "tool_enchant": state.drops.tool_enchant(e.conn_id).as_str(),
+                // P53 A1/A2/A4：后台联动新增列（旧字段保留）。
+                "xp": xp,
+                "health": surv.health,
+                "food": surv.food,
+                "saturation": surv.saturation,
+                "exhaustion": exhaustion,
+                "persisted_gamemode": if pgm == 1 { "creative" } else { "survival" },
+                "persisted_tool_enchant": match pen { 1 => "fortune", 2 => "silk_touch", _ => "none" },
+                "settings_persist": state.drops.p53_features().2,
             })
         })
         .collect();
@@ -447,6 +487,7 @@ fn handle_online(state: &AdminState) -> AdminResponse {
 }
 
 fn handle_world(state: &AdminState) -> AdminResponse {
+    let (xp_merge, hunger_detail, settings_persist, stats) = state.drops.p53_features();
     AdminResponse::json(
         200,
         serde_json::json!({
@@ -460,6 +501,11 @@ fn handle_world(state: &AdminState) -> AdminResponse {
             "view_distance": state.view_distance,
             // P52：只读，不新增 POST；面板世界状态卡 <pre> 自动显示。
             "socket_mode": socket_mode().as_str(),
+            // P53：四项开关只读展示（写入只在 server.toml，启动期锁定）。
+            "p53_features": {
+                "xp_merge": xp_merge, "hunger_detail": hunger_detail,
+                "settings_persist": settings_persist, "stats": stats,
+            },
         }),
     )
 }
@@ -672,6 +718,119 @@ fn handle_craft9(state: &AdminState) -> AdminResponse {
     AdminResponse::json(200, serde_json::json!({"ok": true, "sessions": sessions}))
 }
 
+// --- P53 A1/A2/A7：经验发放 / 生存调试 / 本地统计 ---
+
+#[derive(Debug, Deserialize)]
+struct PlayerReq {
+    username: Option<String>,
+    conn_id: Option<u64>,
+    uuid: Option<String>,
+    amount: Option<i32>,
+    food: Option<i32>,
+    saturation: Option<f32>,
+    health: Option<f32>,
+}
+
+/// `YYYY-MM-DD` → 距 epoch 的天数（纯算法，无 chrono 依赖；非法返回 None）。
+pub fn date_to_stat_day(s: &str) -> Option<u32> {
+    let mut parts = s.split('-');
+    let (y, m, d) = (parts.next()?.parse::<i64>().ok()?, parts.next()?.parse::<i64>().ok()?, parts.next()?.parse::<i64>().ok()?);
+    if parts.next().is_some() || !(1..=12).contains(&m) || !(1..=31).contains(&d) {
+        return None;
+    }
+    // Howard Hinnant civil_from_days 逆运算（1970-01-01 = 0）。
+    let y = y - if m <= 2 { 1 } else { 0 };
+    let era = if y >= 0 { y } else { y - 399 } / 400;
+    let yoe = y - era * 400;
+    let mp = m + if m > 2 { -3 } else { 9 };
+    let doy = (153 * mp + 2) / 5 + d - 1;
+    let doe = yoe * 365 + yoe / 4 - yoe / 100 + doy;
+    u32::try_from(era * 146_097 + doe - 719_468).ok()
+}
+
+fn handle_xp(state: &AdminState, body: &[u8]) -> AdminResponse {
+    let req: PlayerReq = match serde_json::from_slice(body) {
+        Ok(r) => r,
+        Err(_) => return AdminResponse::err(400, "bad json"),
+    };
+    let amount = req.amount.unwrap_or(0);
+    if !(1..=i32::MAX).contains(&amount) {
+        return AdminResponse::err(400, "amount must be positive");
+    }
+    let (conn, user) = match resolve_conn(state, req.username.as_deref(), req.conn_id, req.uuid.as_deref()) {
+        Ok(v) => v,
+        Err(e) => return AdminResponse::err(400, e),
+    };
+    let total = match state.drops.with_inventory(conn, |inv| inv.add_experience(amount)) {
+        Some(v) => v,
+        None => return AdminResponse::err(400, format!("offline conn {conn}")),
+    };
+    state.drops.save_inventory(conn, &user);
+    let delivered = state.drops.with_inventory(conn, |inv| {
+        (inv.xp_level(), inv.xp_progress())
+    }).map(|(level, progress)| {
+        let mut body = Vec::new();
+        mc_protocol::packets::SetExperience { progress, level, total }.encode_body(&mut body);
+        state.hub.unicast(conn, mc_protocol::packets::PLAY_SET_EXPERIENCE_S2C_ID, body)
+    }).unwrap_or(false);
+    AdminResponse::json(200, serde_json::json!({"ok": true, "total_xp": total, "delivered": delivered}))
+}
+
+fn handle_set_food(state: &AdminState, body: &[u8]) -> AdminResponse {
+    let req: PlayerReq = match serde_json::from_slice(body) {
+        Ok(r) => r,
+        Err(_) => return AdminResponse::err(400, "bad json"),
+    };
+    let food = match req.food {
+        Some(v) if (0..=mc_world::survival::MAX_FOOD).contains(&v) => v,
+        _ => return AdminResponse::err(400, "food must be 0..=20"),
+    };
+    let (conn, user) = match resolve_conn(state, req.username.as_deref(), req.conn_id, req.uuid.as_deref()) {
+        Ok(v) => v,
+        Err(e) => return AdminResponse::err(400, e),
+    };
+    let after = match state.drops.apply_survival(conn, |s| {
+        s.food = food;
+        if let Some(sat) = req.saturation {
+            s.saturation = sat.clamp(0.0, mc_world::survival::MAX_SATURATION);
+        }
+        if let Some(hp) = req.health {
+            s.health = hp.clamp(0.0, mc_world::survival::MAX_HEALTH);
+        }
+    }) {
+        Some((s, _)) => s,
+        None => return AdminResponse::err(400, format!("offline conn {conn}")),
+    };
+    state.drops.save_inventory(conn, &user);
+    let body = mc_network::login_route::survival_sync::build_set_health_body(&after);
+    let delivered = state.hub.unicast(conn, mc_protocol::packets::PLAY_SET_HEALTH_S2C_ID, body);
+    AdminResponse::json(200, serde_json::json!({"ok": true, "food": after.food, "delivered": delivered}))
+}
+
+fn handle_stats(state: &AdminState, query: &str) -> AdminResponse {
+    let username = query_param(query, "username");
+    let uuid = query_param(query, "uuid");
+    let identity = uuid.as_deref().or(username.as_deref());
+    let Some(identity) = identity.filter(|s| !s.is_empty()) else {
+        return AdminResponse::err(400, "username or uuid required");
+    };
+    let from = query_param(query, "from").and_then(|s| date_to_stat_day(&s));
+    let to = query_param(query, "to").and_then(|s| date_to_stat_day(&s));
+    let rows: Vec<serde_json::Value> = state
+        .drops
+        .stats_for(identity, from, to)
+        .into_iter()
+        .map(|(stat, day, count)| serde_json::json!({
+            "stat_id": stat, "stat": mc_network::stat_name(stat),
+            "day": day, "count": count,
+        }))
+        .collect();
+    AdminResponse::json(200, serde_json::json!({
+        "ok": true, "identity": identity, "stats": rows,
+        "note": "P53 A7: server-local only; award_stats (B13) not sent",
+    }))
+}
+
 /// 路由（纯构造响应；M1 只读：`/` + `/api/online` + `/api/world`）。
 pub fn route(req: &HttpRequest, state: &AdminState) -> AdminResponse {
     match (req.method.as_str(), req.path.as_str()) {
@@ -683,6 +842,9 @@ pub fn route(req: &HttpRequest, state: &AdminState) -> AdminResponse {
         ("GET", "/api/recipes") => handle_recipes(),
         ("GET", "/api/craft9") => handle_craft9(state),
         ("GET", "/api/inventory") => handle_inventory(state, &req.query),
+        ("GET", "/api/stats") => handle_stats(state, &req.query),
+        ("POST", "/api/xp") => handle_xp(state, &req.body),
+        ("POST", "/api/set-food") => handle_set_food(state, &req.body),
         ("POST", "/api/give") => handle_give(state, &req.body),
         ("POST", "/api/tool-enchant") => handle_tool_enchant(state, &req.body),
         ("POST", "/api/gamemode") => handle_gamemode(state, &req.body),
@@ -1160,6 +1322,102 @@ mod tests {
         // 未知 uuid 400；旧用户名/conn_id 仍生效。
         assert_eq!(route(&post("/api/kick", r#"{"uuid":"00000000-0000-0000-0000-000000000000"}"#), &st).status, 400);
         assert_eq!(route(&post("/api/gamemode", r#"{"username":"UuidUser","gamemode":"survival"}"#), &st).status, 200);
+        let _ = std::fs::remove_dir_all(st.drops.save_dir());
+    }
+
+    /// P53：日期 → 天数映射（epoch=0，月份边界正确）。
+    #[test]
+    fn date_to_stat_day_maps_epoch_and_modern_dates() {
+        assert_eq!(date_to_stat_day("1970-01-01"), Some(0));
+        assert_eq!(date_to_stat_day("1970-01-02"), Some(1));
+        assert_eq!(date_to_stat_day("2000-01-01"), Some(10957));
+        assert_eq!(date_to_stat_day("2026-11-27"), Some(WorldStoreDay::day(2026, 11, 27)));
+        assert_eq!(date_to_stat_day("2026-13-01"), None);
+        assert_eq!(date_to_stat_day("bad"), None);
+    }
+
+    // 参考值独立算一次，避免测试与被测函数共用同一实现。
+    struct WorldStoreDay;
+    impl WorldStoreDay {
+        fn day(y: i64, m: i64, d: i64) -> u32 {
+            let mut total = 0i64;
+            for year in 1970..y {
+                total += if year % 4 == 0 && (year % 100 != 0 || year % 400 == 0) { 366 } else { 365 };
+            }
+            let days = [31, 28, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31];
+            for month in 1..m {
+                total += days[(month - 1) as usize];
+                if month == 2 && y % 4 == 0 && (y % 100 != 0 || y % 400 == 0) {
+                    total += 1;
+                }
+            }
+            (total + d - 1) as u32
+        }
+    }
+
+    /// P53 A1/A2/A7：`/api/xp`、`/api/online`、`/api/set-food`、`/api/stats` 全链路。
+    #[test]
+    fn p53_admin_endpoints_report_and_mutate_state() {
+        let st = test_state();
+        st.drops.set_p53_features(true, true, false, true);
+        let uuid = mc_protocol::packets::stable_offline_uuid("P53Admin").to_string();
+        let (tx, rx) = crossbeam_channel::unbounded();
+        st.hub.register_with_uuid(81, tx, 2, (0.0, 64.0, 0.0), "P53Admin".into(), "x".into(), uuid.clone());
+        st.drops.load_inventory_with_uuid(81, "P53Admin", &uuid);
+        st.drops.set_player_identity(81, &uuid);
+
+        let r = route(&post("/api/xp", r#"{"username":"P53Admin","amount":9}"#), &st);
+        assert_eq!(r.status, 200);
+        assert_eq!(body_json(&r)["total_xp"], 9);
+        assert_eq!(rx.try_recv().unwrap().id, mc_protocol::packets::PLAY_SET_EXPERIENCE_S2C_ID);
+        let r = route(&post("/api/set-food", r#"{"username":"P53Admin","food":7,"saturation":2.5}"#), &st);
+        assert_eq!(r.status, 200);
+        assert_eq!(rx.try_recv().unwrap().id, mc_protocol::packets::PLAY_SET_HEALTH_S2C_ID);
+        let online = body_json(&route(&get("/api/online"), &st));
+        let p = &online["online"][0];
+        assert_eq!(p["xp"], 9);
+        assert_eq!(p["food"], 7);
+        assert_eq!(p["saturation"], 2.5);
+
+        // 统计只本地累积，不发 awrard_stats（队列里没有 0x03）。
+        st.drops.record_stat(81, mc_world::store::stat_id::MINED);
+        st.drops.record_stat(81, mc_world::store::stat_id::DEATHS);
+        let r = route(&get("/api/stats?uuid="), &st);
+        assert_eq!(r.status, 400, "empty uuid is rejected");
+        let r = route(&get(&format!("/api/stats?uuid={uuid}")), &st);
+        assert_eq!(r.status, 200);
+        let stats = body_json(&r)["stats"].as_array().unwrap().clone();
+        assert_eq!(stats.len(), 2);
+        assert_eq!(stats[0]["stat_id"], mc_world::store::stat_id::MINED as i64);
+        assert_eq!(stats[0]["count"], 1);
+        assert!(rx.try_recv().is_err(), "A7 must not send packets");
+        let _ = std::fs::remove_dir_all(st.drops.save_dir());
+    }
+
+    /// P53 A4：后台切模式/附魔后落盘，换 conn 同名/同 UUID 重进仍生效。
+    #[test]
+    fn p53_settings_persist_across_reconnect() {
+        let st = test_state();
+        st.drops.set_p53_features(false, false, true, false);
+        st.drops.set_hub(Arc::clone(&st.hub)); // serve() 在生产启动期注入
+        let uuid = mc_protocol::packets::stable_offline_uuid("Reconnect").to_string();
+        st.hub.register_with_uuid(91, crossbeam_channel::unbounded().0, 2, (0.0, 64.0, 0.0), "Reconnect".into(), "x".into(), uuid.clone());
+        st.drops.load_inventory_with_uuid(91, "Reconnect", &uuid);
+        assert_eq!(route(&post("/api/gamemode", r#"{"username":"Reconnect","gamemode":"creative"}"#), &st).status, 200);
+        assert_eq!(route(&post("/api/tool-enchant", r#"{"username":"Reconnect","enchant":"silk_touch"}"#), &st).status, 200);
+        let disk = st.drops.with_inventory(91, |inv| (inv.persisted_gamemode(), inv.persisted_tool_enchant())).unwrap();
+        assert_eq!(disk, (1, 2));
+        st.drops.unload_inventory(91, "Reconnect");
+        st.hub.unregister(91);
+        // 同名 + 同 UUID 重进：以落盘值作为权威内存初值。
+        st.hub.register_with_uuid(92, crossbeam_channel::unbounded().0, 2, (0.0, 64.0, 0.0), "Reconnect".into(), "x".into(), uuid.clone());
+        st.drops.load_inventory_with_uuid(92, "Reconnect", &uuid);
+        st.drops.apply_persisted_settings(92);
+        assert_eq!(st.hub.gamemode(92), mc_network::broadcast::GameMode::Creative);
+        assert_eq!(st.drops.tool_enchant(92), mc_world::tools::ToolEnchant::SilkTouch);
+        let p = &body_json(&route(&get("/api/online"), &st))["online"][0];
+        assert_eq!(p["persisted_gamemode"], "creative");
+        assert_eq!(p["persisted_tool_enchant"], "silk_touch");
         let _ = std::fs::remove_dir_all(st.drops.save_dir());
     }
 }
