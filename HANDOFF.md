@@ -1370,14 +1370,44 @@ bash scripts/check_budget.sh     # Windows 可用 C:\Program Files\Git\bin\bash.
 - 真机待验：混合木板→木棍（橡木+云杉混搭）、tag 工具（铁/钻石镐）、楼梯台阶形
   1+2+3、SHIFT 干草捆连做 9 个不断在小麦间横跳、箱子 8 木板单格。
 
+### 5.44 P60 vanilla 形状 + 拖拽/收集（用户反馈三件套，一次修完）
+
+用户原话：① 木棍只能 2 木板、堆叠不行；② 门 6 木板任意摆都能出、其它配方也
+任意位置都行；③ 移动物品偶发"放下又弹回鼠标"，点第二次才真放下。
+
+- 形状（①②）：生成器追加 vanilla 形状（shaped 去边稀疏格 `cells` + 镜像/平移；
+  shapeless 不附加数据、units 由 needs 展开）。匹配器重写：shaped 定位匹配
+  （覆盖格须 ≥1、格外须空），shapeless 逐格 1 单位（格数须相等）。
+  木棍=竖列（横摆是压力板、单格堆叠是按钮），门=两列 3 格（散放 6 块不出，
+  两整行是活板门，台阶形是楼梯）。旧 72 歧义组结构性消失：
+  `p60_canonical_grids_match_their_own_recipe_or_known_steal` 对 1185 条教科书格
+  逐条验证——零偷家（同格同料冲突已不存在）。checker 追加形状独立复核
+  （1185/1185 对齐，0 缺失 0 重复 0 错位）。
+- P58→P60 口径变化（用户拍板 vanilla 真值优先）：单格堆多件只对单单位配方
+  有效（原木→木板、按钮、糖）；多单位配方须占满格数（面包要 3 格横排，
+  干草捆要 9 格）；2×2 放不下 3 格宽/3 格高（镐/剑/床/箱子须去工作台）。
+- 拖拽/收集（③）：根因是 QUICK_CRAFT（5）/PICKUP_ALL（6）/CLONE（3）没实现——
+  客户端预测了分布/收集，服务端 no-op 回旧包 = 瞬间弹回，改离散点击就正常
+  （两边容器、左右键、总数无损、重试即好，全对得上）。现按 jar 实现：
+  起拖/加槽/落子三段式（左键均分余数留光标、右键每格 1 个，中键生存无操作），
+  双击收集扫全菜单同种至满栈；CLONE 生存恒 no-op。拖拽态按连接存
+  `DropState::drag`，任何非拖拽点击/断线清零。单测 + socket e2e（镐形/拖拽）全绿。
+- SHIFT 补料改为 shape-aware（`refill_for_recipe` + `refill_placement`）：只填锁定
+  配方的形状空格；空盘先补满格再锁定（避免半格锁错小配方，如 3 小麦锁面包
+  而不是 9 格干草捆）。
+- `/api/recipes` 追加 `shaped` + `shape`（[x,y] + tag 口径复用）。
+- `cargo test --workspace` 全绿（偶发 p27 timing flake 与本次无关，单跑 14/14 过）；
+  checker 1185/0/0/0，`gen --check` 一致。
+- 真机待验：竖列木棍 vs 横摆压力板 vs 单格按钮；门两列 vs 散放 6 块 vs 两整行
+  活板门；拖一叠木板过合成格（均分不断回弹）；双击收集同种；2×2 镐/剑不出。
+
 ## 8. Git 状态 / 提交注意
 
-- **P59（本轮待提交）**：vanilla 26.3 全量 1185 条 tag 原生表 + SHIFT 锁定配方 +
-  `/api/recipes` tag 展示 + e2e 口径更新（见 §5.43），`cargo test --workspace`
-  全绿，checker 1185/0/0，`scripts/gen_recipes.py --check` 一致。数据与脚本
-  一并提交（`data/777/full/recipes`、`tags_item`、`scripts/*.py`）；不提交：
-  `world/`、`server_smoke.log`、`mc-test-client-2/`、散文件
-  （`dbg*.py`、`groups*.txt`、`pairdump*.txt`、`scripts/__pycache__/`）。
+- **P60（本轮待提交）**：vanilla 形状（shaped cells + shapeless 逐格）+ 拖拽/收集三段式 +
+  shape-aware SHIFT 补料 + `/api/recipes` 形状字段 + e2e/单测真值化（见 §5.44），
+  `cargo test --workspace` 全绿（偶发 p27 timing flake 单跑过），checker
+  1185/0/0/0（覆盖/去重/形状），`scripts/gen_recipes.py --check` 一致。不提交：
+  `world/`、`server_smoke*.log`、`mc-test-client-2/`、散文件、`__pycache__/`、`logs/`。
 - 当前分支 `main` @ `862c69e`（P56 完整合成；588 passed）；P19–P56 均已合入并 push，历史提交见
   `git log` / `tasks/events.jsonl`；任务真相源是 `tasks/*.json` + `events.jsonl`（见 `tasks/README.md`）。
   近期关键提交：P52 `72436e0`、P51 `826f5b3`、P53 `51ba63f`、P54 `93a8996`、P55 `90323e9` +

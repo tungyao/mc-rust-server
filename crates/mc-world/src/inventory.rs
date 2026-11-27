@@ -365,6 +365,140 @@ impl PlayerInventory {
         true
     }
 
+    /// P60 拖拽分配纯函数：光标 `total` 个 `id` 分到各格（当前内容 `cur`），
+    /// 返回每格拿走量 + 光标剩余。非法内容格（异物/已满）跳过。
+    /// 左键均分（floor，余数留光标；货不够分格 per=0 时返回 None = 整单不动，
+    /// 原版口径）；右键每格 1 个直到光标空。工作台/背包两窗共用。
+    pub fn drag_split(
+        id: i32,
+        total: i32,
+        left: bool,
+        cur: &[Option<(i32, i32)>],
+    ) -> Option<(Vec<i32>, i32)> {
+        if total <= 0 || cur.is_empty() {
+            return None;
+        }
+        let elig: Vec<bool> = cur
+            .iter()
+            .map(|s| match s {
+                None => true,
+                Some((cid, c)) if *cid == id && *c < MAX_STACK => true,
+                _ => false,
+            })
+            .collect();
+        if !elig.iter().any(|&e| e) {
+            return None;
+        }
+        let mut takes = vec![0; cur.len()];
+        let mut rest = total;
+        if left {
+            let per = total / elig.iter().filter(|&&e| e).count() as i32;
+            if per <= 0 {
+                return None;
+            }
+            for (i, s) in cur.iter().enumerate() {
+                if !elig[i] || rest <= 0 {
+                    continue;
+                }
+                let room = match s {
+                    None => MAX_STACK,
+                    Some((_, c)) => MAX_STACK - c,
+                };
+                let take = per.min(room).min(rest);
+                takes[i] = take;
+                rest -= take;
+            }
+        } else {
+            for (i, _) in cur.iter().enumerate() {
+                if !elig[i] || rest <= 0 {
+                    continue;
+                }
+                takes[i] = 1;
+                rest -= 1;
+            }
+        }
+        Some((takes, rest))
+    }
+
+    /// P60 拖拽分堆落子（窗口 0：合成格 1..=4 + 背包 9..=45；结果槽 0 / 盔甲 5..8 不可进）。
+    /// `cursor` 为光标（调用方传入传出）。任一槽非法则整单 no-op、光标不动，返回 false。
+    pub fn apply_drag_end(
+        &mut self,
+        cursor: &mut Option<(i32, i32)>,
+        left: bool,
+        slots: &[i16],
+    ) -> bool {
+        let Some((id, total)) = *cursor else {
+            return false;
+        };
+        // 预校验全部槽合法（任一非法整单 no-op）。
+        let mut idxs: Vec<usize> = Vec::with_capacity(slots.len());
+        for s in slots {
+            let idx = match *s {
+                1..=4 | 9..=45 => *s as usize,
+                _ => return false,
+            };
+            if !idxs.contains(&idx) {
+                idxs.push(idx);
+            }
+        }
+        let cur: Vec<Option<(i32, i32)>> = idxs.iter().map(|&i| self.slots[i]).collect();
+        let Some((takes, rest)) = Self::drag_split(id, total, left, &cur) else {
+            return false;
+        };
+        for (k, &i) in idxs.iter().enumerate() {
+            let take = takes[k];
+            if take <= 0 {
+                continue;
+            }
+            match self.slots[i] {
+                Some((_, c)) => self.slots[i] = Some((id, c + take)),
+                None => self.slots[i] = Some((id, take)),
+            }
+        }
+        *cursor = if rest > 0 { Some((id, rest)) } else { None };
+        true
+    }
+
+    /// P60 双击收集（窗口 0）：光标为空时先拿起点击槽（整栈，同 PICKUP），
+    /// 再把合成格 1..=4 + 背包 9..=45 的同种收到光标直到满栈（结果槽不动）。
+    pub fn collect_all(&mut self, clicked: i16) -> bool {
+        let mut changed = false;
+        if self.cursor.is_none() {
+            let idx = match clicked {
+                1..=4 | 9..=45 => clicked as usize,
+                _ => return false,
+            };
+            let Some(stack) = self.slots[idx].take() else {
+                return false;
+            };
+            self.cursor = Some(stack);
+            changed = true;
+        }
+        let Some((id, mut total)) = self.cursor else {
+            return false;
+        };
+        if total >= MAX_STACK {
+            return changed;
+        }
+        for idx in (1..=4).chain(9..=45) {
+            if total >= MAX_STACK {
+                break;
+            }
+            if let Some((cid, c)) = self.slots[idx] {
+                if cid != id {
+                    continue;
+                }
+                let take = (MAX_STACK - total).min(c);
+                self.slots[idx] = if c > take { Some((id, c - take)) } else { None };
+                total += take;
+                changed = true;
+            }
+        }
+        self.cursor = Some((id, total));
+        changed
+    }
+
     fn click_quick_move(&mut self, slot: i16) -> bool {
         let idx = match self.play_slot(slot) {
             Some(i) => i,
@@ -1239,12 +1373,12 @@ mod tests {
     #[test]
     fn p56_shift_result_crafts_repeatedly_and_stows() {
         let mut inv = PlayerInventory::new();
-        // 两格各 1 木板 → 木棍的规范槽型（1+1）；单格 2 木板则是压力板。
+        // 左列竖摆 2 木板 → 木棍（横摆是压力板，原版口径）。
         inv.slots[1] = Some((crate::drops::ITEM_OAK_PLANKS, 1));
-        inv.slots[2] = Some((crate::drops::ITEM_OAK_PLANKS, 1));
+        inv.slots[3] = Some((crate::drops::ITEM_OAK_PLANKS, 1));
         assert_eq!(inv.craft_result_quick_move(), 1, "two planks -> four sticks");
         assert_eq!(inv.slots[1], None);
-        assert_eq!(inv.slots[2], None);
+        assert_eq!(inv.slots[3], None);
         assert_eq!(inv.cursor(), None, "SHIFT never touches the cursor");
         let sticks = crate::crafting::RECIPES.iter().find(|r| r.name == "stick").unwrap().result.0;
         assert_eq!(inv.get(36), Some((sticks, 4)), "result lands in hotbar first");
@@ -1311,5 +1445,55 @@ mod tests {
         assert_eq!(inv.next_state(), 1);
         inv.set_state_id(123);
         assert_eq!(inv.next_state(), 124);
+    }
+
+    #[test]
+    fn p60_drag_split_math_matches_vanilla() {
+        // 左键均分：10 个分 3 格 → 3/3/3，余 1 留光标。
+        let (takes, rest) = PlayerInventory::drag_split(7, 10, true, &[None, None, None]).unwrap();
+        assert_eq!(takes, vec![3, 3, 3]);
+        assert_eq!(rest, 1);
+        // 货不够分格：1 个分 4 格 → 整单不动。
+        assert!(PlayerInventory::drag_split(7, 1, true, &[None, None, None, None]).is_none());
+        // 右键：每格 1 个直到光标空。
+        let (takes, rest) = PlayerInventory::drag_split(7, 2, false, &[None, None, None]).unwrap();
+        assert_eq!(takes, vec![1, 1, 0]);
+        assert_eq!(rest, 0);
+        // 异物/满格跳过：格 1 是别的物品 → 只分格 0/2。
+        let cur = [Some((7, 1)), Some((8, 5)), None];
+        let (takes, rest) = PlayerInventory::drag_split(7, 6, true, &cur).unwrap();
+        assert_eq!(takes, vec![3, 0, 3]);
+        assert_eq!(rest, 0);
+        // 全满无处可分 → None。
+        assert!(PlayerInventory::drag_split(7, 5, true, &[Some((7, 64))]).is_none());
+    }
+
+    #[test]
+    fn p60_drag_end_window0_places_and_collects() {
+        let mut inv = PlayerInventory::new();
+        // 左键拖 10 个过 3 个空格：3/3/3，余 1。
+        let mut cursor = Some((7, 10));
+        assert!(inv.apply_drag_end(&mut cursor, true, &[9, 10, 11]));
+        assert_eq!(cursor, Some((7, 1)));
+        assert_eq!(inv.get(9), Some((7, 3)));
+        assert_eq!(inv.get(11), Some((7, 3)));
+        // 非法槽（结果槽 0）→ 整单不动。
+        let mut cursor = Some((7, 5));
+        assert!(!inv.apply_drag_end(&mut cursor, true, &[9, 0]));
+        assert_eq!(cursor, Some((7, 5)));
+        assert_eq!(inv.get(9), Some((7, 3)));
+        // 双击收集：光标 1 个 + 各处同种 → 收到满栈。
+        inv.slots[12] = Some((7, 60));
+        inv.slots[36] = Some((7, 10));
+        inv.set_cursor(Some((7, 1)));
+        assert!(inv.collect_all(9));
+        assert_eq!(inv.cursor(), Some((7, 64)));
+        assert_eq!(inv.get(12), Some((7, 6)));
+        // 收集起点：光标空 + 点有货槽 → 先拿起再收集。
+        inv.set_cursor(None);
+        assert!(inv.collect_all(12));
+        assert_eq!(inv.cursor(), Some((7, 16)));
+        assert_eq!(inv.get(12), None);
+        assert_eq!(inv.get(36), None);
     }
 }

@@ -95,17 +95,17 @@ async fn window0_shift_result_crafts_into_inventory_with_no_new_packets() {
     let mut s = login_and_join(addr, "P56Shift", 2).await;
     let _ = read_content_window(&mut s, 0).await.0;
 
-    // 两格各 1 木板 → 4 木棍（26.3 `stick` 配方）。
+    // 左列竖摆 2 木板 → 4 木棍（横摆是压力板，原版口径）。
     send_click(&mut s, 0, 1, 9, 0, packets::CLICK_PICKUP).await;
     let _ = read_content_window(&mut s, 0).await.0;
     send_click(&mut s, 0, 2, 1, 0, packets::CLICK_PICKUP).await;
     let _ = read_content_window(&mut s, 0).await.0;
     send_click(&mut s, 0, 3, 10, 0, packets::CLICK_PICKUP).await;
     let _ = read_content_window(&mut s, 0).await.0;
-    send_click(&mut s, 0, 4, 2, 0, packets::CLICK_PICKUP).await;
+    send_click(&mut s, 0, 4, 3, 0, packets::CLICK_PICKUP).await;
     let c = read_content_window(&mut s, 0).await.0;
     assert_eq!(c.slots[1].item_id, planks);
-    assert_eq!(c.slots[2].item_id, planks);
+    assert_eq!(c.slots[3].item_id, planks);
     assert_eq!(
         c.slots[mc_world::crafting::RESULT_SLOT],
         packets::Slot { item_id: recipe("stick").result.0, count: 4 },
@@ -116,7 +116,7 @@ async fn window0_shift_result_crafts_into_inventory_with_no_new_packets() {
     let (c, ids) = read_content_window(&mut s, 0).await;
     assert_eq!(c.carried, packets::Slot::empty(), "SHIFT 不动光标");
     assert_eq!(c.slots[1], packets::Slot::empty(), "inputs consumed");
-    assert_eq!(c.slots[2], packets::Slot::empty(), "inputs consumed");
+    assert_eq!(c.slots[3], packets::Slot::empty(), "inputs consumed");
     assert_eq!(
         c.slots[36],
         packets::Slot { item_id: recipe("stick").result.0, count: 4 },
@@ -153,33 +153,40 @@ async fn window0_grid_shift_moves_stack_into_backpack() {
     let _ = std::fs::remove_dir_all(&dir);
 }
 
-/// 两种网格共用同一张配方表：2×2 用 3 小麦做面包；3×3 用 9 小麦做干草捆。
-/// GUI 开启后窗口 1 的背包 SHIFT 先补合成格（`CraftingMenu.quickMoveStack`），
-/// 再从结果槽拿到产物；开关关闭时旧包流不变由 P55 e2e 覆盖。
+/// 两种网格共用同一张配方表：2×2 做火把（煤上棍下左列）；工作台 SHIFT 补一格、
+/// 手摆第二格成竖列出木棍。P60 形状口径：单格堆料、横摆都不再命中。
 #[tokio::test]
 async fn gui_workbench_shift_fills_grid_and_shares_recipe_table() {
     let dir = std::env::temp_dir().join(format!("mc-p56-gui-{}", std::process::id()));
     let _ = std::fs::remove_dir_all(&dir);
-    let wheat = mc_world::drops::ITEM_WHEAT;
+    let planks = mc_world::drops::ITEM_OAK_PLANKS;
     let mut inv = PlayerInventory::new();
     inv.set_slot(36, Some((mc_world::drops::ITEM_CRAFTING_TABLE, 1)));
-    inv.set_slot(9, Some((wheat, 9)));
-    inv.set_slot(10, Some((wheat, 3)));
+    inv.set_slot(9, Some((mc_world::drops::ITEM_COAL, 2)));
+    inv.set_slot(10, Some((mc_world::drops::ITEM_STICK, 3)));
+    inv.set_slot(11, Some((planks, 5)));
+    inv.set_slot(12, Some((planks, 1)));
     let addr = serve(&dir, "P56Gui", inv).await;
     let mut s = login_and_join(addr, "P56Gui", 2).await;
     let _ = read_content_window(&mut s, 0).await.0;
 
-    // --- 2×2：3 小麦 → 面包（同一张 RECIPES 表） ---
-    send_click(&mut s, 0, 1, 10, 0, packets::CLICK_PICKUP).await;
+    // --- 2×2：煤上棍下左列 → 火把（同一张 RECIPES 表） ---
+    send_click(&mut s, 0, 1, 9, 0, packets::CLICK_PICKUP).await;
     let _ = read_content_window(&mut s, 0).await.0;
     send_click(&mut s, 0, 2, 1, 0, packets::CLICK_PICKUP).await;
     let _ = read_content_window(&mut s, 0).await.0;
-    send_click(&mut s, 0, 3, 0, 0, packets::CLICK_PICKUP).await;
+    send_click(&mut s, 0, 3, 10, 0, packets::CLICK_PICKUP).await;
+    let _ = read_content_window(&mut s, 0).await.0;
+    send_click(&mut s, 0, 4, 3, 0, packets::CLICK_PICKUP).await;
     let c = read_content_window(&mut s, 0).await.0;
-    let bread = recipe("bread").result.0;
-    assert_eq!(c.carried.item_id, bread);
-    // 光标里的面包放进主背包槽 11。
-    send_click(&mut s, 0, 4, 11, 0, packets::CLICK_PICKUP).await;
+    let torch = recipe("torch").result.0;
+    assert_eq!(c.carried, packets::Slot::empty());
+    // 光标空着：先拿结果再放包里（结果槽 PICKUP → 光标）。
+    send_click(&mut s, 0, 5, 0, 0, packets::CLICK_PICKUP).await;
+    let c = read_content_window(&mut s, 0).await.0;
+    assert_eq!(c.carried.item_id, torch);
+    // 光标里的火把放进主背包槽 13。
+    send_click(&mut s, 0, 6, 13, 0, packets::CLICK_PICKUP).await;
     let _ = read_content_window(&mut s, 0).await.0;
 
     // --- 放工作台打开 GUI（BlockUpdate → Ack 相邻，随后 0x3c + 0x12(window 1)） ---
@@ -215,28 +222,42 @@ async fn gui_workbench_shift_fills_grid_and_shares_recipe_table() {
     assert_eq!(c.slots.len(), 46);
     assert_eq!(c.slots[0], packets::Slot::empty());
 
-    // --- 工作台：窗口槽 10 = 背包槽 9 的 9 小麦，SHIFT 先补合成格 1 ---
+    // --- 工作台：窗口槽 12 = 背包槽 11 的 5 木板，SHIFT 先补合成格 1 ---
     let window = mc_world::crafting::CRAFT9_WINDOW_ID;
-    send_click(&mut s, window, 1, 10, 0, packets::CLICK_QUICK_MOVE).await;
+    send_click(&mut s, window, 1, 12, 0, packets::CLICK_QUICK_MOVE).await;
     let c = read_content_window(&mut s, window).await.0;
     assert_eq!(
         c.slots[1],
-        packets::Slot { item_id: wheat, count: 9 },
+        packets::Slot { item_id: planks, count: 5 },
         "SHIFT must fill the 3×3 grid before moving within the inventory"
     );
-    assert_eq!(c.slots[10], packets::Slot::empty());
+    assert_eq!(c.slots[12], packets::Slot::empty());
+    // 单格 5 木板：命中 1 木板按钮（shapeless），不是木棍。
+    assert_eq!(
+        c.slots[mc_world::crafting::CRAFT9_RESULT_SLOT as usize].item_id,
+        recipe("oak_button").result.0,
+    );
+    // 手摆第二格（窗口 4 = 左列第二格）→ 竖列成形，变木棍。
+    send_click(&mut s, window, 2, 13, 0, packets::CLICK_PICKUP).await;
+    let _ = read_content_window(&mut s, window).await.0;
+    send_click(&mut s, window, 3, 4, 0, packets::CLICK_PICKUP).await;
+    let c = read_content_window(&mut s, window).await.0;
     assert_eq!(
         c.slots[mc_world::crafting::CRAFT9_RESULT_SLOT as usize],
-        packets::Slot { item_id: recipe("hay_block").result.0, count: 1 },
+        packets::Slot { item_id: recipe("stick").result.0, count: 4 },
         "3×3 result slot is authoritative on the server, not client-predicted"
     );
-    // 结果槽：9 小麦 → 干草捆（与 2×2 共用配方表）。
-    send_click(&mut s, window, 2, 0, 0, packets::CLICK_PICKUP).await;
+    // 结果槽：左列 5+1 木板 → 4 木棍，各扣 1。
+    send_click(&mut s, window, 4, 0, 0, packets::CLICK_PICKUP).await;
     let c = read_content_window(&mut s, window).await.0;
-    let hay = recipe("hay_block").result.0;
-    assert_eq!(c.carried.item_id, hay);
-    assert_eq!(c.slots[1], packets::Slot::empty(), "grid consumed authoritatively");
-    assert_eq!(c.slots[12].item_id, bread, "2×2 result from the same table survives");
+    assert_eq!(c.carried.item_id, recipe("stick").result.0);
+    assert_eq!(
+        c.slots[1],
+        packets::Slot { item_id: planks, count: 4 },
+        "grid consumed authoritatively"
+    );
+    assert_eq!(c.slots[4], packets::Slot::empty());
+    assert_eq!(c.slots[14].item_id, torch, "2×2 result from the same table survives");
     drop(s);
     let _ = std::fs::remove_dir_all(&dir);
 }

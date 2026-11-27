@@ -1099,6 +1099,14 @@ pub const CLICK_SWAP: u8 = 2;
 /// 背包打开时按 Q：扔点击槽里的东西（jar `ContainerInput::THROW` id=4；
 /// button=0 扔 1 个，button=1 扔整栈；要求光标为空，否则原版无操作）。
 pub const CLICK_THROW: u8 = 4;
+/// 创造模式中键克隆整组（jar `ContainerInput::CLONE` id=3；生存服恒无操作，
+/// 本服生存玩法写死，见 gameplay 硬编码）。
+pub const CLICK_CLONE: u8 = 3;
+/// 拖拽分堆（jar `ContainerInput::QUICK_CRAFT` id=5）：button 0/1/2 = 起拖
+///（左/右/中），4/5/6 = 划过加槽，8/9/10 = 落子；中键拖拽生存服无操作。
+pub const CLICK_QUICK_CRAFT: u8 = 5;
+/// 双击收集（jar `ContainerInput::PICKUP_ALL` id=6）：全菜单同种进光标直到满栈。
+pub const CLICK_PICKUP_ALL: u8 = 6;
 
 /// C2S ContainerClick（0x12）解析结果（changedSlots/carried 已跳过不返回）。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

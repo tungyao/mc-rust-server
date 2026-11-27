@@ -1,0 +1,26 @@
+{
+  "id": "p60-vanilla-shapes-drag",
+  "title": "vanilla形状校验 + 拖拽/收集 + shape-aware补料",
+  "status": "done",
+  "owner": "main",
+  "priority": "p0",
+  "deps": [],
+  "branch": "",
+  "created": "2026-11-28T00:00:00+00:00",
+  "updated": "2026-11-28T00:00:00+00:00",
+  "detail": "生成器产shaped稀疏格(827条)；匹配器shaped定位+shapeless逐格，1185教科书格零偷家；QUICK_CRAFT/PICKUP_ALL/CLONE三段式+DropState拖拽态；SHIFT先补满再锁定+shape-aware补料；play/p56/workbench e2e真值化；checker加形状复核1185对齐；workspace全绿(p27并行flake单跑过)",
+  "files": [
+    "scripts/gen_recipes.py",
+    "scripts/check_recipes.py",
+    "crates/mc-world/src/crafting.rs",
+    "crates/mc-world/src/inventory.rs",
+    "crates/mc-network/src/drop_state.rs",
+    "crates/mc-network/src/login_route/craft9.rs",
+    "crates/mc-network/src/login_route/mod.rs",
+    "crates/mc-protocol/src/packets/play_entity.rs",
+    "crates/mc-network/tests/play_recipes.rs",
+    "crates/mc-network/tests/p56_crafting_e2e.rs",
+    "crates/mc-network/tests/workbench_gui_e2e.rs",
+    "crates/mc-server/src/admin.rs"
+  ]
+}

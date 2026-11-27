@@ -117,6 +117,48 @@ fn queue_destroy_stage(opts: &PlayOptions, x: i32, y: i32, z: i32, stage: u8) {
     );
 }
 
+/// P60 drag paint on player window 0 (start/add/end by button header bits;
+/// landing goes through `PlayerInventory::apply_drag_end`).
+fn handle_drag_w0(ds: &crate::drop_state::DropState, conn_id: u64, click: &packets::ContainerClick) {
+    let header = click.button >> 2; // 0 start / 1 add / 2 end
+    let mode = click.button & 3; // 0 left / 1 right / 2 middle
+    match header {
+        0 => {
+            if mode == 2 {
+                return; // middle-drag is creative-only; survival ignores it.
+            }
+            let has_cursor =
+                ds.with_inventory(conn_id, |inv| inv.cursor().is_some()).unwrap_or(false);
+            if !has_cursor {
+                return;
+            }
+            ds.drag_begin(conn_id, packets::PLAYER_INVENTORY_WINDOW_ID, mode == 0);
+        }
+        1 => {
+            if mode == 2
+                || !ds.drag_add(conn_id, packets::PLAYER_INVENTORY_WINDOW_ID, click.slot)
+            {
+                ds.drag_clear(conn_id);
+            }
+        }
+        2 => {
+            let Some(state) = ds.drag_take(conn_id) else {
+                return;
+            };
+            if state.window != packets::PLAYER_INVENTORY_WINDOW_ID {
+                return;
+            }
+            ds.with_inventory(conn_id, |inv| {
+                let mut cursor = inv.cursor();
+                if inv.apply_drag_end(&mut cursor, state.left, &state.slots) {
+                    inv.set_cursor(cursor);
+                }
+            });
+        }
+        _ => {}
+    }
+}
+
 async fn play_loop<S: AsyncRead + AsyncWrite + Unpin>(
     stream: &mut S,
     addr: SocketAddr,
@@ -1169,6 +1211,13 @@ async fn play_loop<S: AsyncRead + AsyncWrite + Unpin>(
                 // 光标非空时原版无操作，只全量同步回滚预测）。
                 match packets::decode_container_click(&payload) {
                     Ok((click, _)) => {
+                        // P60: non-drag clicks reset this conn's drag paint state
+                        // (vanilla resets quick-craft on any other click; both windows share it).
+                        if click.click_type != packets::CLICK_QUICK_CRAFT {
+                            if let Some(ds) = &opts.drops {
+                                ds.drag_clear(opts.conn_id);
+                            }
+                        }
                         // P47：工作台窗口 1 走独立会话，绝不改写玩家背包窗口 0 的 2×2 语义。
                         if click.container_id == mc_world::crafting::CRAFT9_WINDOW_ID {
                             if let Some(ds) = &opts.drops {
@@ -1249,6 +1298,20 @@ async fn play_loop<S: AsyncRead + AsyncWrite + Unpin>(
                                     _ => {}
                                 });
                             }
+                        } else if click.click_type == packets::CLICK_QUICK_CRAFT {
+                            // P60 drag paint on window 0 (three-step start/add/end).
+                            if let Some(ds) = &opts.drops {
+                                handle_drag_w0(ds, opts.conn_id, &click);
+                            }
+                        } else if click.click_type == packets::CLICK_PICKUP_ALL {
+                            // P60 double-click collect on window 0.
+                            if let Some(ds) = &opts.drops {
+                                ds.with_inventory(opts.conn_id, |inv| {
+                                    inv.collect_all(click.slot);
+                                });
+                            }
+                        } else if click.click_type == packets::CLICK_CLONE {
+                            // Survival has no clone action (creative only).
                         } else if click.click_type == packets::CLICK_QUICK_MOVE
                             && (1..=4).contains(&click.slot)
                         {

@@ -59,6 +59,15 @@ pub struct Craft9Session {
     pub grid: [Option<(i32, i32)>; mc_world::crafting::GRID9_SIZE],
 }
 
+/// P60 拖拽分堆（QUICK_CRAFT）进行态：按连接记录起始窗口/左右键/已划过槽。
+/// 任何非拖拽点击、断线都会清掉；end 时按 vanilla 口径从光标均分。
+#[derive(Debug, Clone)]
+pub struct DragState {
+    pub window: i32,
+    pub left: bool,
+    pub slots: Vec<i16>,
+}
+
 /// P22/P33 作物条目：种下时的全局 tick + 上次已广播的 age + 作物规格。
 /// 生长只由全服唯一 ticker 推进（P18.1 R1：连接侧绝不 tick），阶段变更经
 /// `MutableWorld::set` 落子并走 hub 广播 fan-out；挖掉后由挖掘路径显式摘除。
@@ -153,6 +162,8 @@ pub struct DropState {
     tool_enchants: Mutex<HashMap<u64, mc_world::tools::ToolEnchant>>,
     /// P47 工作台 3×3 会话（仅当前连接/进程内；无 block entity 存档 MVP）。
     craft9: Mutex<HashMap<u64, Craft9Session>>,
+    /// P60 拖拽分堆进行态（QUICK_CRAFT 起拖→加槽→落子；非拖拽点击/断线清零）。
+    drag: Mutex<HashMap<u64, DragState>>,
     // --- P53 批次 1：四项独立开关 + 纯服务端状态（全服唯一 ticker 推进） ---
     xp_merge_enabled: AtomicBool,
     hunger_detail_enabled: AtomicBool,
@@ -223,6 +234,7 @@ impl DropState {
             player_uuids: Mutex::new(HashMap::new()),
             tool_enchants: Mutex::new(HashMap::new()),
             craft9: Mutex::new(HashMap::new()),
+            drag: Mutex::new(HashMap::new()),
             xp_merge_enabled: AtomicBool::new(false),
             hunger_detail_enabled: AtomicBool::new(false),
             settings_persist_enabled: AtomicBool::new(false),
@@ -1370,6 +1382,7 @@ impl DropState {
         // P54 A8：断线写会话快照（uuid 还在 map 里，取到主键后再清连接态）。
         self.persist_craft9(conn_id, user_tag);
         self.craft9.lock().unwrap_or_else(|p| p.into_inner()).remove(&conn_id);
+        self.drag.lock().unwrap_or_else(|p| p.into_inner()).remove(&conn_id);
         self.lock_tags().remove(&conn_id);
         self.survival.lock().unwrap_or_else(|p| p.into_inner()).remove(&conn_id);
         // P53：连接级玩法状态随断线清理；背包里的存档字段保留。
@@ -1472,6 +1485,37 @@ impl DropState {
             .unwrap_or_else(|p| p.into_inner())
             .get_mut(&conn_id)
             .map(f)
+    }
+
+    /// P60 拖拽起拖：记录窗口 + 左右键，清空已划过槽（同一连接重起即覆盖）。
+    pub fn drag_begin(&self, conn_id: u64, window: i32, left: bool) {
+        self.drag.lock().unwrap_or_else(|p| p.into_inner()).insert(
+            conn_id,
+            DragState { window, left, slots: Vec::new() },
+        );
+    }
+
+    /// P60 拖拽加槽：窗口须与起拖一致；重复划过同一格只记一次。无进行态返回 false。
+    pub fn drag_add(&self, conn_id: u64, window: i32, slot: i16) -> bool {
+        match self.drag.lock().unwrap_or_else(|p| p.into_inner()).get_mut(&conn_id) {
+            Some(d) if d.window == window => {
+                if !d.slots.contains(&slot) {
+                    d.slots.push(slot);
+                }
+                true
+            }
+            _ => false,
+        }
+    }
+
+    /// P60 拖拽落子：取出并清除进行态（无则返回 None，调用方 no-op）。
+    pub fn drag_take(&self, conn_id: u64) -> Option<DragState> {
+        self.drag.lock().unwrap_or_else(|p| p.into_inner()).remove(&conn_id)
+    }
+
+    /// P60：任何非拖拽点击/断线清掉进行态（vanilla 重置口径）。
+    pub fn drag_clear(&self, conn_id: u64) {
+        self.drag.lock().unwrap_or_else(|p| p.into_inner()).remove(&conn_id);
     }
 
     /// P47：全部工作台会话（后台诊断）。

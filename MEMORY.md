@@ -146,3 +146,4 @@
 - [2026-11-27 13:31 UTC] agent=main task=p58-subset-crafting status=todo detail=合成子集语义：多件同种可合成，多的留下 files=
 - [2026-11-27 13:31 UTC] agent=main task=p58-subset-crafting status=start detail=claim files=
 - [2026-11-27 13:31 UTC] agent=main task=p58-subset-crafting status=done detail=match精确优先+子集兜底（够料无杂物即命中）；歧义槽型>总量降序>表序；588 passed files=mc-world/crafting.rs,mc-world/inventory.rs
+- [2026-11-27 15:00 UTC] agent=main task=p60-vanilla-shapes-drag status=done detail=shaped cells + shapeless per-slot (827 shaped, 0 steals over 1185 canonical grids); QUICK_CRAFT/PICKUP_ALL/CLONE handled, drag state per conn; shape-aware SHIFT refill; e2e socket pickaxe/drag green; checker 1185/0/0/0 files=scripts/gen_recipes.py,scripts/check_recipes.py,mc-world/crafting.rs,mc-world/inventory.rs,mc-network/{drop_state,login_route/{craft9,mod}},mc-protocol/play_entity.rs,mc-server/admin.rs

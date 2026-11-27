@@ -23,8 +23,15 @@ fn click_frame(container: i32, state: i32, slot: i16, button: u8, ty: u8) -> Vec
     b
 }
 
-async fn send_click(s: &mut tokio::net::TcpStream, container: i32, state: i32, slot: i16, ty: u8) {
-    let frame = click_frame(container, state, slot, 0, ty);
+async fn send_click(
+    s: &mut tokio::net::TcpStream,
+    container: i32,
+    state: i32,
+    slot: i16,
+    button: u8,
+    ty: u8,
+) {
+    let frame = click_frame(container, state, slot, button, ty);
     mc_network::framing::write_packet(s, packets::PLAY_CLICK_CONTAINER_C2S_ID, &frame)
         .await
         .unwrap();
@@ -49,7 +56,8 @@ async fn serve_gui(
 ) -> (std::net::SocketAddr, Arc<DropState>, Arc<MutableWorld>) {
     let mut inv = PlayerInventory::new();
     inv.set_slot(36, Some((mc_world::drops::ITEM_CRAFTING_TABLE, 1)));
-    inv.set_slot(9, Some((mc_world::drops::ITEM_WHEAT, 9)));
+    inv.set_slot(9, Some((mc_world::drops::ITEM_OAK_PLANKS, 1)));
+    inv.set_slot(10, Some((mc_world::drops::ITEM_OAK_PLANKS, 1)));
     inv.save_to_dir(dir, user, DEFAULT_SEED).unwrap();
     let mutable = Arc::new(MutableWorld::new(DEFAULT_SEED));
     let cache = Arc::new(ChunkCache::new(DEFAULT_SEED, 64).with_mutable(Arc::clone(&mutable)));
@@ -139,28 +147,159 @@ async fn gui_enabled_place_open_screen_content_and_authoritative_clicks() {
     assert_eq!(content.slots.len(), 46);
     assert_eq!(content.slots[0], packets::Slot::empty());
 
-    // 点击合成窗口：背包槽 9（窗口槽 10）取 9 小麦 → 合成格 1 → 结果槽拿干草捆。
+    // 点击合成窗口：背包槽 9/10（窗口槽 10/11）各取 1 木板 → 左列竖摆 → 结果槽拿木棍。
     let window = mc_world::crafting::CRAFT9_WINDOW_ID;
-    send_click(&mut s, window, 1, 10, packets::CLICK_PICKUP).await;
+    send_click(&mut s, window, 1, 10, 0, packets::CLICK_PICKUP).await;
     let c = read_content_window(&mut s, window).await;
-    assert_eq!(c.carried.item_id, mc_world::drops::ITEM_WHEAT);
-    send_click(&mut s, window, 2, 1, packets::CLICK_PICKUP).await;
+    assert_eq!(c.carried.item_id, mc_world::drops::ITEM_OAK_PLANKS);
+    send_click(&mut s, window, 2, 1, 0, packets::CLICK_PICKUP).await;
+    let _ = read_content_window(&mut s, window).await;
+    send_click(&mut s, window, 3, 11, 0, packets::CLICK_PICKUP).await;
+    let _ = read_content_window(&mut s, window).await;
+    send_click(&mut s, window, 4, 4, 0, packets::CLICK_PICKUP).await;
     let c = read_content_window(&mut s, window).await;
     assert_eq!(
         c.slots[1],
-        packets::Slot { item_id: mc_world::drops::ITEM_WHEAT, count: 9 }
+        packets::Slot { item_id: mc_world::drops::ITEM_OAK_PLANKS, count: 1 }
     );
-    send_click(&mut s, window, 3, 0, packets::CLICK_PICKUP).await;
+    assert_eq!(
+        c.slots[4],
+        packets::Slot { item_id: mc_world::drops::ITEM_OAK_PLANKS, count: 1 }
+    );
+    send_click(&mut s, window, 5, 0, 0, packets::CLICK_PICKUP).await;
     let c = read_content_window(&mut s, window).await;
-    let hay = mc_world::crafting::RECIPES
+    let sticks = mc_world::crafting::RECIPES
         .iter()
-        .find(|r| r.name == "hay_block")
+        .find(|r| r.name == "stick")
         .unwrap()
         .result
         .0;
-    assert_eq!(c.carried.item_id, hay);
+    assert_eq!(c.carried.item_id, sticks);
+    assert_eq!(c.carried.count, 4);
     assert_eq!(c.slots[1], packets::Slot::empty(), "inputs must be authoritative");
+    assert_eq!(c.slots[4], packets::Slot::empty());
     assert_eq!(drops.craft9_sessions().len(), 1, "GUI uses the single craft9 session");
+    drop(s);
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// P60：拖拽分堆走 socket 全链路（10 木板拖过两格 → 5/5，光标空）。
+#[tokio::test]
+async fn workbench_drag_paint_distributes_over_socket() {
+    let dir = std::env::temp_dir().join(format!("mc-p60-drag-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    let planks = mc_world::drops::ITEM_OAK_PLANKS;
+    let mut inv = PlayerInventory::new();
+    inv.set_slot(36, Some((mc_world::drops::ITEM_CRAFTING_TABLE, 1)));
+    inv.set_slot(9, Some((planks, 10)));
+    inv.save_to_dir(&dir, "DragCrafter", DEFAULT_SEED).unwrap();
+    let mutable = Arc::new(MutableWorld::new(DEFAULT_SEED));
+    let cache = Arc::new(ChunkCache::new(DEFAULT_SEED, 64).with_mutable(Arc::clone(&mutable)));
+    let drops = Arc::new(DropState::new(dir.to_path_buf(), DEFAULT_SEED));
+    let config = NetConfig::new(100, "p60-drag".into(), Arc::new(AtomicUsize::new(0)))
+        .with_view_distance(2)
+        .with_chunk_cache(cache)
+        .with_mutable_world(Arc::clone(&mutable))
+        .with_drops(Arc::clone(&drops));
+    let addr = spawn_server(config).await;
+    let mut s = login_and_join(addr, "DragCrafter", 2).await;
+    place_workbench(&mut s).await;
+    let window = mc_world::crafting::CRAFT9_WINDOW_ID;
+    let mut content = None;
+    for _ in 0..30 {
+        let (id, body) = read_frame_timeout(&mut s, Duration::from_secs(5)).await.unwrap();
+        if id == packets::PLAY_SET_CONTAINER_CONTENT_S2C_ID {
+            let c = packets::SetContainerContent::decode_body(&body).unwrap().0;
+            if c.window_id == window {
+                content = Some(c);
+                break;
+            }
+        }
+    }
+    content.expect("window 1 content after place");
+    // 拿起 10 木板 → 起拖(格1,左键0) → 划过格1/格2(4) → 落子(8)。
+    send_click(&mut s, window, 1, 10, 0, packets::CLICK_PICKUP).await;
+    let _ = read_content_window(&mut s, window).await;
+    let qc = packets::CLICK_QUICK_CRAFT;
+    send_click(&mut s, window, 2, 1, 0, qc).await;
+    let _ = read_content_window(&mut s, window).await;
+    send_click(&mut s, window, 3, 1, 4, qc).await;
+    let _ = read_content_window(&mut s, window).await;
+    send_click(&mut s, window, 4, 2, 4, qc).await;
+    let _ = read_content_window(&mut s, window).await;
+    send_click(&mut s, window, 5, 0, 8, qc).await;
+    let c = read_content_window(&mut s, window).await;
+    assert_eq!(c.carried, packets::Slot::empty(), "cursor must be empty after even split");
+    assert_eq!(c.slots[1], packets::Slot { item_id: planks, count: 5 });
+    assert_eq!(c.slots[2], packets::Slot { item_id: planks, count: 5 });
+    drop(s);
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// P60：3×3 镐形走 socket 全链路（顶行 3 铁 + 中下两棍 → 铁镐）。
+#[tokio::test]
+async fn workbench_pickaxe_shape_crafts_over_socket() {
+    let dir = std::env::temp_dir().join(format!("mc-p60-pick-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    let iron = mc_world::crafting::RECIPES
+        .iter()
+        .find(|r| r.name == "cauldron")
+        .unwrap()
+        .needs[0]
+        .0;
+    let stick = mc_world::drops::ITEM_STICK;
+    let mut inv = PlayerInventory::new();
+    inv.set_slot(36, Some((mc_world::drops::ITEM_CRAFTING_TABLE, 1)));
+    inv.set_slot(9, Some((iron, 1)));
+    inv.set_slot(10, Some((iron, 1)));
+    inv.set_slot(11, Some((iron, 1)));
+    inv.set_slot(12, Some((stick, 1)));
+    inv.set_slot(13, Some((stick, 1)));
+    inv.save_to_dir(&dir, "PickCrafter", DEFAULT_SEED).unwrap();
+    let mutable = Arc::new(MutableWorld::new(DEFAULT_SEED));
+    let cache = Arc::new(ChunkCache::new(DEFAULT_SEED, 64).with_mutable(Arc::clone(&mutable)));
+    let drops = Arc::new(DropState::new(dir.to_path_buf(), DEFAULT_SEED));
+    let config = NetConfig::new(100, "p60-pick".into(), Arc::new(AtomicUsize::new(0)))
+        .with_view_distance(2)
+        .with_chunk_cache(cache)
+        .with_mutable_world(Arc::clone(&mutable))
+        .with_drops(Arc::clone(&drops));
+    let addr = spawn_server(config).await;
+    let mut s = login_and_join(addr, "PickCrafter", 2).await;
+    place_workbench(&mut s).await;
+    // 等 Open Screen + window-1 全量（复用首测包序）。
+    let mut content = None;
+    for _ in 0..30 {
+        let (id, body) = read_frame_timeout(&mut s, Duration::from_secs(5)).await.unwrap();
+        if id == packets::PLAY_SET_CONTAINER_CONTENT_S2C_ID {
+            let c = packets::SetContainerContent::decode_body(&body).unwrap().0;
+            if c.window_id == mc_world::crafting::CRAFT9_WINDOW_ID {
+                content = Some(c);
+                break;
+            }
+        }
+    }
+    content.expect("window 1 content after place");
+    let window = mc_world::crafting::CRAFT9_WINDOW_ID;
+    // 顶行 3 铁（窗口格 1/2/3）+ 中下两棍（窗口格 5/8）。
+    for (st, wslot, gslot) in [(1, 10, 1), (2, 11, 2), (3, 12, 3), (4, 13, 5), (5, 14, 8)] {
+        send_click(&mut s, window, st, wslot, 0, packets::CLICK_PICKUP).await;
+        let _ = read_content_window(&mut s, window).await;
+        send_click(&mut s, window, st + 10, gslot, 0, packets::CLICK_PICKUP).await;
+        let _ = read_content_window(&mut s, window).await;
+    }
+    send_click(&mut s, window, 30, 0, 0, packets::CLICK_PICKUP).await;
+    let c = read_content_window(&mut s, window).await;
+    let pick = mc_world::crafting::RECIPES
+        .iter()
+        .find(|r| r.name == "iron_pickaxe")
+        .unwrap()
+        .result
+        .0;
+    assert_eq!(c.carried.item_id, pick, "pickaxe shape must craft over socket");
+    assert_eq!(c.slots[1], packets::Slot::empty(), "top row consumed");
+    assert_eq!(c.slots[5], packets::Slot::empty());
+    assert_eq!(c.slots[8], packets::Slot::empty());
     drop(s);
     let _ = std::fs::remove_dir_all(&dir);
 }

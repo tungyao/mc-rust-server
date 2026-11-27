@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
 """P59: 从 data/777/full/{recipes,tags_item} 生成 crafting.rs 的配方表（tag 原生）。
+P60: 追加 vanilla 形状（shaped 去边稀疏格 cells；shapeless 不附加数据）。
 
 用法: python scripts/gen_recipes.py [--check]
   重写 crafting.rs 中 GEN-CONSTS / GEN-TAGS / GEN-TABLE 标记区；
@@ -30,7 +31,8 @@ ITEMS_JSON = ROOT / "data/777/items.json"
 CRAFT_RS = ROOT / "crates/mc-world/src/crafting.rs"
 
 ENTRY_RE = re.compile(
-    r'Recipe \{ needs: &\[(.*?)\], result: \((.*?), (\d+)\), name: "(.*?)" \}'
+    r'Recipe \{ needs: &\[(.*?)\], result: \((.*?), (\d+)\), name: "(.*?)", '
+    r'shaped: (true|false), cells: &\[(.*?)\] \}'
 )
 CONST_RE = re.compile(r'const (\w+): i32 = registry_id\(mc_registry::ITEMS, "([^"]+)"\)')
 TAG_CONST_RE = re.compile(r"const (TAG_\w+): i32 = -(\d+);")
@@ -98,8 +100,28 @@ def norm_options(ref):
 
 
 def canon_needs(items):
-    """[(kind, mc, n)] -> canonical tuple（TAG 按成员元组归一，排序）。"""
+    """[(kind, mc, n)] -> canonical 元组（TAG 按成员元组归一，排序）。"""
     return tuple(sorted(items))
+
+
+def resolve_opt(opts, known_tags, alt_sets, item_ids):
+    """P60: 选项列表 -> ("ITEM", mc) / ("TAGM", 成员元组) / None（不可解析）。
+    与需求项同一口径，shaped 逐格与需求聚合共用，保证两处引用一致。"""
+    if len(opts) == 1 and opts[0][0] == "item":
+        return ("ITEM", opts[0][1]) if opts[0][1] in item_ids else None
+    if len(opts) == 1 and opts[0][0] == "tag":
+        ms = known_tags.get(opts[0][1], ())
+        return ("TAGM", ms) if ms else None
+    members = set()
+    for kind, mc in opts:
+        if kind == "tag":
+            members.update(m for m in known_tags.get(mc, ()) if m in item_ids)
+        else:
+            members.add(mc)
+    members = tuple(sorted(m for m in members if m in item_ids))
+    if not members or members not in alt_sets:
+        return None
+    return ("TAGM", members)
 
 
 def parse_existing(item_ids, tags):
@@ -124,31 +146,63 @@ def parse_existing(item_ids, tags):
     mc_of_const = dict(consts)
     for name, n in tag_consts.items():
         mc_of_const[name] = ("TAGIDX", n)
+    tagidx_members = {n: tag_members.get(n - 1, ()) for _, n in tag_consts.items()}
+
+    def ref_of(cname):
+        """字面量引用名 -> ("ITEM", mc) / ("TAGM", 成员元组) / None。"""
+        ref = mc_of_const.get(cname)
+        if ref is None:
+            return None
+        if isinstance(ref, tuple):
+            ms = tagidx_members.get(ref[1], ())
+            return ("TAGM", ms) if ms else None
+        return ("ITEM", ref)
+
     entries = []
     for m in ENTRY_RE.finditer(text):
-        needs_raw, res_raw, res_count, name = m.groups()
+        needs_raw, res_raw, res_count, name, shaped, cells_raw = m.groups()
         needs = []
         ok = True
         for part in needs_raw.split("),"):
             part = part.strip().strip("()")
             if not part:
                 continue
-            cname, n = [x.strip() for x in part.split(",")]
-            if cname not in mc_of_const:
+            segs = [x.strip() for x in part.split(",")]
+            if len(segs) != 2:
                 ok = False
                 break
-            ref = mc_of_const[cname]
-            if isinstance(ref, tuple):
-                members = tag_members.get(ref[1] - 1, ())
-                if not members:
+            cname, n = segs
+            r = ref_of(cname)
+            if r is None:
+                ok = False
+                break
+            kind, ref = r
+            if kind == "ITEM":
+                needs.append(("ITEM", ref, int(n)))
+            else:
+                needs.append(("TAGM", ref, int(n)))
+        if shaped == "true":
+            cells = []
+            for part in cells_raw.split("),"):
+                part = part.strip().strip("()")
+                if not part:
+                    continue
+                segs = [x.strip() for x in part.split(",")]
+                if len(segs) != 3:
                     ok = False
                     break
-                needs.append(("TAGM", members, int(n)))
-            else:
-                needs.append(("ITEM", ref, int(n)))
+                xs, ys, cname = segs
+                r = ref_of(cname)
+                if r is None:
+                    ok = False
+                    break
+                cells.append((int(xs), int(ys), r[0], r[1]))
+            shape = ("shaped", tuple(cells))
+        else:
+            shape = ("shapeless", ())
         if not ok or res_raw not in consts:
             continue
-        entries.append((name, canon_needs(needs), consts[res_raw], int(res_count)))
+        entries.append((name, canon_needs(needs), consts[res_raw], int(res_count), shape))
     return entries
 
 
@@ -213,17 +267,20 @@ def main():
             continue
         groups = []
         bad = False
-        if d["type"] == "minecraft:crafting_shaped":
+        is_shaped = d["type"] == "minecraft:crafting_shaped"
+        cell_opts = {}
+        if is_shaped:
             key = d.get("key", {})
             pattern = d.get("pattern", [])
             cnt = Counter()
-            for row in pattern:
-                for ch in row:
+            for y, row in enumerate(pattern):
+                for x, ch in enumerate(row):
                     if ch == " ":
                         continue
                     if ch not in key:
                         bad = True
                         break
+                    cell_opts[(x, y)] = norm_options(key[ch])
                     cnt[ch] += 1
                 if bad:
                     break
@@ -259,33 +316,33 @@ def main():
         needs = []
         valid = True
         for opts, n in groups:
-            if len(opts) == 1 and opts[0][0] == "item":
-                if opts[0][1] not in item_ids:
-                    valid = False
-                    break
-                needs.append(("ITEM", opts[0][1], n))
-            elif len(opts) == 1 and opts[0][0] == "tag":
-                ms = known_tags.get(opts[0][1], ())
-                if not ms:
-                    valid = False
-                    break
-                needs.append(("TAGM", ms, n))
-            else:
-                members = set()
-                for kind, mc in opts:
-                    if kind == "tag":
-                        members.update(m for m in known_tags.get(mc, ()) if m in item_ids)
-                    else:
-                        members.add(mc)
-                members = tuple(sorted(m for m in members if m in item_ids))
-                if not members or members not in alt_sets:
-                    valid = False
-                    break
-                needs.append(("TAGM", members, n))
+            r = resolve_opt(opts, known_tags, alt_sets, item_ids)
+            if r is None:
+                valid = False
+                break
+            needs.append((r[0], r[1], n))
         if not valid or not needs:
             skipped["unresolvable ingredient"] += 1
             continue
-        key = (res_mc, canon_needs(needs), count)
+        # P60: 形状（shaped 去边稀疏格；shapeless 不附加数据，units 由 needs 展开）。
+        shape = ("shapeless", ())
+        if is_shaped:
+            raw = []
+            for (x, y), opts in cell_opts.items():
+                r = resolve_opt(opts, known_tags, alt_sets, item_ids)
+                if r is None:
+                    valid = False
+                    break
+                raw.append((x, y, r[0], r[1]))
+            if not valid or not raw:
+                skipped["unresolvable cell"] += 1
+                continue
+            minx = min(x for x, _, _, _ in raw)
+            miny = min(y for _, y, _, _ in raw)
+            cells = tuple(sorted(((x - minx, y - miny, k, ref) for x, y, k, ref in raw),
+                                 key=lambda c: (c[1], c[0])))
+            shape = ("shaped", cells)
+        key = (res_mc, canon_needs(needs), count, shape)
         if key in uniq:
             skipped["dup combo merged"] += 1
             continue
@@ -293,36 +350,36 @@ def main():
     # 合并：旧条目按 canonical 对齐
     exist_entries = parse_existing(item_ids, tags)
     old_by_key = {}
-    for name, needs, res_mc, count in exist_entries:
+    for name, needs, res_mc, count, shape in exist_entries:
         old_by_key.setdefault((res_mc, needs, count), []).append(name)
     vanilla_by_needs = {}
-    for (res_mc, needs, count), vname in uniq.items():
-        vanilla_by_needs.setdefault((res_mc, needs), []).append((count, vname))
+    for (res_mc, needs, count, shape), vname in uniq.items():
+        vanilla_by_needs.setdefault((res_mc, needs), []).append((count, shape, vname))
     ordered = []
     used_names = set()
     replaced = []
     seen_ordered = set()
-    for name, needs, res_mc, count in exist_entries:
-        key = (res_mc, needs, count)
+    for name, needs, res_mc, count, shape in exist_entries:
+        key = (res_mc, needs, count, shape)
         if key in {k for k in uniq}:
             if key not in seen_ordered:
                 seen_ordered.add(key)
                 if name not in used_names:
-                    ordered.append((name, needs, res_mc, count))
+                    ordered.append((name, needs, res_mc, count, shape))
                     used_names.add(name)
             continue
         # vanilla 同 (result, needs) 但 count 不同 -> 用 vanilla 真值替换（报告）。
         if (res_mc, needs) in vanilla_by_needs:
-            vcount = vanilla_by_needs[(res_mc, needs)][0][0]
+            vcount, vshape = vanilla_by_needs[(res_mc, needs)][0][:2]
             if vcount != count:
                 replaced.append((name, count, vcount))
-            count = vcount
-            key = (res_mc, needs, count)
+            count, shape = vcount, vshape
+            key = (res_mc, needs, count, shape)
             if key in seen_ordered:
                 continue
             seen_ordered.add(key)
             if name not in used_names:
-                ordered.append((name, needs, res_mc, count))
+                ordered.append((name, needs, res_mc, count, shape))
                 used_names.add(name)
             continue
         # 旧条目 vanilla 里没有 -> custom 保留（顺序保留；完全重复的去重）
@@ -335,33 +392,41 @@ def main():
             while f"{name}__custom{i}" in used_names:
                 i += 1
             nn = f"{name}__custom{i}"
-        ordered.append((nn, needs, res_mc, count))
+        ordered.append((nn, needs, res_mc, count, shape))
         used_names.add(nn)
     # 新增 vanilla 条目
     new_entries = []
-    for (res_mc, needs, count), vname in uniq.items():
-        if (res_mc, needs, count) in {(r, n, c) for _, n, r, c in ordered}:
+    for (res_mc, needs, count, shape), vname in uniq.items():
+        if (res_mc, needs, count, shape) in {(r, n, c, s) for _, n, r, c, s in ordered}:
             continue
         nn, i = vname, 2
         while nn in used_names:
             nn = f"{vname}__{i}"
             i += 1
         used_names.add(nn)
-        new_entries.append((nn, needs, res_mc, count))
+        new_entries.append((nn, needs, res_mc, count, shape))
     new_entries.sort(key=lambda x: x[0])
     ordered += new_entries
     # const 生成（标签成员也要有 const，CRAFT_TAGS 引用它们）
     tag_groups = set()
-    for _, needs, _, _ in ordered:
+    for _, needs, _, _, shape in ordered:
         for k, mm, n in needs:
             if k == "TAGM":
                 tag_groups.add(mm)
+        if shape[0] == "shaped":
+            for _, _, k, ref in shape[1]:
+                if k == "TAGM":
+                    tag_groups.add(ref)
     needed_mc = set()
-    for _, needs, res_mc, _ in ordered:
+    for _, needs, res_mc, _, shape in ordered:
         needed_mc.add(res_mc)
         for k, mm, n in needs:
             if k == "ITEM":
                 needed_mc.add(mm)
+        if shape[0] == "shaped":
+            for _, _, k, ref in shape[1]:
+                if k == "ITEM":
+                    needed_mc.add(ref)
     for members in tag_groups:
         needed_mc.update(m for m in members if m in item_ids)
     taken = set(re.findall(r"const (\w+): i32", CRAFT_RS.read_text(encoding="utf-8")))
@@ -388,10 +453,14 @@ def main():
     for members, alt in sorted(alt_sets.items(), key=lambda kv: kv[1]):
         member_to_tag.setdefault(members, f"ALT:{alt}")
     used_groups = set()
-    for _, needs, _, _ in ordered:
+    for _, needs, _, _, shape in ordered:
         for k, mm, n in needs:
             if k == "TAGM":
                 used_groups.add(mm)
+        if shape[0] == "shaped":
+            for _, _, k, ref in shape[1]:
+                if k == "TAGM":
+                    used_groups.add(ref)
     tag_lines = ["// === GEN-TAGS-START === (scripts/gen_recipes.py 生成；勿手改)",
                  "/// 合成标签成员表（负数 ID 引用）：need id = -(index+1)。",
                  "pub static CRAFT_TAGS: &[&[i32]] = &["]
@@ -427,16 +496,24 @@ def main():
     const_lines.append("// === GEN-CONSTS-END ===")
     table_lines = ["// === GEN-TABLE-START === (scripts/gen_recipes.py 生成；勿手改)",
                    "pub const RECIPES: &[Recipe] = &["]
-    for name, needs, res_mc, count in ordered:
+    for name, needs, res_mc, count, shape in ordered:
         parts = []
         for k, mm, n in needs:
             if k == "ITEM":
                 parts.append(f"({const_map[mm]}, {n})")
             else:
                 parts.append(f"({tag_const_of[mm]}, {n})")
+        if shape[0] == "shaped":
+            cell_parts = []
+            for x, y, k, ref in shape[1]:
+                c = const_map[ref] if k == "ITEM" else tag_const_of[ref]
+                cell_parts.append(f"({x}, {y}, {c})")
+            shap, cellstr = "true", ", ".join(cell_parts)
+        else:
+            shap, cellstr = "false", ""
         table_lines.append(
             f'    Recipe {{ needs: &[{", ".join(parts)}], result: ({const_map[res_mc]}, {count}), '
-            f'name: "{name}" }},')
+            f'name: "{name}", shaped: {shap}, cells: &[{cellstr}] }},')
     table_lines.append("];")
     table_lines.append("// === GEN-TABLE-END ===")
     const_block = "\n".join(const_lines) + "\n"
@@ -462,12 +539,11 @@ def main():
     CRAFT_RS.write_text(new_text, encoding="utf-8")
     print(f"vanilla crafting files: {len(list(RECIPES_DIR.glob('*.json')))}")
     print(f"unique vanilla recipes: {len(uniq)}")
-    print(f"old entries parsed: {len(exist_entries)}, customs kept: "
-          f"{sum(1 for _, n, _, _ in ordered if n and False)}")
-    print(f"total: {len(ordered)} (replaced counts: {replaced})")
+    n_shaped = sum(1 for o in ordered if o[4][0] == "shaped")
+    print(f"total: {len(ordered)} (shaped: {n_shaped}, replaced counts: {replaced})")
     print("skipped:", dict(skipped))
     groups = {}
-    for name, needs, res_mc, count in ordered:
+    for name, needs, res_mc, count, shape in ordered:
         sig = tuple(sorted((k, mm, n) for k, mm, n in needs))
         groups.setdefault(sig, []).append(name)
     multi = {k: v for k, v in groups.items() if len(v) > 1}

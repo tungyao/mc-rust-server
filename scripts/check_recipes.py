@@ -83,14 +83,16 @@ for mm in re.finditer(r"&\[(.*?)\],", m.group(1)):
     idx += 1
 have = Counter()
 missing = []
+shapes = {}  # 表名 -> ("shaped", cells) / ("shapeless", ())
 for em in gen.ENTRY_RE.finditer(text):
-    needs_raw, res_raw, res_count, name = em.groups()
+    needs_raw, res_raw, res_count, name, shaped, cells_raw = em.groups()
     needs = []
     for part in needs_raw.split("),"):
         part = part.strip().strip("()")
         if not part:
             continue
-        cname, n = [x.strip() for x in part.split(",")]
+        segs = [x.strip() for x in part.split(",")]
+        cname, n = segs
         if cname not in consts and cname not in tag_consts:
             needs.append(("??", cname, int(n)))
             continue
@@ -98,6 +100,17 @@ for em in gen.ENTRY_RE.finditer(text):
             needs.append(("TAGM", tagmem[tag_consts[cname] - 1], int(n)))
         else:
             needs.append(("ITEM", consts[cname], int(n)))
+    cells = []
+    for part in cells_raw.split("),"):
+        part = part.strip().strip("()")
+        if not part:
+            continue
+        xs, ys, cname = [x.strip() for x in part.split(",")]
+        ref = ("TAGM", tagmem[tag_consts[cname] - 1]) if cname in tag_consts \
+            else ("ITEM", consts.get(cname, cname))
+        cells.append((int(xs), int(ys), ref[0], ref[1]))
+    shapes[name] = ("shaped", tuple(sorted(cells, key=lambda c: (c[1], c[0])))) \
+        if shaped == "true" else ("shapeless", ())
     key = (consts.get(res_raw, res_raw), tuple(sorted(needs)), int(res_count))
     have[key] += 1
 dups = {k: v for k, v in have.items() if v > 1}
@@ -109,4 +122,70 @@ for k, v in list(dups.items())[:10]:
 print(f"vanilla recipes missing from table: {len(not_covered)}")
 for k in not_covered[:20]:
     print("  MISS", k[0], k[2], van[k])
-sys.exit(1 if dups or not_covered else 0)
+
+# P60 形状独立复核：逐 vanilla 文件重算去边稀疏格，与表内同名条目逐格比对。
+# （解析口径与生成器一致，但代码独立：单物品/单标签/选项并集分别归一。）
+def resolve_ref(ref):
+    opts = gen.norm_options(ref)
+    if len(opts) == 1 and opts[0][0] == "item" and opts[0][1] in item_ids:
+        return ("ITEM", opts[0][1])
+    if len(opts) == 1 and opts[0][0] == "tag" and known_tags.get(opts[0][1]):
+        return ("TAGM", known_tags[opts[0][1]])
+    members = set()
+    for kind, mc in opts:
+        if kind == "tag":
+            members.update(m for m in known_tags.get(mc, ()) if m in item_ids)
+        else:
+            members.add(mc)
+    members = tuple(sorted(m for m in members if m in item_ids))
+    return ("TAGM", members) if members else None
+
+
+def expected_shape(d):
+    if d.get("type") == "minecraft:crafting_shapeless":
+        return ("shapeless", ())
+    key, pattern = d.get("key", {}), d.get("pattern", [])
+    raw = {}
+    for y, row in enumerate(pattern):
+        for x, ch in enumerate(row):
+            if ch == " " or ch not in key:
+                continue
+            raw[(x, y)] = key[ch]
+    if not raw:
+        return None
+    cells = []
+    for (x, y), ref in raw.items():
+        if isinstance(ref, dict) and "components" in ref:
+            return None
+        r = resolve_ref(ref)
+        if r is None:
+            return None
+        cells.append((x, y, r[0], r[1]))
+    minx = min(x for x, _, _, _ in cells)
+    miny = min(y for _, y, _, _ in cells)
+    norm = tuple(sorted(((x - minx, y - miny, k, ref) for x, y, k, ref in cells),
+                        key=lambda c: (c[1], c[0])))
+    return ("shaped", norm)
+
+
+shape_bad = []
+shape_checked = 0
+for path in files:
+    d = json.loads(path.read_text(encoding="utf-8"))
+    if d.get("type") not in ("minecraft:crafting_shaped", "minecraft:crafting_shapeless"):
+        continue
+    stem = path.stem[len("data_minecraft_recipe_"):] \
+        if path.stem.startswith("data_minecraft_recipe_") else path.stem
+    exp = expected_shape(d)
+    got = shapes.get(stem)
+    if exp is None or got is None:
+        continue  # 生成器跳过的条目（components/未知物），覆盖率检查已管
+    shape_checked += 1
+    if exp != got:
+        shape_bad.append((stem, exp, got))
+print(f"shapes checked: {shape_checked}, mismatched: {len(shape_bad)}")
+for stem, exp, got in shape_bad[:10]:
+    print("  SHAPE-MISMATCH", stem)
+    print("    want:", exp)
+    print("    got: ", got)
+sys.exit(1 if dups or not_covered or shape_bad else 0)

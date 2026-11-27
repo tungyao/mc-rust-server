@@ -86,44 +86,92 @@ fn pickup(slot: &mut Option<(i32, i32)>, cursor: &mut Option<(i32, i32)>, button
 /// SHIFT 整箱整理：从背包补一格原料到空合成格（只搬配方表内物品，不搬产物/杂项）。
 /// 一次只补一格，调用方每合成一次调一次，直到背包没有可用原料。
 fn refill_one_from_inventory(ds: &DropState, conn: u64, session: &mut Craft9Session) -> bool {
-    refill_one_matching(ds, conn, session, |id| {
-        crafting::RECIPES.iter().any(|r| crafting::recipe_accepts_ingredient(r, id))
-    })
-}
-
-/// 只补锁定配方的料（可逆配方/无关石头不再混进来）。
-/// `accept` 对背包每个物品栈做判断；grid 第一个空槽填入（单槽最多 9 个）。
-fn refill_one_matching(
-    ds: &DropState,
-    conn: u64,
-    session: &mut Craft9Session,
-    accept: impl Fn(i32) -> bool,
-) -> bool {
     for idx in 0..mc_world::crafting::GRID9_SIZE {
         if session.grid[idx].is_some() {
             continue;
         }
-        let filled = ds.with_inventory(conn, |inv| {
-            for slot in mc_world::inventory::MAIN_START..=45 {
-                let Some((id, count)) = inv.get(slot as usize) else { continue };
-                if !accept(id) {
-                    continue;
-                }
-                let take = count.min(9);
-                inv.set_slot(
-                    slot as usize,
-                    if count > take { Some((id, count - take)) } else { None },
-                );
-                return Some((id, take));
-            }
-            None
-        });
-        if let Some(Some(stack)) = filled {
+        if let Some(stack) = take_from_inventory(ds, conn, |id| {
+            crafting::RECIPES.iter().any(|r| crafting::recipe_accepts_ingredient(r, id))
+        }) {
             session.grid[idx] = Some(stack);
             return true;
         }
     }
     false
+}
+
+/// P60 shape-aware 补料：只填锁定配方的形状空格。
+/// - shaped：找首个一致的放置（非覆盖格须空；覆盖格空着待补或放着可接受的料），
+///   把空格按格填充（每格最多 9 个，背包槽序确定性）。
+/// - shapeless：已占格须全可接受（否则停，料不乱动），填首个空格（最多 9 个）。
+/// 返回是否填了 ≥1 格。物品只在格子/背包之间搬运，不丢失。
+fn refill_for_recipe(
+    ds: &DropState,
+    conn: u64,
+    session: &mut Craft9Session,
+    recipe: &crafting::Recipe,
+) -> bool {
+    if recipe.shaped {
+        let Some(place) = crafting::refill_placement(recipe, &session.grid, 3) else {
+            return false;
+        };
+        let mut filled = false;
+        for (idx, need) in place {
+            if session.grid[idx].is_some() {
+                continue;
+            }
+            if let Some(stack) =
+                take_from_inventory(ds, conn, |id| crafting::need_accepts(need, id))
+            {
+                session.grid[idx] = Some(stack);
+                filled = true;
+            }
+        }
+        filled
+    } else {
+        for s in session.grid.iter().flatten() {
+            if !crafting::recipe_accepts_ingredient(recipe, s.0) {
+                return false;
+            }
+        }
+        let Some(idx) = session.grid.iter().position(|s| s.is_none()) else {
+            return false;
+        };
+        if let Some(stack) = take_from_inventory(ds, conn, |id| {
+            crafting::recipe_accepts_ingredient(recipe, id)
+        }) {
+            session.grid[idx] = Some(stack);
+            true
+        } else {
+            false
+        }
+    }
+}
+
+/// 从背包按槽序取一叠（`accept` 过滤，单格最多 9 个），返回取出的栈。
+fn take_from_inventory(
+    ds: &DropState,
+    conn: u64,
+    accept: impl Fn(i32) -> bool,
+) -> Option<(i32, i32)> {
+    ds.with_inventory(conn, |inv| {
+        for slot in mc_world::inventory::MAIN_START..=45 {
+            let Some((id, count)) = inv.get(slot as usize) else {
+                continue;
+            };
+            if !accept(id) {
+                continue;
+            }
+            let take = count.min(9);
+            inv.set_slot(
+                slot as usize,
+                if count > take { Some((id, count - take)) } else { None },
+            );
+            return Some((id, take));
+        }
+        None
+    })
+    .flatten()
 }
 
 /// P56 / 26.3 jar `CraftingMenu.quickMoveStack` 对窗口槽 10..=45（玩家背包）的 SHIFT：
@@ -170,45 +218,267 @@ fn shift_inventory_into_grid(
     true
 }
 
+/// P60 拖拽分堆落子（窗口 1：合成格 1..=9 + 背包 10..=45；结果槽 0 不可进）。
+/// 口径与 [`mc_world::inventory::PlayerInventory::apply_drag_end`] 一致
+///（经 [`mc_world::inventory::PlayerInventory::drag_split`]）。
+/// 任一槽非法则整单 no-op、光标不动，返回 false。
+fn apply_drag_end_w1(
+    ds: &DropState,
+    conn: u64,
+    session: &mut Craft9Session,
+    cursor: &mut Option<(i32, i32)>,
+    left: bool,
+    slots: &[i16],
+) -> bool {
+    let Some((id, total)) = *cursor else {
+        return false;
+    };
+    // 去重 + 预校验全部槽合法。
+    let mut uniq: Vec<i16> = Vec::new();
+    for s in slots {
+        let ok = matches!(*s, 1..=9) || inv_slot(*s).is_some();
+        if !ok {
+            return false;
+        }
+        if !uniq.contains(s) {
+            uniq.push(*s);
+        }
+    }
+    if uniq.is_empty() {
+        return false;
+    }
+    // 快照现有占用（合成格直读 + 背包经锁读一次）。
+    let mut cur = Vec::with_capacity(uniq.len());
+    for s in &uniq {
+        if (1..=9).contains(s) {
+            cur.push(session.grid[(*s - 1) as usize]);
+        } else {
+            let inv_idx = inv_slot(*s).unwrap() as usize;
+            cur.push(ds.with_inventory(conn, |inv| inv.get(inv_idx)).unwrap_or(None));
+        }
+    }
+    let Some((takes, rest)) =
+        mc_world::inventory::PlayerInventory::drag_split(id, total, left, &cur)
+    else {
+        return false;
+    };
+    // 写回（合成格直写 + 背包经锁写）。
+    for (k, s) in uniq.iter().enumerate() {
+        let take = takes[k];
+        if take <= 0 {
+            continue;
+        }
+        if (1..=9).contains(s) {
+            let idx = (*s - 1) as usize;
+            match session.grid[idx] {
+                Some((_, c)) => session.grid[idx] = Some((id, c + take)),
+                None => session.grid[idx] = Some((id, take)),
+            }
+        } else {
+            let inv_idx = inv_slot(*s).unwrap() as usize;
+            ds.with_inventory(conn, |inv| {
+                match inv.get(inv_idx) {
+                    Some((_, c)) => inv.set_slot(inv_idx, Some((id, c + take))),
+                    None => inv.set_slot(inv_idx, Some((id, take))),
+                };
+            });
+        }
+    }
+    *cursor = if rest > 0 { Some((id, rest)) } else { None };
+    true
+}
+
+/// P60 双击收集（窗口 1）：光标为空时先拿起点击槽（合成格 1..=9 整栈进光标，
+/// 背包槽走背包 PICKUP 语义）；再把合成格全格 + 背包 9..=45 的同种收到光标
+/// 直到满栈（结果槽 0 不动）。
+fn collect_all_w1(
+    ds: &DropState,
+    conn: u64,
+    session: &mut Craft9Session,
+    clicked: i16,
+) -> bool {
+    let mut changed = false;
+    if ds.with_inventory(conn, |inv| inv.cursor().is_none()).unwrap_or(false) {
+        if (1..=9).contains(&clicked) {
+            let idx = (clicked - 1) as usize;
+            match session.grid[idx].take() {
+                Some(stack) => {
+                    ds.with_inventory(conn, |inv| inv.set_cursor(Some(stack)));
+                    changed = true;
+                }
+                None => return false,
+            }
+        } else if let Some(inv_idx) = inv_slot(clicked) {
+            let idx = inv_idx as usize;
+            let got = ds.with_inventory(conn, |inv| {
+                if inv.cursor().is_some() {
+                    return None;
+                }
+                match inv.get(idx) {
+                    Some(stack) => {
+                        inv.set_slot(idx, None);
+                        inv.set_cursor(Some(stack));
+                        Some(())
+                    }
+                    None => None,
+                }
+            });
+            if got.flatten().is_none() {
+                return false;
+            }
+            changed = true;
+        } else {
+            return false;
+        }
+    }
+    // 扫同种进光标至满（合成格 → 背包，槽序确定性；结果槽不动）。
+    let cur = ds.with_inventory(conn, |inv| inv.cursor()).unwrap_or(None);
+    let Some((id, mut total)) = cur else {
+        return changed;
+    };
+    if total >= mc_world::items::MAX_STACK {
+        return changed;
+    }
+    for idx in 0..mc_world::crafting::GRID9_SIZE {
+        if total >= mc_world::items::MAX_STACK {
+            break;
+        }
+        if let Some((cid, c)) = session.grid[idx] {
+            if cid != id {
+                continue;
+            }
+            let take = (mc_world::items::MAX_STACK - total).min(c);
+            session.grid[idx] = if c > take { Some((id, c - take)) } else { None };
+            total += take;
+            changed = true;
+        }
+    }
+    ds.with_inventory(conn, |inv| {
+        for slot in mc_world::inventory::MAIN_START..=45 {
+            if total >= mc_world::items::MAX_STACK {
+                break;
+            }
+            if let Some((cid, c)) = inv.get(slot as usize) {
+                if cid != id {
+                    continue;
+                }
+                let take = (mc_world::items::MAX_STACK - total).min(c);
+                inv.set_slot(
+                    slot as usize,
+                    if c > take { Some((id, c - take)) } else { None },
+                );
+                total += take;
+                changed = true;
+            }
+        }
+        inv.set_cursor(Some((id, total)));
+    });
+    changed
+}
+
+/// P60 工作台拖拽三段式：button 0/1/2 起拖（左/右/中；中键生存无操作），
+/// 4/5/6 划过加槽，8/9/10 落子。窗口/模式不一致整单丢弃并清态。
+fn handle_drag_w1(
+    ds: &DropState,
+    conn: u64,
+    session: &mut Craft9Session,
+    click: &packets::ContainerClick,
+) {
+    let header = click.button >> 2; // 0 起拖 / 1 加槽 / 2 落子
+    let mode = click.button & 3; // 0 左 / 1 右 / 2 中
+    match header {
+        0 => {
+            if mode == 2 {
+                ds.drag_clear(conn);
+                return;
+            }
+            // 起拖要求光标非空（空光标起拖无意义，清掉旧态）。
+            let has_cursor =
+                ds.with_inventory(conn, |inv| inv.cursor().is_some()).unwrap_or(false);
+            if !has_cursor {
+                ds.drag_clear(conn);
+                return;
+            }
+            ds.drag_begin(conn, click.container_id, mode == 0);
+        }
+        1 => {
+            if mode == 2 || !ds.drag_add(conn, click.container_id, click.slot) {
+                ds.drag_clear(conn);
+            }
+        }
+        2 => {
+            let Some(state) = ds.drag_take(conn) else {
+                return;
+            };
+            if state.window != click.container_id {
+                return;
+            }
+            let mut cursor = ds.with_inventory(conn, |inv| inv.cursor()).unwrap_or(None);
+            if apply_drag_end_w1(ds, conn, session, &mut cursor, state.left, &state.slots) {
+                ds.with_inventory(conn, |inv| inv.set_cursor(cursor));
+            }
+        }
+        _ => {
+            ds.drag_clear(conn);
+        }
+    }
+}
+
 /// 结果槽：取一份结果到光标（PICKUP），或 SHIFT 连续合成直到背包满/原料不够（整箱整理）。
 fn click_result(ds: &DropState, conn: u64, session: &mut Craft9Session, click: &packets::ContainerClick) {
     if click.click_type == packets::CLICK_QUICK_MOVE {
         // SHIFT 连点只重复当前锁定的配方（原版口径：只做当前展示的结果），
-        // 避免可逆配方（如干草块 ↔ 小麦）在“任意配方”循环里来回倒腾。
-        // 格子已有配方直接锁定；空格才从背包补一件料再锁定；之后只补该配方的料。
+        // 避免可逆配方在"任意配方"循环里来回倒腾。
+        // 格子已有配方直接锁定；空格则先把背包的料补满格（shape-aware 放在后面，
+        // 这里只管搬运），再按补满后的格子锁定——避免半格时锁错小配方
+        //（如补 3 格小麦就锁成面包，而不是 9 格的干草捆）。
         let locked = match crafting::match_recipe_9(session.grid) {
             Some(r) => Some(r),
             None => {
-                refill_one_from_inventory(ds, conn, session);
+                for _ in 0..mc_world::crafting::GRID9_SIZE {
+                    if session.grid.iter().all(|s| s.is_some()) {
+                        break;
+                    }
+                    if !refill_one_from_inventory(ds, conn, session) {
+                        break;
+                    }
+                }
                 crafting::match_recipe_9(session.grid)
             }
         };
         let Some(recipe) = locked else { return };
         // 借表序指针的 'static 配方做循环锚点（Recipe: Copy 足够轻量也可直接复制引用）。
         let target_name = recipe.name;
+        let mut rounds = 0;
         loop {
+            rounds += 1;
+            if rounds > 4096 {
+                break; // 背包有限，正常到不了；防御性上限，防逻辑 bug 卡死 play 循环。
+            }
+            // 1) 能做就做（先确认背包放得下产物，绝不吞原料）。
             let mut grid = session.grid;
-            let done = ds.with_inventory(conn, |inv| {
-                let want = crafting::RECIPES.iter().find(|r| r.name == target_name)?;
-                let (id, count) = want.result;
-                let free = inv.free_slots_for(id, count);
-                if free < count {
-                    return None;
-                }
-                if !crafting::consume_grid9(&mut grid, want) {
-                    return None;
-                }
-                assert_eq!(inv.add_item(id, count), 0, "pre-checked capacity must fit");
-                Some(())
-            });
-            if done.flatten().is_some() {
+            let crafted = ds
+                .with_inventory(conn, |inv| {
+                    let want = crafting::RECIPES.iter().find(|r| r.name == target_name)?;
+                    let (id, count) = want.result;
+                    if inv.free_slots_for(id, count) < count {
+                        return None;
+                    }
+                    if !crafting::consume_grid9(&mut grid, want) {
+                        return None;
+                    }
+                    assert_eq!(inv.add_item(id, count), 0, "pre-checked capacity must fit");
+                    Some(())
+                })
+                .flatten()
+                .is_some();
+            if crafted {
                 session.grid = grid;
-                // 只补锁定配方的料；补不上时下一次 consume 失败自然停，
-                // 物品留在格子里（不丢失），与单次合成一致。
-                let _ = refill_one_matching(ds, conn, session, |id| {
-                    crafting::recipe_accepts_ingredient(recipe, id)
-                });
-            } else {
+            }
+            // 2) 补料（shape-aware，只填锁定配方的形状空格）；都没进展就停。
+            // 料留在格子里（不丢失），与单次合成一致。
+            let filled = refill_for_recipe(ds, conn, session, recipe);
+            if !crafted && !filled {
                 break;
             }
         }
@@ -253,6 +523,19 @@ pub fn apply_click(ds: &DropState, conn: u64, click: &packets::ContainerClick) -
         return false;
     }
     ds.with_craft9(conn, |session| {
+        // P60 拖拽/收集/CLONE：拖拽走三段式序列；收集整单处理；CLONE 生存恒 no-op。
+        // 非拖拽点击的清态由入口（mod.rs）统一做，这里只管本窗三段。
+        if click.click_type == packets::CLICK_QUICK_CRAFT {
+            handle_drag_w1(ds, conn, session, click);
+            return;
+        }
+        if click.click_type == packets::CLICK_PICKUP_ALL {
+            collect_all_w1(ds, conn, session, click.slot);
+            return;
+        }
+        if click.click_type == packets::CLICK_CLONE {
+            return; // 生存恒无操作（创造才给整组；本服生存写死）。
+        }
         match click.slot {
             CRAFT9_RESULT_SLOT => click_result(ds, conn, session, click),
             1..=9 if click.click_type == packets::CLICK_PICKUP => {
@@ -452,10 +735,13 @@ mod tests {
         let ds = state();
         ds.load_inventory(7, "C9");
         ds.with_inventory(7, |inv| {
-            inv.set_slot(9, Some((mc_world::drops::ITEM_WHEAT, 9)));
+            // P60 vanilla：9 小麦必须占 9 格（每格 1 个），单格堆 9 个不出干草捆。
+            for i in 0..9 {
+                inv.set_slot(9 + i, Some((mc_world::drops::ITEM_WHEAT, 1)));
+            }
         });
         ds.open_craft9(7, 0, 64, 0);
-        // 从背包槽 9 拿起 9 小麦 → 右键放入工作台格 1 → 结果槽取干草捆。
+        // 背包槽 9+i（窗口 10+i）逐格拿起 → 放入工作台格 1+i（窗口 1+i）。
         let click = |slot, button, ty| packets::ContainerClick {
             container_id: CRAFT9_WINDOW_ID,
             state_id: 0,
@@ -463,9 +749,12 @@ mod tests {
             button,
             click_type: ty,
         };
-        assert!(apply_click(&ds, 7, &click(10, 0, packets::CLICK_PICKUP)));
-        assert!(apply_click(&ds, 7, &click(1, 0, packets::CLICK_PICKUP)));
-        assert_eq!(ds.craft9_session(7).unwrap().grid[0], Some((mc_world::drops::ITEM_WHEAT, 9)));
+        for i in 0..9 {
+            assert!(apply_click(&ds, 7, &click(10 + i, 0, packets::CLICK_PICKUP)));
+            assert!(apply_click(&ds, 7, &click(1 + i, 0, packets::CLICK_PICKUP)));
+        }
+        assert!(ds.craft9_session(7).unwrap().grid.iter().all(|s| *s == Some((mc_world::drops::ITEM_WHEAT, 1))));
+        // 结果槽取干草捆：9 格各扣 1，全空。
         assert!(apply_click(&ds, 7, &click(0, 0, packets::CLICK_PICKUP)));
         let hay = crafting::RECIPES.iter().find(|r| r.name == "hay_block").unwrap().result.0;
         assert_eq!(ds.with_inventory(7, |inv| inv.cursor()), Some(Some((hay, 1))));
@@ -483,6 +772,59 @@ mod tests {
             inv.to_protocol_slots().iter().filter(|s| s.item_id == hay).map(|s| s.count).sum::<i32>()
         }).unwrap();
         assert_eq!(total, 9, "SHIFT must craft and stow every complete set");
+        let _ = std::fs::remove_dir_all(ds.save_dir());
+    }
+
+    /// P60 拖拽分堆 + 双击收集走服务端三段式/整单（问题 3 的回弹即旧 no-op）。
+    #[test]
+    fn p60_drag_paint_distributes_and_collect_gathers() {
+        let ds = state();
+        ds.load_inventory(7, "C9");
+        let planks = mc_world::drops::ITEM_OAK_PLANKS;
+        ds.with_inventory(7, |inv| {
+            inv.set_slot(9, Some((planks, 10)));
+            // 收集目标：背包 slot 20 再放 4 个同种。
+            inv.set_slot(20, Some((planks, 4)));
+        });
+        ds.open_craft9(7, 0, 64, 0);
+        let click = |slot, button, ty| packets::ContainerClick {
+            container_id: CRAFT9_WINDOW_ID,
+            state_id: 0,
+            slot,
+            button,
+            click_type: ty,
+        };
+        // 拿起 10 木板 → 起拖(格1,左键0) → 划过格1/格2(4) → 落子(8)：均分 5/5。
+        assert!(apply_click(&ds, 7, &click(10, 0, packets::CLICK_PICKUP)));
+        assert!(apply_click(&ds, 7, &click(1, 0, packets::CLICK_QUICK_CRAFT)));
+        assert!(apply_click(&ds, 7, &click(1, 4, packets::CLICK_QUICK_CRAFT)));
+        assert!(apply_click(&ds, 7, &click(2, 4, packets::CLICK_QUICK_CRAFT)));
+        assert!(apply_click(&ds, 7, &click(0, 8, packets::CLICK_QUICK_CRAFT)));
+        let grid = ds.craft9_session(7).unwrap().grid;
+        assert_eq!(grid[0], Some((planks, 5)));
+        assert_eq!(grid[1], Some((planks, 5)));
+        assert_eq!(ds.with_inventory(7, |inv| inv.cursor()), Some(None));
+        // 右键拖 4 个过 3 格：每格 1 个，余 1。
+        ds.with_inventory(7, |inv| inv.set_cursor(Some((planks, 4))));
+        assert!(apply_click(&ds, 7, &click(3, 1, packets::CLICK_QUICK_CRAFT)));
+        for s in [3, 4, 5] {
+            assert!(apply_click(&ds, 7, &click(s, 5, packets::CLICK_QUICK_CRAFT)));
+        }
+        assert!(apply_click(&ds, 7, &click(0, 9, packets::CLICK_QUICK_CRAFT)));
+        let grid = ds.craft9_session(7).unwrap().grid;
+        assert_eq!(grid[2], Some((planks, 1)), "right-drag 1 onto empty");
+        assert_eq!(grid[3], Some((planks, 1)));
+        assert_eq!(grid[4], Some((planks, 1)));
+        assert_eq!(ds.with_inventory(7, |inv| inv.cursor()), Some(Some((planks, 1))));
+        // 双击收集：光标 1 个 + 格里/背包同种 → 全收到光标。
+        assert!(apply_click(&ds, 7, &click(1, 0, packets::CLICK_PICKUP_ALL)));
+        let grid = ds.craft9_session(7).unwrap().grid;
+        assert!(grid.iter().all(|s| s.is_none()));
+        // 1 + 5 + 5 + 1 + 1 + 1 + 背包 4 = 18。
+        assert_eq!(
+            ds.with_inventory(7, |inv| inv.cursor()),
+            Some(Some((planks, 18)))
+        );
         let _ = std::fs::remove_dir_all(ds.save_dir());
     }
 

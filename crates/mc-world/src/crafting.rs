@@ -1,28 +1,20 @@
-//! crafting: P40 2×2 玩家背包合成的纯逻辑（配方 + 匹配 + 消耗），只兼容 26.3/777。
+//! crafting: P40 2x2 玩家背包合成 + P47 3x3 工作台合成的纯逻辑（配方 + 匹配 + 消耗），只兼容 26.3/777。
 //!
-//! 所有物品 ID 均由 `mc_registry::ITEMS`（`data/777/items.json` 生成表）在编译期查得，
-//! 与 `drops.rs` 同口径；不手写/猜物品 ID。本轮只做玩家背包 2×2（槽 1–4 输入、0 输出），
-//! 3×3 工作台 / block entity 明确不做（见 HANDOFF 任务说明）。
+//! 所有物品 ID 均由 mc_registry::ITEMS（data/777/items.json 生成表）在编译期查得，
+//! 与 drops.rs 同口径；不手写/猜物品 ID。
 //!
-//! 配方为**无序匹配（原版 shapeless 口径）**：把合成格内的物品按 ID 计数，
-//! 满足某条配方的需求（每种物品数量 ≥ 配方需求、且无配方外的杂物）即命中，
-//! 多的留下（放一整组也只扣一份）。候选多条时按规范槽型拆分，
-//! 再按总需求量降序（越具体越优先），同量按表序。
+//! P60 vanilla 形状口径（scripts/gen_recipes.py 从原版 JSON 逐条生成形状）：
+//! - shaped：去边稀疏格 cells，允许平移 + 水平镜像；覆盖格须非空（每格 >=1，
+//!   tag 按成员归属），其余格须空。堆叠多件只扣 1，多的留下。
+//! - shapeless：needs 展开为逐单位列表，每个占用格提供 1 单位；占用格数须与
+//!   单位数相等（格外有货就不中），tag 灵活归属。
 //! 输出栈直接返回给调用方，由网络层放光标/背包。
 //!
-//! P41 扩充：覆盖原版所有能在背包 2×2 中放下的合成（木板/木棍/工作台、全材质工具与
-//! 可容纳盔甲、火把/面包/纸书/床箱/熔炉/漏斗/活塞/铁轨/告示牌/门/栅栏/台阶楼梯墙/
-//! 按钮压力板拉杆/梯子/桶/打火石/指南针钟地图/干草捆等）。沿用本服既有简化：**只按
-//! (id,count) 多重集匹配，不检查形状**，因此原版 3×3 配方只要输入种类 ≤4、数量能
-//! 以堆叠放进 4 格（如 9 小麦→干草捆、8 木板→箱子）也在此实现；未实现需要多格
-//! 不同物品（>4 种）或工作台专属的配方。
+//! 歧义（同格同料不同结果）按 RECIPES 表序取首条，确定性；2x2 网格只能放下
+//! 不大于 2x2 的形状（工具类须去工作台，原版一致）。
 //!
-//! **歧义处理**：原版若干配方的输入多重集完全相同（木棍/压力板、工作台/楼梯、
-//! 镐/斧、门/活板门、栅栏/栅栏门、铁护腿/炼药锅），无序规则下无法仅靠物品集合区分。
-//! 本模块用确定性的“槽分布指纹”（按 (id,count) 排序的占用槽列表，位置无关）拆分：
-//! 每种配方有唯一规范槽型，见 [`canonical_layout`]；若输入的槽分布不匹配任何规范型
-//! （例如把 4 木板全塞一格又给出了楼梯的候选），按 `RECIPES` 表序取首条。不用随机、
-//! 不用 HashMap 迭代顺序；旧 7 条配方留在表首，既有行为逐字节不变。
+//! P41/P59 扩充：覆盖原版全部工作台配方（1185 条，tag 原生，scripts/check_recipes.py
+//! 独立复核 0 缺失 0 重复）。
 
 use crate::registry_id;
 
@@ -31,13 +23,18 @@ pub const GRID_SIZE: usize = 4;
 /// 合成结果槽（背包 0）。
 pub const RESULT_SLOT: usize = 0;
 
-/// 单条无序配方：`needs` 为 (物品 ID, 数量)，`result` 为 (物品 ID, 数量)。
+/// 单条配方：`needs` 为 (物品 ID/负tag, 数量)，`result` 为 (物品 ID, 数量)。
+/// P60 vanilla 形状：`shaped` 为 true 时 `cells` 为去边后稀疏格 (x, y, 料ID/负tag)，
+/// 匹配可平移+镜像、格外须空、每格至少 1 个；为 false 时是 shapeless，
+/// 每个占用格提供 1 单位（多的留下），格数须与 units 总数相等。
 #[derive(Debug, Clone, Copy)]
 pub struct Recipe {
     pub needs: &'static [(i32, i32)],
     pub result: (i32, i32),
     /// 便于诊断/测试的名称（不参与匹配）。
     pub name: &'static str,
+    pub shaped: bool,
+    pub cells: &'static [(u8, u8, i32)],
 }
 
 // 物品 ID 全部来自生成表（括号里是 data/777/items.json 的实测值，改数据后编译期自动漂移）。
@@ -1543,1191 +1540,1191 @@ const TAG_WARPED_STEMS: i32 = -147;
 
 // === GEN-TABLE-START === (scripts/gen_recipes.py 生成；勿手改)
 pub const RECIPES: &[Recipe] = &[
-    Recipe { needs: &[(ITEM_ACACIA_PLANKS, 5)], result: (ITEM_ACACIA_BOAT, 1), name: "acacia_boat" },
-    Recipe { needs: &[(ITEM_ACACIA_PLANKS, 1)], result: (ITEM_ACACIA_BUTTON, 1), name: "acacia_button" },
-    Recipe { needs: &[(ITEM_ACACIA_BOAT, 1), (ITEM_CHEST, 1)], result: (ITEM_ACACIA_CHEST_BOAT, 1), name: "acacia_chest_boat" },
-    Recipe { needs: &[(ITEM_ACACIA_PLANKS, 6)], result: (ITEM_ACACIA_DOOR, 3), name: "acacia_door" },
-    Recipe { needs: &[(ITEM_ACACIA_PLANKS, 4), (STICK, 2)], result: (ITEM_ACACIA_FENCE, 3), name: "acacia_fence" },
-    Recipe { needs: &[(ITEM_ACACIA_PLANKS, 2), (STICK, 4)], result: (ITEM_ACACIA_FENCE_GATE, 1), name: "acacia_fence_gate" },
-    Recipe { needs: &[(ITEM_IRON_CHAIN, 2), (ITEM_STRIPPED_ACACIA_LOG, 6)], result: (ITEM_ACACIA_HANGING_SIGN, 6), name: "acacia_hanging_sign" },
-    Recipe { needs: &[(TAG_ACACIA_LOGS, 1)], result: (ITEM_ACACIA_PLANKS, 4), name: "acacia_planks" },
-    Recipe { needs: &[(ITEM_ACACIA_PLANKS, 2)], result: (ITEM_ACACIA_PRESSURE_PLATE, 1), name: "acacia_pressure_plate" },
-    Recipe { needs: &[(ITEM_STRIPPED_ACACIA_LOG, 6)], result: (ITEM_ACACIA_SHELF, 6), name: "acacia_shelf" },
-    Recipe { needs: &[(ITEM_ACACIA_PLANKS, 6), (STICK, 1)], result: (ITEM_ACACIA_SIGN, 3), name: "acacia_sign" },
-    Recipe { needs: &[(ITEM_ACACIA_PLANKS, 3)], result: (ITEM_ACACIA_SLAB, 6), name: "acacia_slab" },
-    Recipe { needs: &[(ITEM_ACACIA_PLANKS, 6)], result: (ITEM_ACACIA_STAIRS, 4), name: "acacia_stairs" },
-    Recipe { needs: &[(ITEM_ACACIA_PLANKS, 6)], result: (ITEM_ACACIA_TRAPDOOR, 2), name: "acacia_trapdoor" },
-    Recipe { needs: &[(ITEM_ACACIA_LOG, 4)], result: (ITEM_ACACIA_WOOD, 3), name: "acacia_wood" },
-    Recipe { needs: &[(ITEM_IRON_INGOT, 6), (ITEM_REDSTONE_TORCH, 1), (STICK, 2)], result: (ITEM_ACTIVATOR_RAIL, 6), name: "activator_rail" },
-    Recipe { needs: &[(ITEM_AMETHYST_SHARD, 4)], result: (ITEM_AMETHYST_BLOCK, 1), name: "amethyst_block" },
-    Recipe { needs: &[(COBBLESTONE, 1), (ITEM_DIORITE, 1)], result: (ITEM_ANDESITE, 2), name: "andesite" },
-    Recipe { needs: &[(ITEM_ANDESITE, 3)], result: (ITEM_ANDESITE_SLAB, 6), name: "andesite_slab" },
-    Recipe { needs: &[(ITEM_ANDESITE, 6)], result: (ITEM_ANDESITE_STAIRS, 4), name: "andesite_stairs" },
-    Recipe { needs: &[(ITEM_ANDESITE, 6)], result: (ITEM_ANDESITE_WALL, 6), name: "andesite_wall" },
-    Recipe { needs: &[(ITEM_IRON_BLOCK, 3), (ITEM_IRON_INGOT, 4)], result: (ITEM_ANVIL, 1), name: "anvil" },
-    Recipe { needs: &[(ITEM_SMOOTH_STONE_SLAB, 1), (STICK, 6)], result: (ITEM_ARMOR_STAND, 1), name: "armor_stand" },
-    Recipe { needs: &[(ITEM_FEATHER, 1), (ITEM_FLINT, 1), (STICK, 1)], result: (ITEM_ARROW, 4), name: "arrow" },
-    Recipe { needs: &[(ITEM_BAMBOO, 1), (ITEM_BAMBOO, 1), (ITEM_BAMBOO, 1), (ITEM_BAMBOO, 1), (ITEM_BAMBOO, 1), (ITEM_BAMBOO, 1), (ITEM_BAMBOO, 1), (ITEM_BAMBOO, 1), (ITEM_BAMBOO, 1)], result: (ITEM_BAMBOO_BLOCK, 1), name: "bamboo_block" },
-    Recipe { needs: &[(ITEM_BAMBOO_PLANKS, 1)], result: (ITEM_BAMBOO_BUTTON, 1), name: "bamboo_button" },
-    Recipe { needs: &[(ITEM_BAMBOO_RAFT, 1), (ITEM_CHEST, 1)], result: (ITEM_BAMBOO_CHEST_RAFT, 1), name: "bamboo_chest_raft" },
-    Recipe { needs: &[(ITEM_BAMBOO_PLANKS, 6)], result: (ITEM_BAMBOO_DOOR, 3), name: "bamboo_door" },
-    Recipe { needs: &[(ITEM_BAMBOO_PLANKS, 4), (STICK, 2)], result: (ITEM_BAMBOO_FENCE, 3), name: "bamboo_fence" },
-    Recipe { needs: &[(ITEM_BAMBOO_PLANKS, 2), (STICK, 4)], result: (ITEM_BAMBOO_FENCE_GATE, 1), name: "bamboo_fence_gate" },
-    Recipe { needs: &[(ITEM_IRON_CHAIN, 2), (ITEM_STRIPPED_BAMBOO_BLOCK, 6)], result: (ITEM_BAMBOO_HANGING_SIGN, 6), name: "bamboo_hanging_sign" },
-    Recipe { needs: &[(ITEM_BAMBOO_SLAB, 2)], result: (ITEM_BAMBOO_MOSAIC, 1), name: "bamboo_mosaic" },
-    Recipe { needs: &[(ITEM_BAMBOO_MOSAIC, 3)], result: (ITEM_BAMBOO_MOSAIC_SLAB, 6), name: "bamboo_mosaic_slab" },
-    Recipe { needs: &[(ITEM_BAMBOO_MOSAIC, 6)], result: (ITEM_BAMBOO_MOSAIC_STAIRS, 4), name: "bamboo_mosaic_stairs" },
-    Recipe { needs: &[(TAG_BAMBOO_BLOCKS, 1)], result: (ITEM_BAMBOO_PLANKS, 2), name: "bamboo_planks" },
-    Recipe { needs: &[(ITEM_BAMBOO_PLANKS, 2)], result: (ITEM_BAMBOO_PRESSURE_PLATE, 1), name: "bamboo_pressure_plate" },
-    Recipe { needs: &[(ITEM_BAMBOO_PLANKS, 5)], result: (ITEM_BAMBOO_RAFT, 1), name: "bamboo_raft" },
-    Recipe { needs: &[(ITEM_STRIPPED_BAMBOO_BLOCK, 6)], result: (ITEM_BAMBOO_SHELF, 6), name: "bamboo_shelf" },
-    Recipe { needs: &[(ITEM_BAMBOO_PLANKS, 6), (STICK, 1)], result: (ITEM_BAMBOO_SIGN, 3), name: "bamboo_sign" },
-    Recipe { needs: &[(ITEM_BAMBOO_PLANKS, 3)], result: (ITEM_BAMBOO_SLAB, 6), name: "bamboo_slab" },
-    Recipe { needs: &[(ITEM_BAMBOO_PLANKS, 6)], result: (ITEM_BAMBOO_STAIRS, 4), name: "bamboo_stairs" },
-    Recipe { needs: &[(ITEM_BAMBOO_PLANKS, 6)], result: (ITEM_BAMBOO_TRAPDOOR, 2), name: "bamboo_trapdoor" },
-    Recipe { needs: &[(TAG_PLANKS, 6), (TAG_WOODEN_SLABS, 2)], result: (ITEM_BARREL, 1), name: "barrel" },
-    Recipe { needs: &[(ITEM_GLASS, 5), (ITEM_NETHER_STAR, 1), (ITEM_OBSIDIAN, 3)], result: (ITEM_BEACON, 1), name: "beacon" },
-    Recipe { needs: &[(ITEM_HONEYCOMB, 3), (TAG_PLANKS, 6)], result: (ITEM_BEEHIVE, 1), name: "beehive" },
-    Recipe { needs: &[(ITEM_BEETROOT, 1), (ITEM_BEETROOT, 1), (ITEM_BEETROOT, 1), (ITEM_BEETROOT, 1), (ITEM_BEETROOT, 1), (ITEM_BEETROOT, 1), (ITEM_BOWL, 1)], result: (ITEM_BEETROOT_SOUP, 1), name: "beetroot_soup" },
-    Recipe { needs: &[(ITEM_BIRCH_PLANKS, 5)], result: (ITEM_BIRCH_BOAT, 1), name: "birch_boat" },
-    Recipe { needs: &[(ITEM_BIRCH_PLANKS, 1)], result: (ITEM_BIRCH_BUTTON, 1), name: "birch_button" },
-    Recipe { needs: &[(ITEM_BIRCH_BOAT, 1), (ITEM_CHEST, 1)], result: (ITEM_BIRCH_CHEST_BOAT, 1), name: "birch_chest_boat" },
-    Recipe { needs: &[(ITEM_BIRCH_PLANKS, 6)], result: (ITEM_BIRCH_DOOR, 3), name: "birch_door" },
-    Recipe { needs: &[(ITEM_BIRCH_PLANKS, 4), (STICK, 2)], result: (ITEM_BIRCH_FENCE, 3), name: "birch_fence" },
-    Recipe { needs: &[(ITEM_BIRCH_PLANKS, 2), (STICK, 4)], result: (ITEM_BIRCH_FENCE_GATE, 1), name: "birch_fence_gate" },
-    Recipe { needs: &[(ITEM_IRON_CHAIN, 2), (ITEM_STRIPPED_BIRCH_LOG, 6)], result: (ITEM_BIRCH_HANGING_SIGN, 6), name: "birch_hanging_sign" },
-    Recipe { needs: &[(TAG_BIRCH_LOGS, 1)], result: (ITEM_BIRCH_PLANKS, 4), name: "birch_planks" },
-    Recipe { needs: &[(ITEM_BIRCH_PLANKS, 2)], result: (ITEM_BIRCH_PRESSURE_PLATE, 1), name: "birch_pressure_plate" },
-    Recipe { needs: &[(ITEM_STRIPPED_BIRCH_LOG, 6)], result: (ITEM_BIRCH_SHELF, 6), name: "birch_shelf" },
-    Recipe { needs: &[(ITEM_BIRCH_PLANKS, 6), (STICK, 1)], result: (ITEM_BIRCH_SIGN, 3), name: "birch_sign" },
-    Recipe { needs: &[(ITEM_BIRCH_PLANKS, 3)], result: (ITEM_BIRCH_SLAB, 6), name: "birch_slab" },
-    Recipe { needs: &[(ITEM_BIRCH_PLANKS, 6)], result: (ITEM_BIRCH_STAIRS, 4), name: "birch_stairs" },
-    Recipe { needs: &[(ITEM_BIRCH_PLANKS, 6)], result: (ITEM_BIRCH_TRAPDOOR, 2), name: "birch_trapdoor" },
-    Recipe { needs: &[(ITEM_BIRCH_LOG, 4)], result: (ITEM_BIRCH_WOOD, 3), name: "birch_wood" },
-    Recipe { needs: &[(ITEM_BLACK_WOOL, 6), (STICK, 1)], result: (ITEM_BLACK_BANNER, 1), name: "black_banner" },
-    Recipe { needs: &[(ITEM_BLACK_WOOL, 3), (TAG_PLANKS, 3)], result: (ITEM_BLACK_BED, 1), name: "black_bed" },
-    Recipe { needs: &[(ITEM_BLACK_DYE, 1), (ITEM_CANDLE, 1)], result: (ITEM_BLACK_CANDLE, 1), name: "black_candle" },
-    Recipe { needs: &[(ITEM_BLACK_WOOL, 2)], result: (ITEM_BLACK_CARPET, 3), name: "black_carpet" },
-    Recipe { needs: &[(ITEM_BLACK_DYE, 1), (ITEM_GRAVEL, 1), (ITEM_GRAVEL, 1), (ITEM_GRAVEL, 1), (ITEM_GRAVEL, 1), (ITEM_SAND, 1), (ITEM_SAND, 1), (ITEM_SAND, 1), (ITEM_SAND, 1)], result: (ITEM_BLACK_CONCRETE_POWDER, 8), name: "black_concrete_powder" },
-    Recipe { needs: &[(ITEM_BLACK_CONCRETE, 3)], result: (ITEM_BLACK_CONCRETE_SLAB, 6), name: "black_concrete_slab" },
-    Recipe { needs: &[(ITEM_BLACK_CONCRETE, 6)], result: (ITEM_BLACK_CONCRETE_STAIRS, 4), name: "black_concrete_stairs" },
-    Recipe { needs: &[(ITEM_BLACK_WOOL_SLAB, 3)], result: (ITEM_BLACK_CUSHION, 1), name: "black_cushion" },
-    Recipe { needs: &[(ITEM_INK_SAC, 1)], result: (ITEM_BLACK_DYE, 1), name: "black_dye" },
-    Recipe { needs: &[(ITEM_WITHER_ROSE, 1)], result: (ITEM_BLACK_DYE, 1), name: "black_dye_from_wither_rose" },
-    Recipe { needs: &[(ITEM_BLACK_WOOL, 1), (ITEM_GLASS, 2), (ITEM_LEATHER, 3)], result: (ITEM_BLACK_HARNESS, 1), name: "black_harness" },
-    Recipe { needs: &[(ITEM_BLACK_DYE, 1), (ITEM_GLASS, 8)], result: (ITEM_BLACK_STAINED_GLASS, 8), name: "black_stained_glass" },
-    Recipe { needs: &[(ITEM_BLACK_STAINED_GLASS, 6)], result: (ITEM_BLACK_STAINED_GLASS_PANE, 16), name: "black_stained_glass_pane" },
-    Recipe { needs: &[(ITEM_BLACK_DYE, 1), (ITEM_GLASS_PANE, 8)], result: (ITEM_BLACK_STAINED_GLASS_PANE, 8), name: "black_stained_glass_pane_from_glass_pane" },
-    Recipe { needs: &[(ITEM_BLACK_DYE, 1), (ITEM_TERRACOTTA, 8)], result: (ITEM_BLACK_TERRACOTTA, 8), name: "black_terracotta" },
-    Recipe { needs: &[(ITEM_BLACK_WOOL, 3)], result: (ITEM_BLACK_WOOL_SLAB, 6), name: "black_wool_slab" },
-    Recipe { needs: &[(ITEM_BLACK_WOOL, 6)], result: (ITEM_BLACK_WOOL_STAIRS, 4), name: "black_wool_stairs" },
-    Recipe { needs: &[(ITEM_BLACKSTONE, 3)], result: (ITEM_BLACKSTONE_SLAB, 6), name: "blackstone_slab" },
-    Recipe { needs: &[(ITEM_BLACKSTONE, 6)], result: (ITEM_BLACKSTONE_STAIRS, 4), name: "blackstone_stairs" },
-    Recipe { needs: &[(ITEM_BLACKSTONE, 6)], result: (ITEM_BLACKSTONE_WALL, 6), name: "blackstone_wall" },
-    Recipe { needs: &[(ITEM_FURNACE, 1), (ITEM_IRON_INGOT, 5), (ITEM_SMOOTH_STONE, 3)], result: (ITEM_BLAST_FURNACE, 1), name: "blast_furnace" },
-    Recipe { needs: &[(ITEM_BLAZE_ROD, 1)], result: (ITEM_BLAZE_POWDER, 2), name: "blaze_powder" },
-    Recipe { needs: &[(ITEM_BLUE_WOOL, 6), (STICK, 1)], result: (ITEM_BLUE_BANNER, 1), name: "blue_banner" },
-    Recipe { needs: &[(ITEM_BLUE_WOOL, 3), (TAG_PLANKS, 3)], result: (ITEM_BLUE_BED, 1), name: "blue_bed" },
-    Recipe { needs: &[(ITEM_BLUE_DYE, 1), (ITEM_CANDLE, 1)], result: (ITEM_BLUE_CANDLE, 1), name: "blue_candle" },
-    Recipe { needs: &[(ITEM_BLUE_WOOL, 2)], result: (ITEM_BLUE_CARPET, 3), name: "blue_carpet" },
-    Recipe { needs: &[(ITEM_BLUE_DYE, 1), (ITEM_GRAVEL, 1), (ITEM_GRAVEL, 1), (ITEM_GRAVEL, 1), (ITEM_GRAVEL, 1), (ITEM_SAND, 1), (ITEM_SAND, 1), (ITEM_SAND, 1), (ITEM_SAND, 1)], result: (ITEM_BLUE_CONCRETE_POWDER, 8), name: "blue_concrete_powder" },
-    Recipe { needs: &[(ITEM_BLUE_CONCRETE, 3)], result: (ITEM_BLUE_CONCRETE_SLAB, 6), name: "blue_concrete_slab" },
-    Recipe { needs: &[(ITEM_BLUE_CONCRETE, 6)], result: (ITEM_BLUE_CONCRETE_STAIRS, 4), name: "blue_concrete_stairs" },
-    Recipe { needs: &[(ITEM_BLUE_WOOL_SLAB, 3)], result: (ITEM_BLUE_CUSHION, 1), name: "blue_cushion" },
-    Recipe { needs: &[(ITEM_LAPIS_LAZULI, 1)], result: (ITEM_BLUE_DYE, 1), name: "blue_dye" },
-    Recipe { needs: &[(ITEM_CORNFLOWER, 1)], result: (ITEM_BLUE_DYE, 1), name: "blue_dye_from_cornflower" },
-    Recipe { needs: &[(ITEM_BLUE_WOOL, 1), (ITEM_GLASS, 2), (ITEM_LEATHER, 3)], result: (ITEM_BLUE_HARNESS, 1), name: "blue_harness" },
-    Recipe { needs: &[(ITEM_PACKED_ICE, 1), (ITEM_PACKED_ICE, 1), (ITEM_PACKED_ICE, 1), (ITEM_PACKED_ICE, 1), (ITEM_PACKED_ICE, 1), (ITEM_PACKED_ICE, 1), (ITEM_PACKED_ICE, 1), (ITEM_PACKED_ICE, 1), (ITEM_PACKED_ICE, 1)], result: (ITEM_BLUE_ICE, 1), name: "blue_ice" },
-    Recipe { needs: &[(ITEM_BLUE_DYE, 1), (ITEM_GLASS, 8)], result: (ITEM_BLUE_STAINED_GLASS, 8), name: "blue_stained_glass" },
-    Recipe { needs: &[(ITEM_BLUE_STAINED_GLASS, 6)], result: (ITEM_BLUE_STAINED_GLASS_PANE, 16), name: "blue_stained_glass_pane" },
-    Recipe { needs: &[(ITEM_BLUE_DYE, 1), (ITEM_GLASS_PANE, 8)], result: (ITEM_BLUE_STAINED_GLASS_PANE, 8), name: "blue_stained_glass_pane_from_glass_pane" },
-    Recipe { needs: &[(ITEM_BLUE_DYE, 1), (ITEM_TERRACOTTA, 8)], result: (ITEM_BLUE_TERRACOTTA, 8), name: "blue_terracotta" },
-    Recipe { needs: &[(ITEM_BLUE_WOOL, 3)], result: (ITEM_BLUE_WOOL_SLAB, 6), name: "blue_wool_slab" },
-    Recipe { needs: &[(ITEM_BLUE_WOOL, 6)], result: (ITEM_BLUE_WOOL_STAIRS, 4), name: "blue_wool_stairs" },
-    Recipe { needs: &[(ITEM_BOLT_ARMOR_TRIM_SMITHING_TEMPLATE, 1), (ITEM_DIAMOND, 7), (TAG_ALT_0, 1)], result: (ITEM_BOLT_ARMOR_TRIM_SMITHING_TEMPLATE, 2), name: "bolt_armor_trim_smithing_template" },
-    Recipe { needs: &[(ITEM_BONE_MEAL, 9)], result: (ITEM_BONE_BLOCK, 1), name: "bone_block" },
-    Recipe { needs: &[(ITEM_BONE, 1)], result: (ITEM_BONE_MEAL, 3), name: "bone_meal" },
-    Recipe { needs: &[(ITEM_BONE_BLOCK, 1)], result: (ITEM_BONE_MEAL, 9), name: "bone_meal_from_bone_block" },
-    Recipe { needs: &[(ITEM_LEATHER, 1), (ITEM_PAPER, 1), (ITEM_PAPER, 1), (ITEM_PAPER, 1)], result: (ITEM_BOOK, 1), name: "book" },
-    Recipe { needs: &[(ITEM_BOOK, 3), (TAG_PLANKS, 6)], result: (ITEM_BOOKSHELF, 1), name: "bookshelf" },
-    Recipe { needs: &[(ITEM_PAPER, 1), (ITEM_VINE, 1)], result: (ITEM_BORDURE_INDENTED_BANNER_PATTERN, 1), name: "bordure_indented_banner_pattern" },
-    Recipe { needs: &[(STICK, 3), (ITEM_STRING, 3)], result: (ITEM_BOW, 1), name: "bow" },
-    Recipe { needs: &[(TAG_PLANKS, 3)], result: (ITEM_BOWL, 4), name: "bowl" },
-    Recipe { needs: &[(WHEAT, 3)], result: (BREAD, 1), name: "bread" },
-    Recipe { needs: &[(ITEM_BLAZE_ROD, 1), (TAG_STONE_CRAFTING_MATERIALS, 3)], result: (ITEM_BREWING_STAND, 1), name: "brewing_stand" },
-    Recipe { needs: &[(ITEM_BRICKS, 3)], result: (ITEM_BRICK_SLAB, 6), name: "brick_slab" },
-    Recipe { needs: &[(ITEM_BRICKS, 6)], result: (ITEM_BRICK_STAIRS, 4), name: "brick_stairs" },
-    Recipe { needs: &[(ITEM_BRICKS, 6)], result: (ITEM_BRICK_WALL, 6), name: "brick_wall" },
-    Recipe { needs: &[(ITEM_BRICK, 4)], result: (ITEM_BRICKS, 1), name: "bricks" },
-    Recipe { needs: &[(ITEM_BROWN_WOOL, 6), (STICK, 1)], result: (ITEM_BROWN_BANNER, 1), name: "brown_banner" },
-    Recipe { needs: &[(ITEM_BROWN_WOOL, 3), (TAG_PLANKS, 3)], result: (ITEM_BROWN_BED, 1), name: "brown_bed" },
-    Recipe { needs: &[(ITEM_BROWN_DYE, 1), (ITEM_CANDLE, 1)], result: (ITEM_BROWN_CANDLE, 1), name: "brown_candle" },
-    Recipe { needs: &[(ITEM_BROWN_WOOL, 2)], result: (ITEM_BROWN_CARPET, 3), name: "brown_carpet" },
-    Recipe { needs: &[(ITEM_BROWN_DYE, 1), (ITEM_GRAVEL, 1), (ITEM_GRAVEL, 1), (ITEM_GRAVEL, 1), (ITEM_GRAVEL, 1), (ITEM_SAND, 1), (ITEM_SAND, 1), (ITEM_SAND, 1), (ITEM_SAND, 1)], result: (ITEM_BROWN_CONCRETE_POWDER, 8), name: "brown_concrete_powder" },
-    Recipe { needs: &[(ITEM_BROWN_CONCRETE, 3)], result: (ITEM_BROWN_CONCRETE_SLAB, 6), name: "brown_concrete_slab" },
-    Recipe { needs: &[(ITEM_BROWN_CONCRETE, 6)], result: (ITEM_BROWN_CONCRETE_STAIRS, 4), name: "brown_concrete_stairs" },
-    Recipe { needs: &[(ITEM_BROWN_WOOL_SLAB, 3)], result: (ITEM_BROWN_CUSHION, 1), name: "brown_cushion" },
-    Recipe { needs: &[(ITEM_COCOA_BEANS, 1)], result: (ITEM_BROWN_DYE, 1), name: "brown_dye" },
-    Recipe { needs: &[(ITEM_BROWN_WOOL, 1), (ITEM_GLASS, 2), (ITEM_LEATHER, 3)], result: (ITEM_BROWN_HARNESS, 1), name: "brown_harness" },
-    Recipe { needs: &[(ITEM_BROWN_DYE, 1), (ITEM_GLASS, 8)], result: (ITEM_BROWN_STAINED_GLASS, 8), name: "brown_stained_glass" },
-    Recipe { needs: &[(ITEM_BROWN_STAINED_GLASS, 6)], result: (ITEM_BROWN_STAINED_GLASS_PANE, 16), name: "brown_stained_glass_pane" },
-    Recipe { needs: &[(ITEM_BROWN_DYE, 1), (ITEM_GLASS_PANE, 8)], result: (ITEM_BROWN_STAINED_GLASS_PANE, 8), name: "brown_stained_glass_pane_from_glass_pane" },
-    Recipe { needs: &[(ITEM_BROWN_DYE, 1), (ITEM_TERRACOTTA, 8)], result: (ITEM_BROWN_TERRACOTTA, 8), name: "brown_terracotta" },
-    Recipe { needs: &[(ITEM_BROWN_WOOL, 3)], result: (ITEM_BROWN_WOOL_SLAB, 6), name: "brown_wool_slab" },
-    Recipe { needs: &[(ITEM_BROWN_WOOL, 6)], result: (ITEM_BROWN_WOOL_STAIRS, 4), name: "brown_wool_stairs" },
-    Recipe { needs: &[(ITEM_COPPER_INGOT, 1), (ITEM_FEATHER, 1), (STICK, 1)], result: (ITEM_BRUSH, 1), name: "brush" },
-    Recipe { needs: &[(ITEM_IRON_INGOT, 3)], result: (ITEM_BUCKET, 1), name: "bucket" },
-    Recipe { needs: &[(ITEM_LEATHER, 1), (ITEM_STRING, 1)], result: (ITEM_BUNDLE, 1), name: "bundle" },
-    Recipe { needs: &[(ITEM_MILK_BUCKET, 3), (ITEM_SUGAR, 2), (WHEAT, 3), (TAG_EGGS, 1)], result: (ITEM_CAKE, 1), name: "cake" },
-    Recipe { needs: &[(ITEM_AMETHYST_SHARD, 3), (ITEM_SCULK_SENSOR, 1)], result: (ITEM_CALIBRATED_SCULK_SENSOR, 1), name: "calibrated_sculk_sensor" },
-    Recipe { needs: &[(STICK, 3), (TAG_LOGS, 3), (TAG_COALS, 1)], result: (ITEM_CAMPFIRE, 1), name: "campfire" },
-    Recipe { needs: &[(ITEM_HONEYCOMB, 1), (ITEM_STRING, 1)], result: (ITEM_CANDLE, 1), name: "candle" },
-    Recipe { needs: &[(ITEM_CARROT, 1), (ITEM_FISHING_ROD, 1)], result: (ITEM_CARROT_ON_A_STICK, 1), name: "carrot_on_a_stick" },
-    Recipe { needs: &[(ITEM_PAPER, 2), (TAG_PLANKS, 4)], result: (ITEM_CARTOGRAPHY_TABLE, 1), name: "cartography_table" },
-    Recipe { needs: &[(ITEM_IRON_INGOT, 7)], result: (ITEM_CAULDRON, 1), name: "cauldron" },
-    Recipe { needs: &[(ITEM_CHERRY_PLANKS, 5)], result: (ITEM_CHERRY_BOAT, 1), name: "cherry_boat" },
-    Recipe { needs: &[(ITEM_CHERRY_PLANKS, 1)], result: (ITEM_CHERRY_BUTTON, 1), name: "cherry_button" },
-    Recipe { needs: &[(ITEM_CHERRY_BOAT, 1), (ITEM_CHEST, 1)], result: (ITEM_CHERRY_CHEST_BOAT, 1), name: "cherry_chest_boat" },
-    Recipe { needs: &[(ITEM_CHERRY_PLANKS, 6)], result: (ITEM_CHERRY_DOOR, 3), name: "cherry_door" },
-    Recipe { needs: &[(ITEM_CHERRY_PLANKS, 4), (STICK, 2)], result: (ITEM_CHERRY_FENCE, 3), name: "cherry_fence" },
-    Recipe { needs: &[(ITEM_CHERRY_PLANKS, 2), (STICK, 4)], result: (ITEM_CHERRY_FENCE_GATE, 1), name: "cherry_fence_gate" },
-    Recipe { needs: &[(ITEM_IRON_CHAIN, 2), (ITEM_STRIPPED_CHERRY_LOG, 6)], result: (ITEM_CHERRY_HANGING_SIGN, 6), name: "cherry_hanging_sign" },
-    Recipe { needs: &[(TAG_CHERRY_LOGS, 1)], result: (ITEM_CHERRY_PLANKS, 4), name: "cherry_planks" },
-    Recipe { needs: &[(ITEM_CHERRY_PLANKS, 2)], result: (ITEM_CHERRY_PRESSURE_PLATE, 1), name: "cherry_pressure_plate" },
-    Recipe { needs: &[(ITEM_STRIPPED_CHERRY_LOG, 6)], result: (ITEM_CHERRY_SHELF, 6), name: "cherry_shelf" },
-    Recipe { needs: &[(ITEM_CHERRY_PLANKS, 6), (STICK, 1)], result: (ITEM_CHERRY_SIGN, 3), name: "cherry_sign" },
-    Recipe { needs: &[(ITEM_CHERRY_PLANKS, 3)], result: (ITEM_CHERRY_SLAB, 6), name: "cherry_slab" },
-    Recipe { needs: &[(ITEM_CHERRY_PLANKS, 6)], result: (ITEM_CHERRY_STAIRS, 4), name: "cherry_stairs" },
-    Recipe { needs: &[(ITEM_CHERRY_PLANKS, 6)], result: (ITEM_CHERRY_TRAPDOOR, 2), name: "cherry_trapdoor" },
-    Recipe { needs: &[(ITEM_CHERRY_LOG, 4)], result: (ITEM_CHERRY_WOOD, 3), name: "cherry_wood" },
-    Recipe { needs: &[(TAG_PLANKS, 8)], result: (ITEM_CHEST, 1), name: "chest" },
-    Recipe { needs: &[(ITEM_CHEST, 1), (ITEM_MINECART, 1)], result: (ITEM_CHEST_MINECART, 1), name: "chest_minecart" },
-    Recipe { needs: &[(TAG_PLANKS, 6), (TAG_WOODEN_SLABS, 3)], result: (ITEM_CHISELED_BOOKSHELF, 1), name: "chiseled_bookshelf" },
-    Recipe { needs: &[(ITEM_CINNABAR_SLAB, 2)], result: (ITEM_CHISELED_CINNABAR, 1), name: "chiseled_cinnabar" },
-    Recipe { needs: &[(ITEM_CUT_COPPER_SLAB, 2)], result: (ITEM_CHISELED_COPPER, 1), name: "chiseled_copper" },
-    Recipe { needs: &[(ITEM_COBBLED_DEEPSLATE_SLAB, 2)], result: (ITEM_CHISELED_DEEPSLATE, 1), name: "chiseled_deepslate" },
-    Recipe { needs: &[(ITEM_NETHER_BRICK_SLAB, 2)], result: (ITEM_CHISELED_NETHER_BRICKS, 1), name: "chiseled_nether_bricks" },
-    Recipe { needs: &[(ITEM_POLISHED_BLACKSTONE_SLAB, 2)], result: (ITEM_CHISELED_POLISHED_BLACKSTONE, 1), name: "chiseled_polished_blackstone" },
-    Recipe { needs: &[(ITEM_QUARTZ_SLAB, 2)], result: (ITEM_CHISELED_QUARTZ_BLOCK, 1), name: "chiseled_quartz_block" },
-    Recipe { needs: &[(ITEM_RED_SANDSTONE_SLAB, 2)], result: (ITEM_CHISELED_RED_SANDSTONE, 1), name: "chiseled_red_sandstone" },
-    Recipe { needs: &[(ITEM_RESIN_BRICK_SLAB, 2)], result: (ITEM_CHISELED_RESIN_BRICKS, 1), name: "chiseled_resin_bricks" },
-    Recipe { needs: &[(ITEM_SANDSTONE_SLAB, 2)], result: (ITEM_CHISELED_SANDSTONE, 1), name: "chiseled_sandstone" },
-    Recipe { needs: &[(ITEM_STONE_BRICK_SLAB, 2)], result: (ITEM_CHISELED_STONE_BRICKS, 1), name: "chiseled_stone_bricks" },
-    Recipe { needs: &[(ITEM_SULFUR_SLAB, 2)], result: (ITEM_CHISELED_SULFUR, 1), name: "chiseled_sulfur" },
-    Recipe { needs: &[(ITEM_TUFF_SLAB, 2)], result: (ITEM_CHISELED_TUFF, 1), name: "chiseled_tuff" },
-    Recipe { needs: &[(ITEM_TUFF_BRICK_SLAB, 2)], result: (ITEM_CHISELED_TUFF_BRICKS, 1), name: "chiseled_tuff_bricks" },
-    Recipe { needs: &[(ITEM_CINNABAR_BRICKS, 3)], result: (ITEM_CINNABAR_BRICK_SLAB, 6), name: "cinnabar_brick_slab" },
-    Recipe { needs: &[(ITEM_CINNABAR_BRICKS, 6)], result: (ITEM_CINNABAR_BRICK_STAIRS, 4), name: "cinnabar_brick_stairs" },
-    Recipe { needs: &[(ITEM_CINNABAR_BRICKS, 6)], result: (ITEM_CINNABAR_BRICK_WALL, 6), name: "cinnabar_brick_wall" },
-    Recipe { needs: &[(ITEM_POLISHED_CINNABAR, 4)], result: (ITEM_CINNABAR_BRICKS, 4), name: "cinnabar_bricks" },
-    Recipe { needs: &[(ITEM_CINNABAR, 3)], result: (ITEM_CINNABAR_SLAB, 6), name: "cinnabar_slab" },
-    Recipe { needs: &[(ITEM_CINNABAR, 6)], result: (ITEM_CINNABAR_STAIRS, 4), name: "cinnabar_stairs" },
-    Recipe { needs: &[(ITEM_CINNABAR, 6)], result: (ITEM_CINNABAR_WALL, 6), name: "cinnabar_wall" },
-    Recipe { needs: &[(ITEM_CLAY_BALL, 4)], result: (ITEM_CLAY, 1), name: "clay" },
-    Recipe { needs: &[(ITEM_GOLD_INGOT, 4), (ITEM_REDSTONE, 1)], result: (ITEM_CLOCK, 1), name: "clock" },
-    Recipe { needs: &[(ITEM_COAL_BLOCK, 1)], result: (COAL, 9), name: "coal" },
-    Recipe { needs: &[(COAL, 9)], result: (ITEM_COAL_BLOCK, 1), name: "coal_block" },
-    Recipe { needs: &[(ITEM_DIRT, 2), (ITEM_GRAVEL, 2)], result: (ITEM_COARSE_DIRT, 4), name: "coarse_dirt" },
-    Recipe { needs: &[(ITEM_COAST_ARMOR_TRIM_SMITHING_TEMPLATE, 1), (COBBLESTONE, 1), (ITEM_DIAMOND, 7)], result: (ITEM_COAST_ARMOR_TRIM_SMITHING_TEMPLATE, 2), name: "coast_armor_trim_smithing_template" },
-    Recipe { needs: &[(ITEM_COBBLED_DEEPSLATE, 3)], result: (ITEM_COBBLED_DEEPSLATE_SLAB, 6), name: "cobbled_deepslate_slab" },
-    Recipe { needs: &[(ITEM_COBBLED_DEEPSLATE, 6)], result: (ITEM_COBBLED_DEEPSLATE_STAIRS, 4), name: "cobbled_deepslate_stairs" },
-    Recipe { needs: &[(ITEM_COBBLED_DEEPSLATE, 6)], result: (ITEM_COBBLED_DEEPSLATE_WALL, 6), name: "cobbled_deepslate_wall" },
-    Recipe { needs: &[(COBBLESTONE, 3)], result: (ITEM_COBBLESTONE_SLAB, 6), name: "cobblestone_slab" },
-    Recipe { needs: &[(COBBLESTONE, 6)], result: (ITEM_COBBLESTONE_STAIRS, 4), name: "cobblestone_stairs" },
-    Recipe { needs: &[(COBBLESTONE, 6)], result: (ITEM_COBBLESTONE_WALL, 6), name: "cobblestone_wall" },
-    Recipe { needs: &[(ITEM_QUARTZ, 1), (ITEM_REDSTONE_TORCH, 3), (ITEM_STONE, 3)], result: (ITEM_COMPARATOR, 1), name: "comparator" },
-    Recipe { needs: &[(ITEM_IRON_INGOT, 4), (ITEM_REDSTONE, 1)], result: (ITEM_COMPASS, 1), name: "compass" },
-    Recipe { needs: &[(TAG_WOODEN_SLABS, 7)], result: (ITEM_COMPOSTER, 1), name: "composter" },
-    Recipe { needs: &[(ITEM_HEART_OF_THE_SEA, 1), (ITEM_NAUTILUS_SHELL, 8)], result: (ITEM_CONDUIT, 1), name: "conduit" },
-    Recipe { needs: &[(ITEM_COCOA_BEANS, 1), (WHEAT, 2)], result: (ITEM_COOKIE, 8), name: "cookie" },
-    Recipe { needs: &[(STICK, 2), (TAG_COPPER_TOOL_MATERIALS, 3)], result: (ITEM_COPPER_AXE, 1), name: "copper_axe" },
-    Recipe { needs: &[(ITEM_COPPER_INGOT, 6)], result: (ITEM_COPPER_BARS, 16), name: "copper_bars" },
-    Recipe { needs: &[(ITEM_COPPER_INGOT, 9)], result: (ITEM_COPPER_BLOCK, 1), name: "copper_block" },
-    Recipe { needs: &[(ITEM_COPPER_INGOT, 4)], result: (ITEM_COPPER_BOOTS, 1), name: "copper_boots" },
-    Recipe { needs: &[(ITEM_BLAZE_ROD, 1), (ITEM_COPPER_BLOCK, 3), (ITEM_REDSTONE, 1)], result: (ITEM_COPPER_BULB, 4), name: "copper_bulb" },
-    Recipe { needs: &[(ITEM_COPPER_INGOT, 1), (ITEM_COPPER_NUGGET, 2)], result: (ITEM_COPPER_CHAIN, 1), name: "copper_chain" },
-    Recipe { needs: &[(ITEM_CHEST, 1), (ITEM_COPPER_INGOT, 8)], result: (ITEM_COPPER_CHEST, 1), name: "copper_chest" },
-    Recipe { needs: &[(ITEM_COPPER_INGOT, 8)], result: (ITEM_COPPER_CHESTPLATE, 1), name: "copper_chestplate" },
-    Recipe { needs: &[(ITEM_COPPER_INGOT, 6)], result: (ITEM_COPPER_DOOR, 3), name: "copper_door" },
-    Recipe { needs: &[(ITEM_COPPER_BLOCK, 4)], result: (ITEM_COPPER_GRATE, 4), name: "copper_grate" },
-    Recipe { needs: &[(ITEM_COPPER_INGOT, 5)], result: (ITEM_COPPER_HELMET, 1), name: "copper_helmet" },
-    Recipe { needs: &[(STICK, 2), (TAG_COPPER_TOOL_MATERIALS, 2)], result: (ITEM_COPPER_HOE, 1), name: "copper_hoe" },
-    Recipe { needs: &[(ITEM_COPPER_BLOCK, 1)], result: (ITEM_COPPER_INGOT, 9), name: "copper_ingot" },
-    Recipe { needs: &[(ITEM_COPPER_NUGGET, 9)], result: (ITEM_COPPER_INGOT, 1), name: "copper_ingot_from_nuggets" },
-    Recipe { needs: &[(ITEM_WAXED_COPPER_BLOCK, 1)], result: (ITEM_COPPER_INGOT, 9), name: "copper_ingot_from_waxed_copper_block" },
-    Recipe { needs: &[(ITEM_COPPER_NUGGET, 8), (ITEM_COPPER_TORCH, 1)], result: (ITEM_COPPER_LANTERN, 1), name: "copper_lantern" },
-    Recipe { needs: &[(ITEM_COPPER_INGOT, 7)], result: (ITEM_COPPER_LEGGINGS, 1), name: "copper_leggings" },
-    Recipe { needs: &[(ITEM_COPPER_INGOT, 1)], result: (ITEM_COPPER_NUGGET, 9), name: "copper_nugget" },
-    Recipe { needs: &[(STICK, 2), (TAG_COPPER_TOOL_MATERIALS, 3)], result: (ITEM_COPPER_PICKAXE, 1), name: "copper_pickaxe" },
-    Recipe { needs: &[(STICK, 2), (TAG_COPPER_TOOL_MATERIALS, 1)], result: (ITEM_COPPER_SHOVEL, 1), name: "copper_shovel" },
-    Recipe { needs: &[(STICK, 2), (TAG_COPPER_TOOL_MATERIALS, 1)], result: (ITEM_COPPER_SPEAR, 1), name: "copper_spear" },
-    Recipe { needs: &[(STICK, 1), (TAG_COPPER_TOOL_MATERIALS, 2)], result: (ITEM_COPPER_SWORD, 1), name: "copper_sword" },
-    Recipe { needs: &[(ITEM_COPPER_NUGGET, 1), (STICK, 1), (TAG_COALS, 1)], result: (ITEM_COPPER_TORCH, 4), name: "copper_torch" },
-    Recipe { needs: &[(ITEM_COPPER_INGOT, 4)], result: (ITEM_COPPER_TRAPDOOR, 1), name: "copper_trapdoor" },
-    Recipe { needs: &[(CRAFTING_TABLE, 1), (ITEM_DROPPER, 1), (ITEM_IRON_INGOT, 5), (ITEM_REDSTONE, 2)], result: (ITEM_CRAFTER, 1), name: "crafter" },
-    Recipe { needs: &[(TAG_PLANKS, 4)], result: (CRAFTING_TABLE, 1), name: "crafting_table" },
-    Recipe { needs: &[(ITEM_PALE_OAK_LOG, 2), (ITEM_RESIN_BLOCK, 1)], result: (ITEM_CREAKING_HEART, 1), name: "creaking_heart" },
-    Recipe { needs: &[(ITEM_CREEPER_HEAD, 1), (ITEM_PAPER, 1)], result: (ITEM_CREEPER_BANNER_PATTERN, 1), name: "creeper_banner_pattern" },
-    Recipe { needs: &[(ITEM_CRIMSON_PLANKS, 1)], result: (ITEM_CRIMSON_BUTTON, 1), name: "crimson_button" },
-    Recipe { needs: &[(ITEM_CRIMSON_PLANKS, 6)], result: (ITEM_CRIMSON_DOOR, 3), name: "crimson_door" },
-    Recipe { needs: &[(ITEM_CRIMSON_PLANKS, 4), (STICK, 2)], result: (ITEM_CRIMSON_FENCE, 3), name: "crimson_fence" },
-    Recipe { needs: &[(ITEM_CRIMSON_PLANKS, 2), (STICK, 4)], result: (ITEM_CRIMSON_FENCE_GATE, 1), name: "crimson_fence_gate" },
-    Recipe { needs: &[(ITEM_IRON_CHAIN, 2), (ITEM_STRIPPED_CRIMSON_STEM, 6)], result: (ITEM_CRIMSON_HANGING_SIGN, 6), name: "crimson_hanging_sign" },
-    Recipe { needs: &[(ITEM_CRIMSON_STEM, 4)], result: (ITEM_CRIMSON_HYPHAE, 3), name: "crimson_hyphae" },
-    Recipe { needs: &[(TAG_CRIMSON_STEMS, 1)], result: (ITEM_CRIMSON_PLANKS, 4), name: "crimson_planks" },
-    Recipe { needs: &[(ITEM_CRIMSON_PLANKS, 2)], result: (ITEM_CRIMSON_PRESSURE_PLATE, 1), name: "crimson_pressure_plate" },
-    Recipe { needs: &[(ITEM_STRIPPED_CRIMSON_STEM, 6)], result: (ITEM_CRIMSON_SHELF, 6), name: "crimson_shelf" },
-    Recipe { needs: &[(ITEM_CRIMSON_PLANKS, 6), (STICK, 1)], result: (ITEM_CRIMSON_SIGN, 3), name: "crimson_sign" },
-    Recipe { needs: &[(ITEM_CRIMSON_PLANKS, 3)], result: (ITEM_CRIMSON_SLAB, 6), name: "crimson_slab" },
-    Recipe { needs: &[(ITEM_CRIMSON_PLANKS, 6)], result: (ITEM_CRIMSON_STAIRS, 4), name: "crimson_stairs" },
-    Recipe { needs: &[(ITEM_CRIMSON_PLANKS, 6)], result: (ITEM_CRIMSON_TRAPDOOR, 2), name: "crimson_trapdoor" },
-    Recipe { needs: &[(ITEM_IRON_INGOT, 1), (STICK, 3), (ITEM_STRING, 2), (ITEM_TRIPWIRE_HOOK, 1)], result: (ITEM_CROSSBOW, 1), name: "crossbow" },
-    Recipe { needs: &[(ITEM_COPPER_BLOCK, 4)], result: (ITEM_CUT_COPPER, 4), name: "cut_copper" },
-    Recipe { needs: &[(ITEM_CUT_COPPER, 3)], result: (ITEM_CUT_COPPER_SLAB, 6), name: "cut_copper_slab" },
-    Recipe { needs: &[(ITEM_CUT_COPPER, 6)], result: (ITEM_CUT_COPPER_STAIRS, 4), name: "cut_copper_stairs" },
-    Recipe { needs: &[(ITEM_RED_SANDSTONE, 4)], result: (ITEM_CUT_RED_SANDSTONE, 4), name: "cut_red_sandstone" },
-    Recipe { needs: &[(ITEM_CUT_RED_SANDSTONE, 3)], result: (ITEM_CUT_RED_SANDSTONE_SLAB, 6), name: "cut_red_sandstone_slab" },
-    Recipe { needs: &[(ITEM_SANDSTONE, 4)], result: (ITEM_CUT_SANDSTONE, 4), name: "cut_sandstone" },
-    Recipe { needs: &[(ITEM_CUT_SANDSTONE, 3)], result: (ITEM_CUT_SANDSTONE_SLAB, 6), name: "cut_sandstone_slab" },
-    Recipe { needs: &[(ITEM_CYAN_WOOL, 6), (STICK, 1)], result: (ITEM_CYAN_BANNER, 1), name: "cyan_banner" },
-    Recipe { needs: &[(ITEM_CYAN_WOOL, 3), (TAG_PLANKS, 3)], result: (ITEM_CYAN_BED, 1), name: "cyan_bed" },
-    Recipe { needs: &[(ITEM_CANDLE, 1), (ITEM_CYAN_DYE, 1)], result: (ITEM_CYAN_CANDLE, 1), name: "cyan_candle" },
-    Recipe { needs: &[(ITEM_CYAN_WOOL, 2)], result: (ITEM_CYAN_CARPET, 3), name: "cyan_carpet" },
-    Recipe { needs: &[(ITEM_CYAN_DYE, 1), (ITEM_GRAVEL, 1), (ITEM_GRAVEL, 1), (ITEM_GRAVEL, 1), (ITEM_GRAVEL, 1), (ITEM_SAND, 1), (ITEM_SAND, 1), (ITEM_SAND, 1), (ITEM_SAND, 1)], result: (ITEM_CYAN_CONCRETE_POWDER, 8), name: "cyan_concrete_powder" },
-    Recipe { needs: &[(ITEM_CYAN_CONCRETE, 3)], result: (ITEM_CYAN_CONCRETE_SLAB, 6), name: "cyan_concrete_slab" },
-    Recipe { needs: &[(ITEM_CYAN_CONCRETE, 6)], result: (ITEM_CYAN_CONCRETE_STAIRS, 4), name: "cyan_concrete_stairs" },
-    Recipe { needs: &[(ITEM_CYAN_WOOL_SLAB, 3)], result: (ITEM_CYAN_CUSHION, 1), name: "cyan_cushion" },
-    Recipe { needs: &[(ITEM_BLUE_DYE, 1), (ITEM_GREEN_DYE, 1)], result: (ITEM_CYAN_DYE, 2), name: "cyan_dye" },
-    Recipe { needs: &[(ITEM_PITCHER_PLANT, 1)], result: (ITEM_CYAN_DYE, 2), name: "cyan_dye_from_pitcher_plant" },
-    Recipe { needs: &[(ITEM_CYAN_WOOL, 1), (ITEM_GLASS, 2), (ITEM_LEATHER, 3)], result: (ITEM_CYAN_HARNESS, 1), name: "cyan_harness" },
-    Recipe { needs: &[(ITEM_CYAN_DYE, 1), (ITEM_GLASS, 8)], result: (ITEM_CYAN_STAINED_GLASS, 8), name: "cyan_stained_glass" },
-    Recipe { needs: &[(ITEM_CYAN_STAINED_GLASS, 6)], result: (ITEM_CYAN_STAINED_GLASS_PANE, 16), name: "cyan_stained_glass_pane" },
-    Recipe { needs: &[(ITEM_CYAN_DYE, 1), (ITEM_GLASS_PANE, 8)], result: (ITEM_CYAN_STAINED_GLASS_PANE, 8), name: "cyan_stained_glass_pane_from_glass_pane" },
-    Recipe { needs: &[(ITEM_CYAN_DYE, 1), (ITEM_TERRACOTTA, 8)], result: (ITEM_CYAN_TERRACOTTA, 8), name: "cyan_terracotta" },
-    Recipe { needs: &[(ITEM_CYAN_WOOL, 3)], result: (ITEM_CYAN_WOOL_SLAB, 6), name: "cyan_wool_slab" },
-    Recipe { needs: &[(ITEM_CYAN_WOOL, 6)], result: (ITEM_CYAN_WOOL_STAIRS, 4), name: "cyan_wool_stairs" },
-    Recipe { needs: &[(ITEM_DARK_OAK_PLANKS, 5)], result: (ITEM_DARK_OAK_BOAT, 1), name: "dark_oak_boat" },
-    Recipe { needs: &[(ITEM_DARK_OAK_PLANKS, 1)], result: (ITEM_DARK_OAK_BUTTON, 1), name: "dark_oak_button" },
-    Recipe { needs: &[(ITEM_CHEST, 1), (ITEM_DARK_OAK_BOAT, 1)], result: (ITEM_DARK_OAK_CHEST_BOAT, 1), name: "dark_oak_chest_boat" },
-    Recipe { needs: &[(ITEM_DARK_OAK_PLANKS, 6)], result: (ITEM_DARK_OAK_DOOR, 3), name: "dark_oak_door" },
-    Recipe { needs: &[(ITEM_DARK_OAK_PLANKS, 4), (STICK, 2)], result: (ITEM_DARK_OAK_FENCE, 3), name: "dark_oak_fence" },
-    Recipe { needs: &[(ITEM_DARK_OAK_PLANKS, 2), (STICK, 4)], result: (ITEM_DARK_OAK_FENCE_GATE, 1), name: "dark_oak_fence_gate" },
-    Recipe { needs: &[(ITEM_IRON_CHAIN, 2), (ITEM_STRIPPED_DARK_OAK_LOG, 6)], result: (ITEM_DARK_OAK_HANGING_SIGN, 6), name: "dark_oak_hanging_sign" },
-    Recipe { needs: &[(TAG_DARK_OAK_LOGS, 1)], result: (ITEM_DARK_OAK_PLANKS, 4), name: "dark_oak_planks" },
-    Recipe { needs: &[(ITEM_DARK_OAK_PLANKS, 2)], result: (ITEM_DARK_OAK_PRESSURE_PLATE, 1), name: "dark_oak_pressure_plate" },
-    Recipe { needs: &[(ITEM_STRIPPED_DARK_OAK_LOG, 6)], result: (ITEM_DARK_OAK_SHELF, 6), name: "dark_oak_shelf" },
-    Recipe { needs: &[(ITEM_DARK_OAK_PLANKS, 6), (STICK, 1)], result: (ITEM_DARK_OAK_SIGN, 3), name: "dark_oak_sign" },
-    Recipe { needs: &[(ITEM_DARK_OAK_PLANKS, 3)], result: (ITEM_DARK_OAK_SLAB, 6), name: "dark_oak_slab" },
-    Recipe { needs: &[(ITEM_DARK_OAK_PLANKS, 6)], result: (ITEM_DARK_OAK_STAIRS, 4), name: "dark_oak_stairs" },
-    Recipe { needs: &[(ITEM_DARK_OAK_PLANKS, 6)], result: (ITEM_DARK_OAK_TRAPDOOR, 2), name: "dark_oak_trapdoor" },
-    Recipe { needs: &[(ITEM_DARK_OAK_LOG, 4)], result: (ITEM_DARK_OAK_WOOD, 3), name: "dark_oak_wood" },
-    Recipe { needs: &[(ITEM_BLACK_DYE, 1), (ITEM_PRISMARINE_SHARD, 8)], result: (ITEM_DARK_PRISMARINE, 1), name: "dark_prismarine" },
-    Recipe { needs: &[(ITEM_DARK_PRISMARINE, 3)], result: (ITEM_DARK_PRISMARINE_SLAB, 6), name: "dark_prismarine_slab" },
-    Recipe { needs: &[(ITEM_DARK_PRISMARINE, 6)], result: (ITEM_DARK_PRISMARINE_STAIRS, 4), name: "dark_prismarine_stairs" },
-    Recipe { needs: &[(ITEM_GLASS, 3), (ITEM_QUARTZ, 3), (TAG_WOODEN_SLABS, 3)], result: (ITEM_DAYLIGHT_DETECTOR, 1), name: "daylight_detector" },
-    Recipe { needs: &[(ITEM_BRICK, 4)], result: (ITEM_DECORATED_POT, 1), name: "decorated_pot_simple" },
-    Recipe { needs: &[(ITEM_DEEPSLATE_BRICKS, 3)], result: (ITEM_DEEPSLATE_BRICK_SLAB, 6), name: "deepslate_brick_slab" },
-    Recipe { needs: &[(ITEM_DEEPSLATE_BRICKS, 6)], result: (ITEM_DEEPSLATE_BRICK_STAIRS, 4), name: "deepslate_brick_stairs" },
-    Recipe { needs: &[(ITEM_DEEPSLATE_BRICKS, 6)], result: (ITEM_DEEPSLATE_BRICK_WALL, 6), name: "deepslate_brick_wall" },
-    Recipe { needs: &[(ITEM_POLISHED_DEEPSLATE, 4)], result: (ITEM_DEEPSLATE_BRICKS, 4), name: "deepslate_bricks" },
-    Recipe { needs: &[(ITEM_DEEPSLATE_TILES, 3)], result: (ITEM_DEEPSLATE_TILE_SLAB, 6), name: "deepslate_tile_slab" },
-    Recipe { needs: &[(ITEM_DEEPSLATE_TILES, 6)], result: (ITEM_DEEPSLATE_TILE_STAIRS, 4), name: "deepslate_tile_stairs" },
-    Recipe { needs: &[(ITEM_DEEPSLATE_TILES, 6)], result: (ITEM_DEEPSLATE_TILE_WALL, 6), name: "deepslate_tile_wall" },
-    Recipe { needs: &[(ITEM_DEEPSLATE_BRICKS, 4)], result: (ITEM_DEEPSLATE_TILES, 4), name: "deepslate_tiles" },
-    Recipe { needs: &[(ITEM_IRON_INGOT, 6), (ITEM_REDSTONE, 1), (ITEM_STONE_PRESSURE_PLATE, 1)], result: (ITEM_DETECTOR_RAIL, 6), name: "detector_rail" },
-    Recipe { needs: &[(ITEM_DIAMOND_BLOCK, 1)], result: (ITEM_DIAMOND, 9), name: "diamond" },
-    Recipe { needs: &[(STICK, 2), (TAG_DIAMOND_TOOL_MATERIALS, 3)], result: (ITEM_DIAMOND_AXE, 1), name: "diamond_axe" },
-    Recipe { needs: &[(ITEM_DIAMOND, 9)], result: (ITEM_DIAMOND_BLOCK, 1), name: "diamond_block" },
-    Recipe { needs: &[(ITEM_DIAMOND, 4)], result: (ITEM_DIAMOND_BOOTS, 1), name: "diamond_boots" },
-    Recipe { needs: &[(ITEM_DIAMOND, 8)], result: (ITEM_DIAMOND_CHESTPLATE, 1), name: "diamond_chestplate" },
-    Recipe { needs: &[(ITEM_DIAMOND, 5)], result: (ITEM_DIAMOND_HELMET, 1), name: "diamond_helmet" },
-    Recipe { needs: &[(STICK, 2), (TAG_DIAMOND_TOOL_MATERIALS, 2)], result: (ITEM_DIAMOND_HOE, 1), name: "diamond_hoe" },
-    Recipe { needs: &[(ITEM_DIAMOND, 7)], result: (ITEM_DIAMOND_LEGGINGS, 1), name: "diamond_leggings" },
-    Recipe { needs: &[(STICK, 2), (TAG_DIAMOND_TOOL_MATERIALS, 3)], result: (ITEM_DIAMOND_PICKAXE, 1), name: "diamond_pickaxe" },
-    Recipe { needs: &[(STICK, 2), (TAG_DIAMOND_TOOL_MATERIALS, 1)], result: (ITEM_DIAMOND_SHOVEL, 1), name: "diamond_shovel" },
-    Recipe { needs: &[(STICK, 2), (TAG_DIAMOND_TOOL_MATERIALS, 1)], result: (ITEM_DIAMOND_SPEAR, 1), name: "diamond_spear" },
-    Recipe { needs: &[(STICK, 1), (TAG_DIAMOND_TOOL_MATERIALS, 2)], result: (ITEM_DIAMOND_SWORD, 1), name: "diamond_sword" },
-    Recipe { needs: &[(COBBLESTONE, 2), (ITEM_QUARTZ, 2)], result: (ITEM_DIORITE, 2), name: "diorite" },
-    Recipe { needs: &[(ITEM_DIORITE, 3)], result: (ITEM_DIORITE_SLAB, 6), name: "diorite_slab" },
-    Recipe { needs: &[(ITEM_DIORITE, 6)], result: (ITEM_DIORITE_STAIRS, 4), name: "diorite_stairs" },
-    Recipe { needs: &[(ITEM_DIORITE, 6)], result: (ITEM_DIORITE_WALL, 6), name: "diorite_wall" },
-    Recipe { needs: &[(ITEM_BOW, 1), (COBBLESTONE, 7), (ITEM_REDSTONE, 1)], result: (ITEM_DISPENSER, 1), name: "dispenser" },
-    Recipe { needs: &[(ITEM_GHAST_TEAR, 8), (ITEM_SOUL_SAND, 1)], result: (ITEM_DRIED_GHAST, 1), name: "dried_ghast" },
-    Recipe { needs: &[(ITEM_DRIED_KELP_BLOCK, 1)], result: (ITEM_DRIED_KELP, 9), name: "dried_kelp" },
-    Recipe { needs: &[(ITEM_DRIED_KELP, 9)], result: (ITEM_DRIED_KELP_BLOCK, 1), name: "dried_kelp_block" },
-    Recipe { needs: &[(ITEM_POINTED_DRIPSTONE, 4)], result: (ITEM_DRIPSTONE_BLOCK, 1), name: "dripstone_block" },
-    Recipe { needs: &[(COBBLESTONE, 7), (ITEM_REDSTONE, 1)], result: (ITEM_DROPPER, 1), name: "dropper" },
-    Recipe { needs: &[(ITEM_DIAMOND, 7), (ITEM_DUNE_ARMOR_TRIM_SMITHING_TEMPLATE, 1), (ITEM_SANDSTONE, 1)], result: (ITEM_DUNE_ARMOR_TRIM_SMITHING_TEMPLATE, 2), name: "dune_armor_trim_smithing_template" },
-    Recipe { needs: &[(ITEM_BLACK_DYE, 1), (TAG_ALT_2, 1)], result: (ITEM_BLACK_BED, 1), name: "dye_black_bed" },
-    Recipe { needs: &[(ITEM_BLACK_DYE, 1), (TAG_ALT_3, 1)], result: (ITEM_BLACK_CARPET, 1), name: "dye_black_carpet" },
-    Recipe { needs: &[(ITEM_BLACK_DYE, 1), (TAG_ALT_4, 1)], result: (ITEM_BLACK_CUSHION, 1), name: "dye_black_cushion" },
-    Recipe { needs: &[(ITEM_BLACK_DYE, 1), (TAG_ALT_5, 1)], result: (ITEM_BLACK_HARNESS, 1), name: "dye_black_harness" },
-    Recipe { needs: &[(ITEM_BLACK_DYE, 1), (TAG_ALT_6, 1)], result: (ITEM_BLACK_WOOL, 1), name: "dye_black_wool" },
-    Recipe { needs: &[(ITEM_BLACK_DYE, 1), (TAG_ALT_7, 1)], result: (ITEM_BLACK_WOOL_SLAB, 1), name: "dye_black_wool_slab" },
-    Recipe { needs: &[(ITEM_BLACK_DYE, 1), (TAG_ALT_8, 1)], result: (ITEM_BLACK_WOOL_STAIRS, 1), name: "dye_black_wool_stairs" },
-    Recipe { needs: &[(ITEM_BLUE_DYE, 1), (TAG_ALT_9, 1)], result: (ITEM_BLUE_BED, 1), name: "dye_blue_bed" },
-    Recipe { needs: &[(ITEM_BLUE_DYE, 1), (TAG_ALT_10, 1)], result: (ITEM_BLUE_CARPET, 1), name: "dye_blue_carpet" },
-    Recipe { needs: &[(ITEM_BLUE_DYE, 1), (TAG_ALT_11, 1)], result: (ITEM_BLUE_CUSHION, 1), name: "dye_blue_cushion" },
-    Recipe { needs: &[(ITEM_BLUE_DYE, 1), (TAG_ALT_12, 1)], result: (ITEM_BLUE_HARNESS, 1), name: "dye_blue_harness" },
-    Recipe { needs: &[(ITEM_BLUE_DYE, 1), (TAG_ALT_13, 1)], result: (ITEM_BLUE_WOOL, 1), name: "dye_blue_wool" },
-    Recipe { needs: &[(ITEM_BLUE_DYE, 1), (TAG_ALT_14, 1)], result: (ITEM_BLUE_WOOL_SLAB, 1), name: "dye_blue_wool_slab" },
-    Recipe { needs: &[(ITEM_BLUE_DYE, 1), (TAG_ALT_15, 1)], result: (ITEM_BLUE_WOOL_STAIRS, 1), name: "dye_blue_wool_stairs" },
-    Recipe { needs: &[(ITEM_BROWN_DYE, 1), (TAG_ALT_16, 1)], result: (ITEM_BROWN_BED, 1), name: "dye_brown_bed" },
-    Recipe { needs: &[(ITEM_BROWN_DYE, 1), (TAG_ALT_17, 1)], result: (ITEM_BROWN_CARPET, 1), name: "dye_brown_carpet" },
-    Recipe { needs: &[(ITEM_BROWN_DYE, 1), (TAG_ALT_18, 1)], result: (ITEM_BROWN_CUSHION, 1), name: "dye_brown_cushion" },
-    Recipe { needs: &[(ITEM_BROWN_DYE, 1), (TAG_ALT_19, 1)], result: (ITEM_BROWN_HARNESS, 1), name: "dye_brown_harness" },
-    Recipe { needs: &[(ITEM_BROWN_DYE, 1), (TAG_ALT_20, 1)], result: (ITEM_BROWN_WOOL, 1), name: "dye_brown_wool" },
-    Recipe { needs: &[(ITEM_BROWN_DYE, 1), (TAG_ALT_21, 1)], result: (ITEM_BROWN_WOOL_SLAB, 1), name: "dye_brown_wool_slab" },
-    Recipe { needs: &[(ITEM_BROWN_DYE, 1), (TAG_ALT_22, 1)], result: (ITEM_BROWN_WOOL_STAIRS, 1), name: "dye_brown_wool_stairs" },
-    Recipe { needs: &[(ITEM_CYAN_DYE, 1), (TAG_ALT_23, 1)], result: (ITEM_CYAN_BED, 1), name: "dye_cyan_bed" },
-    Recipe { needs: &[(ITEM_CYAN_DYE, 1), (TAG_ALT_24, 1)], result: (ITEM_CYAN_CARPET, 1), name: "dye_cyan_carpet" },
-    Recipe { needs: &[(ITEM_CYAN_DYE, 1), (TAG_ALT_25, 1)], result: (ITEM_CYAN_CUSHION, 1), name: "dye_cyan_cushion" },
-    Recipe { needs: &[(ITEM_CYAN_DYE, 1), (TAG_ALT_26, 1)], result: (ITEM_CYAN_HARNESS, 1), name: "dye_cyan_harness" },
-    Recipe { needs: &[(ITEM_CYAN_DYE, 1), (TAG_ALT_27, 1)], result: (ITEM_CYAN_WOOL, 1), name: "dye_cyan_wool" },
-    Recipe { needs: &[(ITEM_CYAN_DYE, 1), (TAG_ALT_28, 1)], result: (ITEM_CYAN_WOOL_SLAB, 1), name: "dye_cyan_wool_slab" },
-    Recipe { needs: &[(ITEM_CYAN_DYE, 1), (TAG_ALT_29, 1)], result: (ITEM_CYAN_WOOL_STAIRS, 1), name: "dye_cyan_wool_stairs" },
-    Recipe { needs: &[(ITEM_GRAY_DYE, 1), (TAG_ALT_30, 1)], result: (ITEM_GRAY_BED, 1), name: "dye_gray_bed" },
-    Recipe { needs: &[(ITEM_GRAY_DYE, 1), (TAG_ALT_31, 1)], result: (ITEM_GRAY_CARPET, 1), name: "dye_gray_carpet" },
-    Recipe { needs: &[(ITEM_GRAY_DYE, 1), (TAG_ALT_32, 1)], result: (ITEM_GRAY_CUSHION, 1), name: "dye_gray_cushion" },
-    Recipe { needs: &[(ITEM_GRAY_DYE, 1), (TAG_ALT_33, 1)], result: (ITEM_GRAY_HARNESS, 1), name: "dye_gray_harness" },
-    Recipe { needs: &[(ITEM_GRAY_DYE, 1), (TAG_ALT_34, 1)], result: (ITEM_GRAY_WOOL, 1), name: "dye_gray_wool" },
-    Recipe { needs: &[(ITEM_GRAY_DYE, 1), (TAG_ALT_35, 1)], result: (ITEM_GRAY_WOOL_SLAB, 1), name: "dye_gray_wool_slab" },
-    Recipe { needs: &[(ITEM_GRAY_DYE, 1), (TAG_ALT_36, 1)], result: (ITEM_GRAY_WOOL_STAIRS, 1), name: "dye_gray_wool_stairs" },
-    Recipe { needs: &[(ITEM_GREEN_DYE, 1), (TAG_ALT_37, 1)], result: (ITEM_GREEN_BED, 1), name: "dye_green_bed" },
-    Recipe { needs: &[(ITEM_GREEN_DYE, 1), (TAG_ALT_38, 1)], result: (ITEM_GREEN_CARPET, 1), name: "dye_green_carpet" },
-    Recipe { needs: &[(ITEM_GREEN_DYE, 1), (TAG_ALT_39, 1)], result: (ITEM_GREEN_CUSHION, 1), name: "dye_green_cushion" },
-    Recipe { needs: &[(ITEM_GREEN_DYE, 1), (TAG_ALT_40, 1)], result: (ITEM_GREEN_HARNESS, 1), name: "dye_green_harness" },
-    Recipe { needs: &[(ITEM_GREEN_DYE, 1), (TAG_ALT_41, 1)], result: (ITEM_GREEN_WOOL, 1), name: "dye_green_wool" },
-    Recipe { needs: &[(ITEM_GREEN_DYE, 1), (TAG_ALT_42, 1)], result: (ITEM_GREEN_WOOL_SLAB, 1), name: "dye_green_wool_slab" },
-    Recipe { needs: &[(ITEM_GREEN_DYE, 1), (TAG_ALT_43, 1)], result: (ITEM_GREEN_WOOL_STAIRS, 1), name: "dye_green_wool_stairs" },
-    Recipe { needs: &[(ITEM_LIGHT_BLUE_DYE, 1), (TAG_ALT_44, 1)], result: (ITEM_LIGHT_BLUE_BED, 1), name: "dye_light_blue_bed" },
-    Recipe { needs: &[(ITEM_LIGHT_BLUE_DYE, 1), (TAG_ALT_45, 1)], result: (ITEM_LIGHT_BLUE_CARPET, 1), name: "dye_light_blue_carpet" },
-    Recipe { needs: &[(ITEM_LIGHT_BLUE_DYE, 1), (TAG_ALT_46, 1)], result: (ITEM_LIGHT_BLUE_CUSHION, 1), name: "dye_light_blue_cushion" },
-    Recipe { needs: &[(ITEM_LIGHT_BLUE_DYE, 1), (TAG_ALT_47, 1)], result: (ITEM_LIGHT_BLUE_HARNESS, 1), name: "dye_light_blue_harness" },
-    Recipe { needs: &[(ITEM_LIGHT_BLUE_DYE, 1), (TAG_ALT_48, 1)], result: (ITEM_LIGHT_BLUE_WOOL, 1), name: "dye_light_blue_wool" },
-    Recipe { needs: &[(ITEM_LIGHT_BLUE_DYE, 1), (TAG_ALT_49, 1)], result: (ITEM_LIGHT_BLUE_WOOL_SLAB, 1), name: "dye_light_blue_wool_slab" },
-    Recipe { needs: &[(ITEM_LIGHT_BLUE_DYE, 1), (TAG_ALT_50, 1)], result: (ITEM_LIGHT_BLUE_WOOL_STAIRS, 1), name: "dye_light_blue_wool_stairs" },
-    Recipe { needs: &[(ITEM_LIGHT_GRAY_DYE, 1), (TAG_ALT_51, 1)], result: (ITEM_LIGHT_GRAY_BED, 1), name: "dye_light_gray_bed" },
-    Recipe { needs: &[(ITEM_LIGHT_GRAY_DYE, 1), (TAG_ALT_52, 1)], result: (ITEM_LIGHT_GRAY_CARPET, 1), name: "dye_light_gray_carpet" },
-    Recipe { needs: &[(ITEM_LIGHT_GRAY_DYE, 1), (TAG_ALT_53, 1)], result: (ITEM_LIGHT_GRAY_CUSHION, 1), name: "dye_light_gray_cushion" },
-    Recipe { needs: &[(ITEM_LIGHT_GRAY_DYE, 1), (TAG_ALT_54, 1)], result: (ITEM_LIGHT_GRAY_HARNESS, 1), name: "dye_light_gray_harness" },
-    Recipe { needs: &[(ITEM_LIGHT_GRAY_DYE, 1), (TAG_ALT_55, 1)], result: (ITEM_LIGHT_GRAY_WOOL, 1), name: "dye_light_gray_wool" },
-    Recipe { needs: &[(ITEM_LIGHT_GRAY_DYE, 1), (TAG_ALT_56, 1)], result: (ITEM_LIGHT_GRAY_WOOL_SLAB, 1), name: "dye_light_gray_wool_slab" },
-    Recipe { needs: &[(ITEM_LIGHT_GRAY_DYE, 1), (TAG_ALT_57, 1)], result: (ITEM_LIGHT_GRAY_WOOL_STAIRS, 1), name: "dye_light_gray_wool_stairs" },
-    Recipe { needs: &[(ITEM_LIME_DYE, 1), (TAG_ALT_58, 1)], result: (ITEM_LIME_BED, 1), name: "dye_lime_bed" },
-    Recipe { needs: &[(ITEM_LIME_DYE, 1), (TAG_ALT_59, 1)], result: (ITEM_LIME_CARPET, 1), name: "dye_lime_carpet" },
-    Recipe { needs: &[(ITEM_LIME_DYE, 1), (TAG_ALT_60, 1)], result: (ITEM_LIME_CUSHION, 1), name: "dye_lime_cushion" },
-    Recipe { needs: &[(ITEM_LIME_DYE, 1), (TAG_ALT_61, 1)], result: (ITEM_LIME_HARNESS, 1), name: "dye_lime_harness" },
-    Recipe { needs: &[(ITEM_LIME_DYE, 1), (TAG_ALT_62, 1)], result: (ITEM_LIME_WOOL, 1), name: "dye_lime_wool" },
-    Recipe { needs: &[(ITEM_LIME_DYE, 1), (TAG_ALT_63, 1)], result: (ITEM_LIME_WOOL_SLAB, 1), name: "dye_lime_wool_slab" },
-    Recipe { needs: &[(ITEM_LIME_DYE, 1), (TAG_ALT_64, 1)], result: (ITEM_LIME_WOOL_STAIRS, 1), name: "dye_lime_wool_stairs" },
-    Recipe { needs: &[(ITEM_MAGENTA_DYE, 1), (TAG_ALT_65, 1)], result: (ITEM_MAGENTA_BED, 1), name: "dye_magenta_bed" },
-    Recipe { needs: &[(ITEM_MAGENTA_DYE, 1), (TAG_ALT_66, 1)], result: (ITEM_MAGENTA_CARPET, 1), name: "dye_magenta_carpet" },
-    Recipe { needs: &[(ITEM_MAGENTA_DYE, 1), (TAG_ALT_67, 1)], result: (ITEM_MAGENTA_CUSHION, 1), name: "dye_magenta_cushion" },
-    Recipe { needs: &[(ITEM_MAGENTA_DYE, 1), (TAG_ALT_68, 1)], result: (ITEM_MAGENTA_HARNESS, 1), name: "dye_magenta_harness" },
-    Recipe { needs: &[(ITEM_MAGENTA_DYE, 1), (TAG_ALT_69, 1)], result: (ITEM_MAGENTA_WOOL, 1), name: "dye_magenta_wool" },
-    Recipe { needs: &[(ITEM_MAGENTA_DYE, 1), (TAG_ALT_70, 1)], result: (ITEM_MAGENTA_WOOL_SLAB, 1), name: "dye_magenta_wool_slab" },
-    Recipe { needs: &[(ITEM_MAGENTA_DYE, 1), (TAG_ALT_71, 1)], result: (ITEM_MAGENTA_WOOL_STAIRS, 1), name: "dye_magenta_wool_stairs" },
-    Recipe { needs: &[(ITEM_ORANGE_DYE, 1), (TAG_ALT_72, 1)], result: (ITEM_ORANGE_BED, 1), name: "dye_orange_bed" },
-    Recipe { needs: &[(ITEM_ORANGE_DYE, 1), (TAG_ALT_73, 1)], result: (ITEM_ORANGE_CARPET, 1), name: "dye_orange_carpet" },
-    Recipe { needs: &[(ITEM_ORANGE_DYE, 1), (TAG_ALT_74, 1)], result: (ITEM_ORANGE_CUSHION, 1), name: "dye_orange_cushion" },
-    Recipe { needs: &[(ITEM_ORANGE_DYE, 1), (TAG_ALT_75, 1)], result: (ITEM_ORANGE_HARNESS, 1), name: "dye_orange_harness" },
-    Recipe { needs: &[(ITEM_ORANGE_DYE, 1), (TAG_ALT_76, 1)], result: (ITEM_ORANGE_WOOL, 1), name: "dye_orange_wool" },
-    Recipe { needs: &[(ITEM_ORANGE_DYE, 1), (TAG_ALT_77, 1)], result: (ITEM_ORANGE_WOOL_SLAB, 1), name: "dye_orange_wool_slab" },
-    Recipe { needs: &[(ITEM_ORANGE_DYE, 1), (TAG_ALT_78, 1)], result: (ITEM_ORANGE_WOOL_STAIRS, 1), name: "dye_orange_wool_stairs" },
-    Recipe { needs: &[(ITEM_PINK_DYE, 1), (TAG_ALT_79, 1)], result: (ITEM_PINK_BED, 1), name: "dye_pink_bed" },
-    Recipe { needs: &[(ITEM_PINK_DYE, 1), (TAG_ALT_80, 1)], result: (ITEM_PINK_CARPET, 1), name: "dye_pink_carpet" },
-    Recipe { needs: &[(ITEM_PINK_DYE, 1), (TAG_ALT_81, 1)], result: (ITEM_PINK_CUSHION, 1), name: "dye_pink_cushion" },
-    Recipe { needs: &[(ITEM_PINK_DYE, 1), (TAG_ALT_82, 1)], result: (ITEM_PINK_HARNESS, 1), name: "dye_pink_harness" },
-    Recipe { needs: &[(ITEM_PINK_DYE, 1), (TAG_ALT_83, 1)], result: (ITEM_PINK_WOOL, 1), name: "dye_pink_wool" },
-    Recipe { needs: &[(ITEM_PINK_DYE, 1), (TAG_ALT_84, 1)], result: (ITEM_PINK_WOOL_SLAB, 1), name: "dye_pink_wool_slab" },
-    Recipe { needs: &[(ITEM_PINK_DYE, 1), (TAG_ALT_85, 1)], result: (ITEM_PINK_WOOL_STAIRS, 1), name: "dye_pink_wool_stairs" },
-    Recipe { needs: &[(ITEM_PURPLE_DYE, 1), (TAG_ALT_86, 1)], result: (ITEM_PURPLE_BED, 1), name: "dye_purple_bed" },
-    Recipe { needs: &[(ITEM_PURPLE_DYE, 1), (TAG_ALT_87, 1)], result: (ITEM_PURPLE_CARPET, 1), name: "dye_purple_carpet" },
-    Recipe { needs: &[(ITEM_PURPLE_DYE, 1), (TAG_ALT_88, 1)], result: (ITEM_PURPLE_CUSHION, 1), name: "dye_purple_cushion" },
-    Recipe { needs: &[(ITEM_PURPLE_DYE, 1), (TAG_ALT_89, 1)], result: (ITEM_PURPLE_HARNESS, 1), name: "dye_purple_harness" },
-    Recipe { needs: &[(ITEM_PURPLE_DYE, 1), (TAG_ALT_90, 1)], result: (ITEM_PURPLE_WOOL, 1), name: "dye_purple_wool" },
-    Recipe { needs: &[(ITEM_PURPLE_DYE, 1), (TAG_ALT_91, 1)], result: (ITEM_PURPLE_WOOL_SLAB, 1), name: "dye_purple_wool_slab" },
-    Recipe { needs: &[(ITEM_PURPLE_DYE, 1), (TAG_ALT_92, 1)], result: (ITEM_PURPLE_WOOL_STAIRS, 1), name: "dye_purple_wool_stairs" },
-    Recipe { needs: &[(ITEM_RED_DYE, 1), (TAG_ALT_93, 1)], result: (ITEM_RED_BED, 1), name: "dye_red_bed" },
-    Recipe { needs: &[(ITEM_RED_DYE, 1), (TAG_ALT_94, 1)], result: (ITEM_RED_CARPET, 1), name: "dye_red_carpet" },
-    Recipe { needs: &[(ITEM_RED_DYE, 1), (TAG_ALT_95, 1)], result: (ITEM_RED_CUSHION, 1), name: "dye_red_cushion" },
-    Recipe { needs: &[(ITEM_RED_DYE, 1), (TAG_ALT_96, 1)], result: (ITEM_RED_HARNESS, 1), name: "dye_red_harness" },
-    Recipe { needs: &[(ITEM_RED_DYE, 1), (TAG_ALT_97, 1)], result: (ITEM_RED_WOOL, 1), name: "dye_red_wool" },
-    Recipe { needs: &[(ITEM_RED_DYE, 1), (TAG_ALT_98, 1)], result: (ITEM_RED_WOOL_SLAB, 1), name: "dye_red_wool_slab" },
-    Recipe { needs: &[(ITEM_RED_DYE, 1), (TAG_ALT_99, 1)], result: (ITEM_RED_WOOL_STAIRS, 1), name: "dye_red_wool_stairs" },
-    Recipe { needs: &[(ITEM_WHITE_DYE, 1), (TAG_ALT_100, 1)], result: (ITEM_WHITE_BED, 1), name: "dye_white_bed" },
-    Recipe { needs: &[(ITEM_WHITE_DYE, 1), (TAG_ALT_101, 1)], result: (ITEM_WHITE_CARPET, 1), name: "dye_white_carpet" },
-    Recipe { needs: &[(ITEM_WHITE_DYE, 1), (TAG_ALT_102, 1)], result: (ITEM_WHITE_CUSHION, 1), name: "dye_white_cushion" },
-    Recipe { needs: &[(ITEM_WHITE_DYE, 1), (TAG_ALT_103, 1)], result: (ITEM_WHITE_HARNESS, 1), name: "dye_white_harness" },
-    Recipe { needs: &[(ITEM_WHITE_DYE, 1), (TAG_ALT_104, 1)], result: (ITEM_WHITE_WOOL, 1), name: "dye_white_wool" },
-    Recipe { needs: &[(ITEM_WHITE_DYE, 1), (TAG_ALT_105, 1)], result: (ITEM_WHITE_WOOL_SLAB, 1), name: "dye_white_wool_slab" },
-    Recipe { needs: &[(ITEM_WHITE_DYE, 1), (TAG_ALT_106, 1)], result: (ITEM_WHITE_WOOL_STAIRS, 1), name: "dye_white_wool_stairs" },
-    Recipe { needs: &[(ITEM_YELLOW_DYE, 1), (TAG_ALT_107, 1)], result: (ITEM_YELLOW_BED, 1), name: "dye_yellow_bed" },
-    Recipe { needs: &[(ITEM_YELLOW_DYE, 1), (TAG_ALT_108, 1)], result: (ITEM_YELLOW_CARPET, 1), name: "dye_yellow_carpet" },
-    Recipe { needs: &[(ITEM_YELLOW_DYE, 1), (TAG_ALT_109, 1)], result: (ITEM_YELLOW_CUSHION, 1), name: "dye_yellow_cushion" },
-    Recipe { needs: &[(ITEM_YELLOW_DYE, 1), (TAG_ALT_110, 1)], result: (ITEM_YELLOW_HARNESS, 1), name: "dye_yellow_harness" },
-    Recipe { needs: &[(ITEM_YELLOW_DYE, 1), (TAG_ALT_111, 1)], result: (ITEM_YELLOW_WOOL, 1), name: "dye_yellow_wool" },
-    Recipe { needs: &[(ITEM_YELLOW_DYE, 1), (TAG_ALT_112, 1)], result: (ITEM_YELLOW_WOOL_SLAB, 1), name: "dye_yellow_wool_slab" },
-    Recipe { needs: &[(ITEM_YELLOW_DYE, 1), (TAG_ALT_113, 1)], result: (ITEM_YELLOW_WOOL_STAIRS, 1), name: "dye_yellow_wool_stairs" },
-    Recipe { needs: &[(ITEM_EMERALD_BLOCK, 1)], result: (ITEM_EMERALD, 9), name: "emerald" },
-    Recipe { needs: &[(ITEM_EMERALD, 9)], result: (ITEM_EMERALD_BLOCK, 1), name: "emerald_block" },
-    Recipe { needs: &[(ITEM_BOOK, 1), (ITEM_DIAMOND, 2), (ITEM_OBSIDIAN, 4)], result: (ITEM_ENCHANTING_TABLE, 1), name: "enchanting_table" },
-    Recipe { needs: &[(ITEM_ENDER_EYE, 1), (ITEM_GHAST_TEAR, 1), (ITEM_GLASS, 7)], result: (ITEM_END_CRYSTAL, 1), name: "end_crystal" },
-    Recipe { needs: &[(ITEM_BLAZE_ROD, 1), (ITEM_POPPED_CHORUS_FRUIT, 1)], result: (ITEM_END_ROD, 4), name: "end_rod" },
-    Recipe { needs: &[(ITEM_END_STONE_BRICKS, 3)], result: (ITEM_END_STONE_BRICK_SLAB, 6), name: "end_stone_brick_slab" },
-    Recipe { needs: &[(ITEM_END_STONE_BRICKS, 6)], result: (ITEM_END_STONE_BRICK_STAIRS, 4), name: "end_stone_brick_stairs" },
-    Recipe { needs: &[(ITEM_END_STONE_BRICKS, 6)], result: (ITEM_END_STONE_BRICK_WALL, 6), name: "end_stone_brick_wall" },
-    Recipe { needs: &[(ITEM_END_STONE, 4)], result: (ITEM_END_STONE_BRICKS, 4), name: "end_stone_bricks" },
-    Recipe { needs: &[(ITEM_ENDER_EYE, 1), (ITEM_OBSIDIAN, 8)], result: (ITEM_ENDER_CHEST, 1), name: "ender_chest" },
-    Recipe { needs: &[(ITEM_BLAZE_POWDER, 1), (ITEM_ENDER_PEARL, 1)], result: (ITEM_ENDER_EYE, 1), name: "ender_eye" },
-    Recipe { needs: &[(ITEM_EXPOSED_CUT_COPPER_SLAB, 2)], result: (ITEM_EXPOSED_CHISELED_COPPER, 1), name: "exposed_chiseled_copper" },
-    Recipe { needs: &[(ITEM_BLAZE_ROD, 1), (ITEM_EXPOSED_COPPER, 3), (ITEM_REDSTONE, 1)], result: (ITEM_EXPOSED_COPPER_BULB, 4), name: "exposed_copper_bulb" },
-    Recipe { needs: &[(ITEM_EXPOSED_COPPER, 4)], result: (ITEM_EXPOSED_COPPER_GRATE, 4), name: "exposed_copper_grate" },
-    Recipe { needs: &[(ITEM_EXPOSED_COPPER, 4)], result: (ITEM_EXPOSED_CUT_COPPER, 4), name: "exposed_cut_copper" },
-    Recipe { needs: &[(ITEM_EXPOSED_CUT_COPPER, 3)], result: (ITEM_EXPOSED_CUT_COPPER_SLAB, 6), name: "exposed_cut_copper_slab" },
-    Recipe { needs: &[(ITEM_EXPOSED_CUT_COPPER, 6)], result: (ITEM_EXPOSED_CUT_COPPER_STAIRS, 4), name: "exposed_cut_copper_stairs" },
-    Recipe { needs: &[(ITEM_DIAMOND, 7), (ITEM_END_STONE, 1), (ITEM_EYE_ARMOR_TRIM_SMITHING_TEMPLATE, 1)], result: (ITEM_EYE_ARMOR_TRIM_SMITHING_TEMPLATE, 2), name: "eye_armor_trim_smithing_template" },
-    Recipe { needs: &[(ITEM_BROWN_MUSHROOM, 1), (ITEM_SPIDER_EYE, 1), (ITEM_SUGAR, 1)], result: (ITEM_FERMENTED_SPIDER_EYE, 1), name: "fermented_spider_eye" },
-    Recipe { needs: &[(ITEM_BRICKS, 1), (ITEM_PAPER, 1)], result: (ITEM_FIELD_MASONED_BANNER_PATTERN, 1), name: "field_masoned_banner_pattern" },
-    Recipe { needs: &[(ITEM_BLAZE_POWDER, 1), (ITEM_GUNPOWDER, 1), (TAG_COALS, 1)], result: (ITEM_FIRE_CHARGE, 3), name: "fire_charge" },
-    Recipe { needs: &[(ITEM_GUNPOWDER, 1), (ITEM_PAPER, 1)], result: (ITEM_FIREWORK_ROCKET, 3), name: "firework_rocket_simple" },
-    Recipe { needs: &[(STICK, 3), (ITEM_STRING, 2)], result: (ITEM_FISHING_ROD, 1), name: "fishing_rod" },
-    Recipe { needs: &[(ITEM_FLINT, 2), (TAG_PLANKS, 4)], result: (ITEM_FLETCHING_TABLE, 1), name: "fletching_table" },
-    Recipe { needs: &[(ITEM_FLINT, 1), (ITEM_IRON_INGOT, 1)], result: (ITEM_FLINT_AND_STEEL, 1), name: "flint_and_steel" },
-    Recipe { needs: &[(ITEM_BREEZE_ROD, 1), (ITEM_DIAMOND, 7), (ITEM_FLOW_ARMOR_TRIM_SMITHING_TEMPLATE, 1)], result: (ITEM_FLOW_ARMOR_TRIM_SMITHING_TEMPLATE, 2), name: "flow_armor_trim_smithing_template" },
-    Recipe { needs: &[(ITEM_OXEYE_DAISY, 1), (ITEM_PAPER, 1)], result: (ITEM_FLOWER_BANNER_PATTERN, 1), name: "flower_banner_pattern" },
-    Recipe { needs: &[(ITEM_BRICK, 3)], result: (ITEM_FLOWER_POT, 1), name: "flower_pot" },
-    Recipe { needs: &[(TAG_STONE_CRAFTING_MATERIALS, 8)], result: (ITEM_FURNACE, 1), name: "furnace" },
-    Recipe { needs: &[(ITEM_FURNACE, 1), (ITEM_MINECART, 1)], result: (ITEM_FURNACE_MINECART, 1), name: "furnace_minecart" },
-    Recipe { needs: &[(ITEM_GLASS, 3)], result: (ITEM_GLASS_BOTTLE, 3), name: "glass_bottle" },
-    Recipe { needs: &[(ITEM_GLASS, 6)], result: (ITEM_GLASS_PANE, 16), name: "glass_pane" },
-    Recipe { needs: &[(ITEM_GOLD_NUGGET, 8), (ITEM_MELON_SLICE, 1)], result: (ITEM_GLISTERING_MELON_SLICE, 1), name: "glistering_melon_slice" },
-    Recipe { needs: &[(ITEM_GLOW_INK_SAC, 1), (ITEM_ITEM_FRAME, 1)], result: (ITEM_GLOW_ITEM_FRAME, 1), name: "glow_item_frame" },
-    Recipe { needs: &[(ITEM_GLOWSTONE_DUST, 4)], result: (ITEM_GLOWSTONE, 1), name: "glowstone" },
-    Recipe { needs: &[(ITEM_GOLD_INGOT, 9)], result: (ITEM_GOLD_BLOCK, 1), name: "gold_block" },
-    Recipe { needs: &[(ITEM_GOLD_BLOCK, 1)], result: (ITEM_GOLD_INGOT, 9), name: "gold_ingot_from_gold_block" },
-    Recipe { needs: &[(ITEM_GOLD_NUGGET, 9)], result: (ITEM_GOLD_INGOT, 1), name: "gold_ingot_from_nuggets" },
-    Recipe { needs: &[(ITEM_GOLD_INGOT, 1)], result: (ITEM_GOLD_NUGGET, 9), name: "gold_nugget" },
-    Recipe { needs: &[(ITEM_APPLE, 1), (ITEM_GOLD_INGOT, 8)], result: (ITEM_GOLDEN_APPLE, 1), name: "golden_apple" },
-    Recipe { needs: &[(STICK, 2), (TAG_GOLD_TOOL_MATERIALS, 3)], result: (ITEM_GOLDEN_AXE, 1), name: "golden_axe" },
-    Recipe { needs: &[(ITEM_GOLD_INGOT, 4)], result: (ITEM_GOLDEN_BOOTS, 1), name: "golden_boots" },
-    Recipe { needs: &[(ITEM_CARROT, 1), (ITEM_GOLD_NUGGET, 8)], result: (ITEM_GOLDEN_CARROT, 1), name: "golden_carrot" },
-    Recipe { needs: &[(ITEM_GOLD_INGOT, 8)], result: (ITEM_GOLDEN_CHESTPLATE, 1), name: "golden_chestplate" },
-    Recipe { needs: &[(ITEM_DANDELION, 1), (ITEM_GOLD_NUGGET, 8)], result: (ITEM_GOLDEN_DANDELION, 1), name: "golden_dandelion" },
-    Recipe { needs: &[(ITEM_GOLD_INGOT, 5)], result: (ITEM_GOLDEN_HELMET, 1), name: "golden_helmet" },
-    Recipe { needs: &[(STICK, 2), (TAG_GOLD_TOOL_MATERIALS, 2)], result: (ITEM_GOLDEN_HOE, 1), name: "golden_hoe" },
-    Recipe { needs: &[(ITEM_GOLD_INGOT, 7)], result: (ITEM_GOLDEN_LEGGINGS, 1), name: "golden_leggings" },
-    Recipe { needs: &[(STICK, 2), (TAG_GOLD_TOOL_MATERIALS, 3)], result: (ITEM_GOLDEN_PICKAXE, 1), name: "golden_pickaxe" },
-    Recipe { needs: &[(STICK, 2), (TAG_GOLD_TOOL_MATERIALS, 1)], result: (ITEM_GOLDEN_SHOVEL, 1), name: "golden_shovel" },
-    Recipe { needs: &[(STICK, 2), (TAG_GOLD_TOOL_MATERIALS, 1)], result: (ITEM_GOLDEN_SPEAR, 1), name: "golden_spear" },
-    Recipe { needs: &[(STICK, 1), (TAG_GOLD_TOOL_MATERIALS, 2)], result: (ITEM_GOLDEN_SWORD, 1), name: "golden_sword" },
-    Recipe { needs: &[(ITEM_DIORITE, 1), (ITEM_QUARTZ, 1)], result: (ITEM_GRANITE, 1), name: "granite" },
-    Recipe { needs: &[(ITEM_GRANITE, 3)], result: (ITEM_GRANITE_SLAB, 6), name: "granite_slab" },
-    Recipe { needs: &[(ITEM_GRANITE, 6)], result: (ITEM_GRANITE_STAIRS, 4), name: "granite_stairs" },
-    Recipe { needs: &[(ITEM_GRANITE, 6)], result: (ITEM_GRANITE_WALL, 6), name: "granite_wall" },
-    Recipe { needs: &[(ITEM_GRAY_WOOL, 6), (STICK, 1)], result: (ITEM_GRAY_BANNER, 1), name: "gray_banner" },
-    Recipe { needs: &[(ITEM_GRAY_WOOL, 3), (TAG_PLANKS, 3)], result: (ITEM_GRAY_BED, 1), name: "gray_bed" },
-    Recipe { needs: &[(ITEM_CANDLE, 1), (ITEM_GRAY_DYE, 1)], result: (ITEM_GRAY_CANDLE, 1), name: "gray_candle" },
-    Recipe { needs: &[(ITEM_GRAY_WOOL, 2)], result: (ITEM_GRAY_CARPET, 3), name: "gray_carpet" },
-    Recipe { needs: &[(ITEM_GRAVEL, 1), (ITEM_GRAVEL, 1), (ITEM_GRAVEL, 1), (ITEM_GRAVEL, 1), (ITEM_GRAY_DYE, 1), (ITEM_SAND, 1), (ITEM_SAND, 1), (ITEM_SAND, 1), (ITEM_SAND, 1)], result: (ITEM_GRAY_CONCRETE_POWDER, 8), name: "gray_concrete_powder" },
-    Recipe { needs: &[(ITEM_GRAY_CONCRETE, 3)], result: (ITEM_GRAY_CONCRETE_SLAB, 6), name: "gray_concrete_slab" },
-    Recipe { needs: &[(ITEM_GRAY_CONCRETE, 6)], result: (ITEM_GRAY_CONCRETE_STAIRS, 4), name: "gray_concrete_stairs" },
-    Recipe { needs: &[(ITEM_GRAY_WOOL_SLAB, 3)], result: (ITEM_GRAY_CUSHION, 1), name: "gray_cushion" },
-    Recipe { needs: &[(ITEM_BLACK_DYE, 1), (ITEM_WHITE_DYE, 1)], result: (ITEM_GRAY_DYE, 2), name: "gray_dye" },
-    Recipe { needs: &[(ITEM_CLOSED_EYEBLOSSOM, 1)], result: (ITEM_GRAY_DYE, 1), name: "gray_dye_from_closed_eyeblossom" },
-    Recipe { needs: &[(ITEM_GLASS, 2), (ITEM_GRAY_WOOL, 1), (ITEM_LEATHER, 3)], result: (ITEM_GRAY_HARNESS, 1), name: "gray_harness" },
-    Recipe { needs: &[(ITEM_GLASS, 8), (ITEM_GRAY_DYE, 1)], result: (ITEM_GRAY_STAINED_GLASS, 8), name: "gray_stained_glass" },
-    Recipe { needs: &[(ITEM_GRAY_STAINED_GLASS, 6)], result: (ITEM_GRAY_STAINED_GLASS_PANE, 16), name: "gray_stained_glass_pane" },
-    Recipe { needs: &[(ITEM_GLASS_PANE, 8), (ITEM_GRAY_DYE, 1)], result: (ITEM_GRAY_STAINED_GLASS_PANE, 8), name: "gray_stained_glass_pane_from_glass_pane" },
-    Recipe { needs: &[(ITEM_GRAY_DYE, 1), (ITEM_TERRACOTTA, 8)], result: (ITEM_GRAY_TERRACOTTA, 8), name: "gray_terracotta" },
-    Recipe { needs: &[(ITEM_GRAY_WOOL, 3)], result: (ITEM_GRAY_WOOL_SLAB, 6), name: "gray_wool_slab" },
-    Recipe { needs: &[(ITEM_GRAY_WOOL, 6)], result: (ITEM_GRAY_WOOL_STAIRS, 4), name: "gray_wool_stairs" },
-    Recipe { needs: &[(ITEM_GREEN_WOOL, 6), (STICK, 1)], result: (ITEM_GREEN_BANNER, 1), name: "green_banner" },
-    Recipe { needs: &[(ITEM_GREEN_WOOL, 3), (TAG_PLANKS, 3)], result: (ITEM_GREEN_BED, 1), name: "green_bed" },
-    Recipe { needs: &[(ITEM_CANDLE, 1), (ITEM_GREEN_DYE, 1)], result: (ITEM_GREEN_CANDLE, 1), name: "green_candle" },
-    Recipe { needs: &[(ITEM_GREEN_WOOL, 2)], result: (ITEM_GREEN_CARPET, 3), name: "green_carpet" },
-    Recipe { needs: &[(ITEM_GRAVEL, 1), (ITEM_GRAVEL, 1), (ITEM_GRAVEL, 1), (ITEM_GRAVEL, 1), (ITEM_GREEN_DYE, 1), (ITEM_SAND, 1), (ITEM_SAND, 1), (ITEM_SAND, 1), (ITEM_SAND, 1)], result: (ITEM_GREEN_CONCRETE_POWDER, 8), name: "green_concrete_powder" },
-    Recipe { needs: &[(ITEM_GREEN_CONCRETE, 3)], result: (ITEM_GREEN_CONCRETE_SLAB, 6), name: "green_concrete_slab" },
-    Recipe { needs: &[(ITEM_GREEN_CONCRETE, 6)], result: (ITEM_GREEN_CONCRETE_STAIRS, 4), name: "green_concrete_stairs" },
-    Recipe { needs: &[(ITEM_GREEN_WOOL_SLAB, 3)], result: (ITEM_GREEN_CUSHION, 1), name: "green_cushion" },
-    Recipe { needs: &[(ITEM_GLASS, 2), (ITEM_GREEN_WOOL, 1), (ITEM_LEATHER, 3)], result: (ITEM_GREEN_HARNESS, 1), name: "green_harness" },
-    Recipe { needs: &[(ITEM_GLASS, 8), (ITEM_GREEN_DYE, 1)], result: (ITEM_GREEN_STAINED_GLASS, 8), name: "green_stained_glass" },
-    Recipe { needs: &[(ITEM_GREEN_STAINED_GLASS, 6)], result: (ITEM_GREEN_STAINED_GLASS_PANE, 16), name: "green_stained_glass_pane" },
-    Recipe { needs: &[(ITEM_GLASS_PANE, 8), (ITEM_GREEN_DYE, 1)], result: (ITEM_GREEN_STAINED_GLASS_PANE, 8), name: "green_stained_glass_pane_from_glass_pane" },
-    Recipe { needs: &[(ITEM_GREEN_DYE, 1), (ITEM_TERRACOTTA, 8)], result: (ITEM_GREEN_TERRACOTTA, 8), name: "green_terracotta" },
-    Recipe { needs: &[(ITEM_GREEN_WOOL, 3)], result: (ITEM_GREEN_WOOL_SLAB, 6), name: "green_wool_slab" },
-    Recipe { needs: &[(ITEM_GREEN_WOOL, 6)], result: (ITEM_GREEN_WOOL_STAIRS, 4), name: "green_wool_stairs" },
-    Recipe { needs: &[(STICK, 2), (ITEM_STONE_SLAB, 1), (TAG_PLANKS, 2)], result: (ITEM_GRINDSTONE, 1), name: "grindstone" },
-    Recipe { needs: &[(WHEAT, 1), (WHEAT, 1), (WHEAT, 1), (WHEAT, 1), (WHEAT, 1), (WHEAT, 1), (WHEAT, 1), (WHEAT, 1), (WHEAT, 1)], result: (ITEM_HAY_BLOCK, 1), name: "hay_block" },
-    Recipe { needs: &[(ITEM_IRON_INGOT, 2)], result: (ITEM_HEAVY_WEIGHTED_PRESSURE_PLATE, 1), name: "heavy_weighted_pressure_plate" },
-    Recipe { needs: &[(ITEM_HONEY_BOTTLE, 4)], result: (ITEM_HONEY_BLOCK, 1), name: "honey_block" },
-    Recipe { needs: &[(ITEM_GLASS_BOTTLE, 1), (ITEM_GLASS_BOTTLE, 1), (ITEM_GLASS_BOTTLE, 1), (ITEM_GLASS_BOTTLE, 1), (ITEM_HONEY_BLOCK, 1)], result: (ITEM_HONEY_BOTTLE, 4), name: "honey_bottle" },
-    Recipe { needs: &[(ITEM_HONEYCOMB, 4)], result: (ITEM_HONEYCOMB_BLOCK, 1), name: "honeycomb_block" },
-    Recipe { needs: &[(ITEM_CHEST, 1), (ITEM_IRON_INGOT, 5)], result: (ITEM_HOPPER, 1), name: "hopper" },
-    Recipe { needs: &[(ITEM_HOPPER, 1), (ITEM_MINECART, 1)], result: (ITEM_HOPPER_MINECART, 1), name: "hopper_minecart" },
-    Recipe { needs: &[(ITEM_DIAMOND, 7), (ITEM_HOST_ARMOR_TRIM_SMITHING_TEMPLATE, 1), (ITEM_TERRACOTTA, 1)], result: (ITEM_HOST_ARMOR_TRIM_SMITHING_TEMPLATE, 2), name: "host_armor_trim_smithing_template" },
-    Recipe { needs: &[(STICK, 2), (TAG_IRON_TOOL_MATERIALS, 3)], result: (ITEM_IRON_AXE, 1), name: "iron_axe" },
-    Recipe { needs: &[(ITEM_IRON_INGOT, 6)], result: (ITEM_IRON_BARS, 16), name: "iron_bars" },
-    Recipe { needs: &[(ITEM_IRON_INGOT, 9)], result: (ITEM_IRON_BLOCK, 1), name: "iron_block" },
-    Recipe { needs: &[(ITEM_IRON_INGOT, 4)], result: (ITEM_IRON_BOOTS, 1), name: "iron_boots" },
-    Recipe { needs: &[(ITEM_IRON_INGOT, 1), (ITEM_IRON_NUGGET, 2)], result: (ITEM_IRON_CHAIN, 1), name: "iron_chain" },
-    Recipe { needs: &[(ITEM_IRON_INGOT, 8)], result: (ITEM_IRON_CHESTPLATE, 1), name: "iron_chestplate" },
-    Recipe { needs: &[(ITEM_IRON_INGOT, 6)], result: (ITEM_IRON_DOOR, 3), name: "iron_door" },
-    Recipe { needs: &[(ITEM_IRON_INGOT, 5)], result: (ITEM_IRON_HELMET, 1), name: "iron_helmet" },
-    Recipe { needs: &[(STICK, 2), (TAG_IRON_TOOL_MATERIALS, 2)], result: (ITEM_IRON_HOE, 1), name: "iron_hoe" },
-    Recipe { needs: &[(ITEM_IRON_BLOCK, 1)], result: (ITEM_IRON_INGOT, 9), name: "iron_ingot_from_iron_block" },
-    Recipe { needs: &[(ITEM_IRON_NUGGET, 9)], result: (ITEM_IRON_INGOT, 1), name: "iron_ingot_from_nuggets" },
-    Recipe { needs: &[(ITEM_IRON_INGOT, 7)], result: (ITEM_IRON_LEGGINGS, 1), name: "iron_leggings" },
-    Recipe { needs: &[(ITEM_IRON_INGOT, 1)], result: (ITEM_IRON_NUGGET, 9), name: "iron_nugget" },
-    Recipe { needs: &[(STICK, 2), (TAG_IRON_TOOL_MATERIALS, 3)], result: (ITEM_IRON_PICKAXE, 1), name: "iron_pickaxe" },
-    Recipe { needs: &[(STICK, 2), (TAG_IRON_TOOL_MATERIALS, 1)], result: (ITEM_IRON_SHOVEL, 1), name: "iron_shovel" },
-    Recipe { needs: &[(STICK, 2), (TAG_IRON_TOOL_MATERIALS, 1)], result: (ITEM_IRON_SPEAR, 1), name: "iron_spear" },
-    Recipe { needs: &[(STICK, 1), (TAG_IRON_TOOL_MATERIALS, 2)], result: (ITEM_IRON_SWORD, 1), name: "iron_sword" },
-    Recipe { needs: &[(ITEM_IRON_INGOT, 4)], result: (ITEM_IRON_TRAPDOOR, 1), name: "iron_trapdoor" },
-    Recipe { needs: &[(ITEM_LEATHER, 1), (STICK, 8)], result: (ITEM_ITEM_FRAME, 1), name: "item_frame" },
-    Recipe { needs: &[(ITEM_CARVED_PUMPKIN, 1), (TORCH, 1)], result: (ITEM_JACK_O_LANTERN, 1), name: "jack_o_lantern" },
-    Recipe { needs: &[(ITEM_DIAMOND, 1), (TAG_PLANKS, 8)], result: (ITEM_JUKEBOX, 1), name: "jukebox" },
-    Recipe { needs: &[(ITEM_JUNGLE_PLANKS, 5)], result: (ITEM_JUNGLE_BOAT, 1), name: "jungle_boat" },
-    Recipe { needs: &[(ITEM_JUNGLE_PLANKS, 1)], result: (ITEM_JUNGLE_BUTTON, 1), name: "jungle_button" },
-    Recipe { needs: &[(ITEM_CHEST, 1), (ITEM_JUNGLE_BOAT, 1)], result: (ITEM_JUNGLE_CHEST_BOAT, 1), name: "jungle_chest_boat" },
-    Recipe { needs: &[(ITEM_JUNGLE_PLANKS, 6)], result: (ITEM_JUNGLE_DOOR, 3), name: "jungle_door" },
-    Recipe { needs: &[(ITEM_JUNGLE_PLANKS, 4), (STICK, 2)], result: (ITEM_JUNGLE_FENCE, 3), name: "jungle_fence" },
-    Recipe { needs: &[(ITEM_JUNGLE_PLANKS, 2), (STICK, 4)], result: (ITEM_JUNGLE_FENCE_GATE, 1), name: "jungle_fence_gate" },
-    Recipe { needs: &[(ITEM_IRON_CHAIN, 2), (ITEM_STRIPPED_JUNGLE_LOG, 6)], result: (ITEM_JUNGLE_HANGING_SIGN, 6), name: "jungle_hanging_sign" },
-    Recipe { needs: &[(TAG_JUNGLE_LOGS, 1)], result: (ITEM_JUNGLE_PLANKS, 4), name: "jungle_planks" },
-    Recipe { needs: &[(ITEM_JUNGLE_PLANKS, 2)], result: (ITEM_JUNGLE_PRESSURE_PLATE, 1), name: "jungle_pressure_plate" },
-    Recipe { needs: &[(ITEM_STRIPPED_JUNGLE_LOG, 6)], result: (ITEM_JUNGLE_SHELF, 6), name: "jungle_shelf" },
-    Recipe { needs: &[(ITEM_JUNGLE_PLANKS, 6), (STICK, 1)], result: (ITEM_JUNGLE_SIGN, 3), name: "jungle_sign" },
-    Recipe { needs: &[(ITEM_JUNGLE_PLANKS, 3)], result: (ITEM_JUNGLE_SLAB, 6), name: "jungle_slab" },
-    Recipe { needs: &[(ITEM_JUNGLE_PLANKS, 6)], result: (ITEM_JUNGLE_STAIRS, 4), name: "jungle_stairs" },
-    Recipe { needs: &[(ITEM_JUNGLE_PLANKS, 6)], result: (ITEM_JUNGLE_TRAPDOOR, 2), name: "jungle_trapdoor" },
-    Recipe { needs: &[(ITEM_JUNGLE_LOG, 4)], result: (ITEM_JUNGLE_WOOD, 3), name: "jungle_wood" },
-    Recipe { needs: &[(STICK, 7)], result: (ITEM_LADDER, 3), name: "ladder" },
-    Recipe { needs: &[(ITEM_IRON_NUGGET, 8), (TORCH, 1)], result: (ITEM_LANTERN, 1), name: "lantern" },
-    Recipe { needs: &[(ITEM_LAPIS_LAZULI, 9)], result: (ITEM_LAPIS_BLOCK, 1), name: "lapis_block" },
-    Recipe { needs: &[(ITEM_LAPIS_BLOCK, 1)], result: (ITEM_LAPIS_LAZULI, 9), name: "lapis_lazuli" },
-    Recipe { needs: &[(ITEM_STRING, 5)], result: (ITEM_LEAD, 2), name: "lead" },
-    Recipe { needs: &[(ITEM_RABBIT_HIDE, 4)], result: (ITEM_LEATHER, 1), name: "leather" },
-    Recipe { needs: &[(ITEM_LEATHER, 4)], result: (ITEM_LEATHER_BOOTS, 1), name: "leather_boots" },
-    Recipe { needs: &[(ITEM_LEATHER, 8)], result: (ITEM_LEATHER_CHESTPLATE, 1), name: "leather_chestplate" },
-    Recipe { needs: &[(ITEM_LEATHER, 5)], result: (ITEM_LEATHER_HELMET, 1), name: "leather_helmet" },
-    Recipe { needs: &[(ITEM_LEATHER, 7)], result: (ITEM_LEATHER_HORSE_ARMOR, 1), name: "leather_horse_armor" },
-    Recipe { needs: &[(ITEM_LEATHER, 7)], result: (ITEM_LEATHER_LEGGINGS, 1), name: "leather_leggings" },
-    Recipe { needs: &[(ITEM_BOOKSHELF, 1), (TAG_WOODEN_SLABS, 4)], result: (ITEM_LECTERN, 1), name: "lectern" },
-    Recipe { needs: &[(COBBLESTONE, 1), (STICK, 1)], result: (ITEM_LEVER, 1), name: "lever" },
-    Recipe { needs: &[(ITEM_LIGHT_BLUE_WOOL, 6), (STICK, 1)], result: (ITEM_LIGHT_BLUE_BANNER, 1), name: "light_blue_banner" },
-    Recipe { needs: &[(ITEM_LIGHT_BLUE_WOOL, 3), (TAG_PLANKS, 3)], result: (ITEM_LIGHT_BLUE_BED, 1), name: "light_blue_bed" },
-    Recipe { needs: &[(ITEM_CANDLE, 1), (ITEM_LIGHT_BLUE_DYE, 1)], result: (ITEM_LIGHT_BLUE_CANDLE, 1), name: "light_blue_candle" },
-    Recipe { needs: &[(ITEM_LIGHT_BLUE_WOOL, 2)], result: (ITEM_LIGHT_BLUE_CARPET, 3), name: "light_blue_carpet" },
-    Recipe { needs: &[(ITEM_GRAVEL, 1), (ITEM_GRAVEL, 1), (ITEM_GRAVEL, 1), (ITEM_GRAVEL, 1), (ITEM_LIGHT_BLUE_DYE, 1), (ITEM_SAND, 1), (ITEM_SAND, 1), (ITEM_SAND, 1), (ITEM_SAND, 1)], result: (ITEM_LIGHT_BLUE_CONCRETE_POWDER, 8), name: "light_blue_concrete_powder" },
-    Recipe { needs: &[(ITEM_LIGHT_BLUE_CONCRETE, 3)], result: (ITEM_LIGHT_BLUE_CONCRETE_SLAB, 6), name: "light_blue_concrete_slab" },
-    Recipe { needs: &[(ITEM_LIGHT_BLUE_CONCRETE, 6)], result: (ITEM_LIGHT_BLUE_CONCRETE_STAIRS, 4), name: "light_blue_concrete_stairs" },
-    Recipe { needs: &[(ITEM_LIGHT_BLUE_WOOL_SLAB, 3)], result: (ITEM_LIGHT_BLUE_CUSHION, 1), name: "light_blue_cushion" },
-    Recipe { needs: &[(ITEM_BLUE_ORCHID, 1)], result: (ITEM_LIGHT_BLUE_DYE, 1), name: "light_blue_dye_from_blue_orchid" },
-    Recipe { needs: &[(ITEM_BLUE_DYE, 1), (ITEM_WHITE_DYE, 1)], result: (ITEM_LIGHT_BLUE_DYE, 2), name: "light_blue_dye_from_blue_white_dye" },
-    Recipe { needs: &[(ITEM_GLASS, 2), (ITEM_LEATHER, 3), (ITEM_LIGHT_BLUE_WOOL, 1)], result: (ITEM_LIGHT_BLUE_HARNESS, 1), name: "light_blue_harness" },
-    Recipe { needs: &[(ITEM_GLASS, 8), (ITEM_LIGHT_BLUE_DYE, 1)], result: (ITEM_LIGHT_BLUE_STAINED_GLASS, 8), name: "light_blue_stained_glass" },
-    Recipe { needs: &[(ITEM_LIGHT_BLUE_STAINED_GLASS, 6)], result: (ITEM_LIGHT_BLUE_STAINED_GLASS_PANE, 16), name: "light_blue_stained_glass_pane" },
-    Recipe { needs: &[(ITEM_GLASS_PANE, 8), (ITEM_LIGHT_BLUE_DYE, 1)], result: (ITEM_LIGHT_BLUE_STAINED_GLASS_PANE, 8), name: "light_blue_stained_glass_pane_from_glass_pane" },
-    Recipe { needs: &[(ITEM_LIGHT_BLUE_DYE, 1), (ITEM_TERRACOTTA, 8)], result: (ITEM_LIGHT_BLUE_TERRACOTTA, 8), name: "light_blue_terracotta" },
-    Recipe { needs: &[(ITEM_LIGHT_BLUE_WOOL, 3)], result: (ITEM_LIGHT_BLUE_WOOL_SLAB, 6), name: "light_blue_wool_slab" },
-    Recipe { needs: &[(ITEM_LIGHT_BLUE_WOOL, 6)], result: (ITEM_LIGHT_BLUE_WOOL_STAIRS, 4), name: "light_blue_wool_stairs" },
-    Recipe { needs: &[(ITEM_LIGHT_GRAY_WOOL, 6), (STICK, 1)], result: (ITEM_LIGHT_GRAY_BANNER, 1), name: "light_gray_banner" },
-    Recipe { needs: &[(ITEM_LIGHT_GRAY_WOOL, 3), (TAG_PLANKS, 3)], result: (ITEM_LIGHT_GRAY_BED, 1), name: "light_gray_bed" },
-    Recipe { needs: &[(ITEM_CANDLE, 1), (ITEM_LIGHT_GRAY_DYE, 1)], result: (ITEM_LIGHT_GRAY_CANDLE, 1), name: "light_gray_candle" },
-    Recipe { needs: &[(ITEM_LIGHT_GRAY_WOOL, 2)], result: (ITEM_LIGHT_GRAY_CARPET, 3), name: "light_gray_carpet" },
-    Recipe { needs: &[(ITEM_GRAVEL, 1), (ITEM_GRAVEL, 1), (ITEM_GRAVEL, 1), (ITEM_GRAVEL, 1), (ITEM_LIGHT_GRAY_DYE, 1), (ITEM_SAND, 1), (ITEM_SAND, 1), (ITEM_SAND, 1), (ITEM_SAND, 1)], result: (ITEM_LIGHT_GRAY_CONCRETE_POWDER, 8), name: "light_gray_concrete_powder" },
-    Recipe { needs: &[(ITEM_LIGHT_GRAY_CONCRETE, 3)], result: (ITEM_LIGHT_GRAY_CONCRETE_SLAB, 6), name: "light_gray_concrete_slab" },
-    Recipe { needs: &[(ITEM_LIGHT_GRAY_CONCRETE, 6)], result: (ITEM_LIGHT_GRAY_CONCRETE_STAIRS, 4), name: "light_gray_concrete_stairs" },
-    Recipe { needs: &[(ITEM_LIGHT_GRAY_WOOL_SLAB, 3)], result: (ITEM_LIGHT_GRAY_CUSHION, 1), name: "light_gray_cushion" },
-    Recipe { needs: &[(ITEM_AZURE_BLUET, 1)], result: (ITEM_LIGHT_GRAY_DYE, 1), name: "light_gray_dye_from_azure_bluet" },
-    Recipe { needs: &[(ITEM_BLACK_DYE, 1), (ITEM_WHITE_DYE, 1), (ITEM_WHITE_DYE, 1)], result: (ITEM_LIGHT_GRAY_DYE, 3), name: "light_gray_dye_from_black_white_dye" },
-    Recipe { needs: &[(ITEM_GRAY_DYE, 1), (ITEM_WHITE_DYE, 1)], result: (ITEM_LIGHT_GRAY_DYE, 2), name: "light_gray_dye_from_gray_white_dye" },
-    Recipe { needs: &[(ITEM_OXEYE_DAISY, 1)], result: (ITEM_LIGHT_GRAY_DYE, 1), name: "light_gray_dye_from_oxeye_daisy" },
-    Recipe { needs: &[(ITEM_WHITE_TULIP, 1)], result: (ITEM_LIGHT_GRAY_DYE, 1), name: "light_gray_dye_from_white_tulip" },
-    Recipe { needs: &[(ITEM_GLASS, 2), (ITEM_LEATHER, 3), (ITEM_LIGHT_GRAY_WOOL, 1)], result: (ITEM_LIGHT_GRAY_HARNESS, 1), name: "light_gray_harness" },
-    Recipe { needs: &[(ITEM_GLASS, 8), (ITEM_LIGHT_GRAY_DYE, 1)], result: (ITEM_LIGHT_GRAY_STAINED_GLASS, 8), name: "light_gray_stained_glass" },
-    Recipe { needs: &[(ITEM_LIGHT_GRAY_STAINED_GLASS, 6)], result: (ITEM_LIGHT_GRAY_STAINED_GLASS_PANE, 16), name: "light_gray_stained_glass_pane" },
-    Recipe { needs: &[(ITEM_GLASS_PANE, 8), (ITEM_LIGHT_GRAY_DYE, 1)], result: (ITEM_LIGHT_GRAY_STAINED_GLASS_PANE, 8), name: "light_gray_stained_glass_pane_from_glass_pane" },
-    Recipe { needs: &[(ITEM_LIGHT_GRAY_DYE, 1), (ITEM_TERRACOTTA, 8)], result: (ITEM_LIGHT_GRAY_TERRACOTTA, 8), name: "light_gray_terracotta" },
-    Recipe { needs: &[(ITEM_LIGHT_GRAY_WOOL, 3)], result: (ITEM_LIGHT_GRAY_WOOL_SLAB, 6), name: "light_gray_wool_slab" },
-    Recipe { needs: &[(ITEM_LIGHT_GRAY_WOOL, 6)], result: (ITEM_LIGHT_GRAY_WOOL_STAIRS, 4), name: "light_gray_wool_stairs" },
-    Recipe { needs: &[(ITEM_GOLD_INGOT, 2)], result: (ITEM_LIGHT_WEIGHTED_PRESSURE_PLATE, 1), name: "light_weighted_pressure_plate" },
-    Recipe { needs: &[(ITEM_COPPER_INGOT, 3)], result: (ITEM_LIGHTNING_ROD, 1), name: "lightning_rod" },
-    Recipe { needs: &[(ITEM_LIME_WOOL, 6), (STICK, 1)], result: (ITEM_LIME_BANNER, 1), name: "lime_banner" },
-    Recipe { needs: &[(ITEM_LIME_WOOL, 3), (TAG_PLANKS, 3)], result: (ITEM_LIME_BED, 1), name: "lime_bed" },
-    Recipe { needs: &[(ITEM_CANDLE, 1), (ITEM_LIME_DYE, 1)], result: (ITEM_LIME_CANDLE, 1), name: "lime_candle" },
-    Recipe { needs: &[(ITEM_LIME_WOOL, 2)], result: (ITEM_LIME_CARPET, 3), name: "lime_carpet" },
-    Recipe { needs: &[(ITEM_GRAVEL, 1), (ITEM_GRAVEL, 1), (ITEM_GRAVEL, 1), (ITEM_GRAVEL, 1), (ITEM_LIME_DYE, 1), (ITEM_SAND, 1), (ITEM_SAND, 1), (ITEM_SAND, 1), (ITEM_SAND, 1)], result: (ITEM_LIME_CONCRETE_POWDER, 8), name: "lime_concrete_powder" },
-    Recipe { needs: &[(ITEM_LIME_CONCRETE, 3)], result: (ITEM_LIME_CONCRETE_SLAB, 6), name: "lime_concrete_slab" },
-    Recipe { needs: &[(ITEM_LIME_CONCRETE, 6)], result: (ITEM_LIME_CONCRETE_STAIRS, 4), name: "lime_concrete_stairs" },
-    Recipe { needs: &[(ITEM_LIME_WOOL_SLAB, 3)], result: (ITEM_LIME_CUSHION, 1), name: "lime_cushion" },
-    Recipe { needs: &[(ITEM_GREEN_DYE, 1), (ITEM_WHITE_DYE, 1)], result: (ITEM_LIME_DYE, 2), name: "lime_dye" },
-    Recipe { needs: &[(ITEM_GLASS, 2), (ITEM_LEATHER, 3), (ITEM_LIME_WOOL, 1)], result: (ITEM_LIME_HARNESS, 1), name: "lime_harness" },
-    Recipe { needs: &[(ITEM_GLASS, 8), (ITEM_LIME_DYE, 1)], result: (ITEM_LIME_STAINED_GLASS, 8), name: "lime_stained_glass" },
-    Recipe { needs: &[(ITEM_LIME_STAINED_GLASS, 6)], result: (ITEM_LIME_STAINED_GLASS_PANE, 16), name: "lime_stained_glass_pane" },
-    Recipe { needs: &[(ITEM_GLASS_PANE, 8), (ITEM_LIME_DYE, 1)], result: (ITEM_LIME_STAINED_GLASS_PANE, 8), name: "lime_stained_glass_pane_from_glass_pane" },
-    Recipe { needs: &[(ITEM_LIME_DYE, 1), (ITEM_TERRACOTTA, 8)], result: (ITEM_LIME_TERRACOTTA, 8), name: "lime_terracotta" },
-    Recipe { needs: &[(ITEM_LIME_WOOL, 3)], result: (ITEM_LIME_WOOL_SLAB, 6), name: "lime_wool_slab" },
-    Recipe { needs: &[(ITEM_LIME_WOOL, 6)], result: (ITEM_LIME_WOOL_STAIRS, 4), name: "lime_wool_stairs" },
-    Recipe { needs: &[(ITEM_CHISELED_STONE_BRICKS, 8), (ITEM_IRON_INGOT, 1)], result: (ITEM_LODESTONE, 1), name: "lodestone" },
-    Recipe { needs: &[(ITEM_STRING, 2), (TAG_PLANKS, 2)], result: (ITEM_LOOM, 1), name: "loom" },
-    Recipe { needs: &[(ITEM_BREEZE_ROD, 1), (ITEM_HEAVY_CORE, 1)], result: (ITEM_MACE, 1), name: "mace" },
-    Recipe { needs: &[(ITEM_MAGENTA_WOOL, 6), (STICK, 1)], result: (ITEM_MAGENTA_BANNER, 1), name: "magenta_banner" },
-    Recipe { needs: &[(ITEM_MAGENTA_WOOL, 3), (TAG_PLANKS, 3)], result: (ITEM_MAGENTA_BED, 1), name: "magenta_bed" },
-    Recipe { needs: &[(ITEM_CANDLE, 1), (ITEM_MAGENTA_DYE, 1)], result: (ITEM_MAGENTA_CANDLE, 1), name: "magenta_candle" },
-    Recipe { needs: &[(ITEM_MAGENTA_WOOL, 2)], result: (ITEM_MAGENTA_CARPET, 3), name: "magenta_carpet" },
-    Recipe { needs: &[(ITEM_GRAVEL, 1), (ITEM_GRAVEL, 1), (ITEM_GRAVEL, 1), (ITEM_GRAVEL, 1), (ITEM_MAGENTA_DYE, 1), (ITEM_SAND, 1), (ITEM_SAND, 1), (ITEM_SAND, 1), (ITEM_SAND, 1)], result: (ITEM_MAGENTA_CONCRETE_POWDER, 8), name: "magenta_concrete_powder" },
-    Recipe { needs: &[(ITEM_MAGENTA_CONCRETE, 3)], result: (ITEM_MAGENTA_CONCRETE_SLAB, 6), name: "magenta_concrete_slab" },
-    Recipe { needs: &[(ITEM_MAGENTA_CONCRETE, 6)], result: (ITEM_MAGENTA_CONCRETE_STAIRS, 4), name: "magenta_concrete_stairs" },
-    Recipe { needs: &[(ITEM_MAGENTA_WOOL_SLAB, 3)], result: (ITEM_MAGENTA_CUSHION, 1), name: "magenta_cushion" },
-    Recipe { needs: &[(ITEM_ALLIUM, 1)], result: (ITEM_MAGENTA_DYE, 1), name: "magenta_dye_from_allium" },
-    Recipe { needs: &[(ITEM_BLUE_DYE, 1), (ITEM_PINK_DYE, 1), (ITEM_RED_DYE, 1)], result: (ITEM_MAGENTA_DYE, 3), name: "magenta_dye_from_blue_red_pink" },
-    Recipe { needs: &[(ITEM_BLUE_DYE, 1), (ITEM_RED_DYE, 1), (ITEM_RED_DYE, 1), (ITEM_WHITE_DYE, 1)], result: (ITEM_MAGENTA_DYE, 4), name: "magenta_dye_from_blue_red_white_dye" },
-    Recipe { needs: &[(ITEM_LILAC, 1)], result: (ITEM_MAGENTA_DYE, 2), name: "magenta_dye_from_lilac" },
-    Recipe { needs: &[(ITEM_PINK_DYE, 1), (ITEM_PURPLE_DYE, 1)], result: (ITEM_MAGENTA_DYE, 2), name: "magenta_dye_from_purple_and_pink" },
-    Recipe { needs: &[(ITEM_GLASS, 2), (ITEM_LEATHER, 3), (ITEM_MAGENTA_WOOL, 1)], result: (ITEM_MAGENTA_HARNESS, 1), name: "magenta_harness" },
-    Recipe { needs: &[(ITEM_GLASS, 8), (ITEM_MAGENTA_DYE, 1)], result: (ITEM_MAGENTA_STAINED_GLASS, 8), name: "magenta_stained_glass" },
-    Recipe { needs: &[(ITEM_MAGENTA_STAINED_GLASS, 6)], result: (ITEM_MAGENTA_STAINED_GLASS_PANE, 16), name: "magenta_stained_glass_pane" },
-    Recipe { needs: &[(ITEM_GLASS_PANE, 8), (ITEM_MAGENTA_DYE, 1)], result: (ITEM_MAGENTA_STAINED_GLASS_PANE, 8), name: "magenta_stained_glass_pane_from_glass_pane" },
-    Recipe { needs: &[(ITEM_MAGENTA_DYE, 1), (ITEM_TERRACOTTA, 8)], result: (ITEM_MAGENTA_TERRACOTTA, 8), name: "magenta_terracotta" },
-    Recipe { needs: &[(ITEM_MAGENTA_WOOL, 3)], result: (ITEM_MAGENTA_WOOL_SLAB, 6), name: "magenta_wool_slab" },
-    Recipe { needs: &[(ITEM_MAGENTA_WOOL, 6)], result: (ITEM_MAGENTA_WOOL_STAIRS, 4), name: "magenta_wool_stairs" },
-    Recipe { needs: &[(ITEM_MAGMA_CREAM, 4)], result: (ITEM_MAGMA_BLOCK, 1), name: "magma_block" },
-    Recipe { needs: &[(ITEM_BLAZE_POWDER, 1), (ITEM_SLIME_BALL, 1)], result: (ITEM_MAGMA_CREAM, 1), name: "magma_cream" },
-    Recipe { needs: &[(ITEM_MANGROVE_PLANKS, 5)], result: (ITEM_MANGROVE_BOAT, 1), name: "mangrove_boat" },
-    Recipe { needs: &[(ITEM_MANGROVE_PLANKS, 1)], result: (ITEM_MANGROVE_BUTTON, 1), name: "mangrove_button" },
-    Recipe { needs: &[(ITEM_CHEST, 1), (ITEM_MANGROVE_BOAT, 1)], result: (ITEM_MANGROVE_CHEST_BOAT, 1), name: "mangrove_chest_boat" },
-    Recipe { needs: &[(ITEM_MANGROVE_PLANKS, 6)], result: (ITEM_MANGROVE_DOOR, 3), name: "mangrove_door" },
-    Recipe { needs: &[(ITEM_MANGROVE_PLANKS, 4), (STICK, 2)], result: (ITEM_MANGROVE_FENCE, 3), name: "mangrove_fence" },
-    Recipe { needs: &[(ITEM_MANGROVE_PLANKS, 2), (STICK, 4)], result: (ITEM_MANGROVE_FENCE_GATE, 1), name: "mangrove_fence_gate" },
-    Recipe { needs: &[(ITEM_IRON_CHAIN, 2), (ITEM_STRIPPED_MANGROVE_LOG, 6)], result: (ITEM_MANGROVE_HANGING_SIGN, 6), name: "mangrove_hanging_sign" },
-    Recipe { needs: &[(TAG_MANGROVE_LOGS, 1)], result: (ITEM_MANGROVE_PLANKS, 4), name: "mangrove_planks" },
-    Recipe { needs: &[(ITEM_MANGROVE_PLANKS, 2)], result: (ITEM_MANGROVE_PRESSURE_PLATE, 1), name: "mangrove_pressure_plate" },
-    Recipe { needs: &[(ITEM_STRIPPED_MANGROVE_LOG, 6)], result: (ITEM_MANGROVE_SHELF, 6), name: "mangrove_shelf" },
-    Recipe { needs: &[(ITEM_MANGROVE_PLANKS, 6), (STICK, 1)], result: (ITEM_MANGROVE_SIGN, 3), name: "mangrove_sign" },
-    Recipe { needs: &[(ITEM_MANGROVE_PLANKS, 3)], result: (ITEM_MANGROVE_SLAB, 6), name: "mangrove_slab" },
-    Recipe { needs: &[(ITEM_MANGROVE_PLANKS, 6)], result: (ITEM_MANGROVE_STAIRS, 4), name: "mangrove_stairs" },
-    Recipe { needs: &[(ITEM_MANGROVE_PLANKS, 6)], result: (ITEM_MANGROVE_TRAPDOOR, 2), name: "mangrove_trapdoor" },
-    Recipe { needs: &[(ITEM_MANGROVE_LOG, 4)], result: (ITEM_MANGROVE_WOOD, 3), name: "mangrove_wood" },
-    Recipe { needs: &[(ITEM_COMPASS, 1), (ITEM_PAPER, 8)], result: (ITEM_MAP, 1), name: "map" },
-    Recipe { needs: &[(ITEM_MELON_SLICE, 1), (ITEM_MELON_SLICE, 1), (ITEM_MELON_SLICE, 1), (ITEM_MELON_SLICE, 1), (ITEM_MELON_SLICE, 1), (ITEM_MELON_SLICE, 1), (ITEM_MELON_SLICE, 1), (ITEM_MELON_SLICE, 1), (ITEM_MELON_SLICE, 1)], result: (ITEM_MELON, 1), name: "melon" },
-    Recipe { needs: &[(ITEM_MELON_SLICE, 1)], result: (ITEM_MELON_SEEDS, 1), name: "melon_seeds" },
-    Recipe { needs: &[(ITEM_IRON_INGOT, 5)], result: (ITEM_MINECART, 1), name: "minecart" },
-    Recipe { needs: &[(ITEM_ENCHANTED_GOLDEN_APPLE, 1), (ITEM_PAPER, 1)], result: (ITEM_MOJANG_BANNER_PATTERN, 1), name: "mojang_banner_pattern" },
-    Recipe { needs: &[(ITEM_MOSS_BLOCK, 2)], result: (ITEM_MOSS_CARPET, 3), name: "moss_carpet" },
-    Recipe { needs: &[(COBBLESTONE, 1), (ITEM_MOSS_BLOCK, 1)], result: (ITEM_MOSSY_COBBLESTONE, 1), name: "mossy_cobblestone_from_moss_block" },
-    Recipe { needs: &[(COBBLESTONE, 1), (ITEM_VINE, 1)], result: (ITEM_MOSSY_COBBLESTONE, 1), name: "mossy_cobblestone_from_vine" },
-    Recipe { needs: &[(ITEM_MOSSY_COBBLESTONE, 3)], result: (ITEM_MOSSY_COBBLESTONE_SLAB, 6), name: "mossy_cobblestone_slab" },
-    Recipe { needs: &[(ITEM_MOSSY_COBBLESTONE, 6)], result: (ITEM_MOSSY_COBBLESTONE_STAIRS, 4), name: "mossy_cobblestone_stairs" },
-    Recipe { needs: &[(ITEM_MOSSY_COBBLESTONE, 6)], result: (ITEM_MOSSY_COBBLESTONE_WALL, 6), name: "mossy_cobblestone_wall" },
-    Recipe { needs: &[(ITEM_MOSSY_STONE_BRICKS, 3)], result: (ITEM_MOSSY_STONE_BRICK_SLAB, 6), name: "mossy_stone_brick_slab" },
-    Recipe { needs: &[(ITEM_MOSSY_STONE_BRICKS, 6)], result: (ITEM_MOSSY_STONE_BRICK_STAIRS, 4), name: "mossy_stone_brick_stairs" },
-    Recipe { needs: &[(ITEM_MOSSY_STONE_BRICKS, 6)], result: (ITEM_MOSSY_STONE_BRICK_WALL, 6), name: "mossy_stone_brick_wall" },
-    Recipe { needs: &[(ITEM_MOSS_BLOCK, 1), (ITEM_STONE_BRICKS, 1)], result: (ITEM_MOSSY_STONE_BRICKS, 1), name: "mossy_stone_bricks_from_moss_block" },
-    Recipe { needs: &[(ITEM_STONE_BRICKS, 1), (ITEM_VINE, 1)], result: (ITEM_MOSSY_STONE_BRICKS, 1), name: "mossy_stone_bricks_from_vine" },
-    Recipe { needs: &[(ITEM_MUD_BRICKS, 3)], result: (ITEM_MUD_BRICK_SLAB, 6), name: "mud_brick_slab" },
-    Recipe { needs: &[(ITEM_MUD_BRICKS, 6)], result: (ITEM_MUD_BRICK_STAIRS, 4), name: "mud_brick_stairs" },
-    Recipe { needs: &[(ITEM_MUD_BRICKS, 6)], result: (ITEM_MUD_BRICK_WALL, 6), name: "mud_brick_wall" },
-    Recipe { needs: &[(ITEM_PACKED_MUD, 4)], result: (ITEM_MUD_BRICKS, 4), name: "mud_bricks" },
-    Recipe { needs: &[(ITEM_MANGROVE_ROOTS, 1), (ITEM_MUD, 1)], result: (ITEM_MUDDY_MANGROVE_ROOTS, 1), name: "muddy_mangrove_roots" },
-    Recipe { needs: &[(ITEM_BOWL, 1), (TAG_MUSHROOMS, 1), (TAG_MUSHROOMS, 1)], result: (ITEM_MUSHROOM_STEW, 1), name: "mushroom_stew" },
-    Recipe { needs: &[(ITEM_DISC_FRAGMENT_5, 1), (ITEM_DISC_FRAGMENT_5, 1), (ITEM_DISC_FRAGMENT_5, 1), (ITEM_DISC_FRAGMENT_5, 1), (ITEM_DISC_FRAGMENT_5, 1), (ITEM_DISC_FRAGMENT_5, 1), (ITEM_DISC_FRAGMENT_5, 1), (ITEM_DISC_FRAGMENT_5, 1), (ITEM_DISC_FRAGMENT_5, 1)], result: (ITEM_MUSIC_DISC_5, 1), name: "music_disc_5" },
-    Recipe { needs: &[(ITEM_PAPER, 1), (TAG_METAL_NUGGETS, 1)], result: (ITEM_NAME_TAG, 1), name: "name_tag" },
-    Recipe { needs: &[(ITEM_NETHER_BRICK, 2), (ITEM_NETHER_BRICKS, 4)], result: (ITEM_NETHER_BRICK_FENCE, 6), name: "nether_brick_fence" },
-    Recipe { needs: &[(ITEM_NETHER_BRICKS, 3)], result: (ITEM_NETHER_BRICK_SLAB, 6), name: "nether_brick_slab" },
-    Recipe { needs: &[(ITEM_NETHER_BRICKS, 6)], result: (ITEM_NETHER_BRICK_STAIRS, 4), name: "nether_brick_stairs" },
-    Recipe { needs: &[(ITEM_NETHER_BRICKS, 6)], result: (ITEM_NETHER_BRICK_WALL, 6), name: "nether_brick_wall" },
-    Recipe { needs: &[(ITEM_NETHER_BRICK, 4)], result: (ITEM_NETHER_BRICKS, 1), name: "nether_bricks" },
-    Recipe { needs: &[(ITEM_NETHER_WART, 1), (ITEM_NETHER_WART, 1), (ITEM_NETHER_WART, 1), (ITEM_NETHER_WART, 1), (ITEM_NETHER_WART, 1), (ITEM_NETHER_WART, 1), (ITEM_NETHER_WART, 1), (ITEM_NETHER_WART, 1), (ITEM_NETHER_WART, 1)], result: (ITEM_NETHER_WART_BLOCK, 1), name: "nether_wart_block" },
-    Recipe { needs: &[(ITEM_NETHERITE_INGOT, 9)], result: (ITEM_NETHERITE_BLOCK, 1), name: "netherite_block" },
-    Recipe { needs: &[(ITEM_GOLD_INGOT, 1), (ITEM_GOLD_INGOT, 1), (ITEM_GOLD_INGOT, 1), (ITEM_GOLD_INGOT, 1), (ITEM_NETHERITE_SCRAP, 1), (ITEM_NETHERITE_SCRAP, 1), (ITEM_NETHERITE_SCRAP, 1), (ITEM_NETHERITE_SCRAP, 1)], result: (ITEM_NETHERITE_INGOT, 1), name: "netherite_ingot" },
-    Recipe { needs: &[(ITEM_NETHERITE_BLOCK, 1)], result: (ITEM_NETHERITE_INGOT, 9), name: "netherite_ingot_from_netherite_block" },
-    Recipe { needs: &[(ITEM_DIAMOND, 7), (ITEM_NETHERITE_UPGRADE_SMITHING_TEMPLATE, 1), (ITEM_NETHERRACK, 1)], result: (ITEM_NETHERITE_UPGRADE_SMITHING_TEMPLATE, 2), name: "netherite_upgrade_smithing_template" },
-    Recipe { needs: &[(ITEM_REDSTONE, 1), (TAG_PLANKS, 8)], result: (ITEM_NOTE_BLOCK, 1), name: "note_block" },
-    Recipe { needs: &[(OAK_PLANKS, 5)], result: (ITEM_OAK_BOAT, 1), name: "oak_boat" },
-    Recipe { needs: &[(OAK_PLANKS, 1)], result: (ITEM_OAK_BUTTON, 1), name: "oak_button" },
-    Recipe { needs: &[(ITEM_CHEST, 1), (ITEM_OAK_BOAT, 1)], result: (ITEM_OAK_CHEST_BOAT, 1), name: "oak_chest_boat" },
-    Recipe { needs: &[(OAK_PLANKS, 6)], result: (ITEM_OAK_DOOR, 3), name: "oak_door" },
-    Recipe { needs: &[(OAK_PLANKS, 4), (STICK, 2)], result: (ITEM_OAK_FENCE, 3), name: "oak_fence" },
-    Recipe { needs: &[(OAK_PLANKS, 2), (STICK, 4)], result: (ITEM_OAK_FENCE_GATE, 1), name: "oak_fence_gate" },
-    Recipe { needs: &[(ITEM_IRON_CHAIN, 2), (ITEM_STRIPPED_OAK_LOG, 6)], result: (ITEM_OAK_HANGING_SIGN, 6), name: "oak_hanging_sign" },
-    Recipe { needs: &[(TAG_OAK_LOGS, 1)], result: (OAK_PLANKS, 4), name: "oak_planks" },
-    Recipe { needs: &[(OAK_PLANKS, 2)], result: (ITEM_OAK_PRESSURE_PLATE, 1), name: "oak_pressure_plate" },
-    Recipe { needs: &[(ITEM_STRIPPED_OAK_LOG, 6)], result: (ITEM_OAK_SHELF, 6), name: "oak_shelf" },
-    Recipe { needs: &[(OAK_PLANKS, 6), (STICK, 1)], result: (ITEM_OAK_SIGN, 3), name: "oak_sign" },
-    Recipe { needs: &[(OAK_PLANKS, 3)], result: (ITEM_OAK_SLAB, 6), name: "oak_slab" },
-    Recipe { needs: &[(OAK_PLANKS, 6)], result: (ITEM_OAK_STAIRS, 4), name: "oak_stairs" },
-    Recipe { needs: &[(OAK_PLANKS, 6)], result: (ITEM_OAK_TRAPDOOR, 2), name: "oak_trapdoor" },
-    Recipe { needs: &[(OAK_LOG, 4)], result: (ITEM_OAK_WOOD, 3), name: "oak_wood" },
-    Recipe { needs: &[(COBBLESTONE, 6), (ITEM_QUARTZ, 1), (ITEM_REDSTONE, 2)], result: (ITEM_OBSERVER, 1), name: "observer" },
-    Recipe { needs: &[(ITEM_ORANGE_WOOL, 6), (STICK, 1)], result: (ITEM_ORANGE_BANNER, 1), name: "orange_banner" },
-    Recipe { needs: &[(ITEM_ORANGE_WOOL, 3), (TAG_PLANKS, 3)], result: (ITEM_ORANGE_BED, 1), name: "orange_bed" },
-    Recipe { needs: &[(ITEM_CANDLE, 1), (ITEM_ORANGE_DYE, 1)], result: (ITEM_ORANGE_CANDLE, 1), name: "orange_candle" },
-    Recipe { needs: &[(ITEM_ORANGE_WOOL, 2)], result: (ITEM_ORANGE_CARPET, 3), name: "orange_carpet" },
-    Recipe { needs: &[(ITEM_GRAVEL, 1), (ITEM_GRAVEL, 1), (ITEM_GRAVEL, 1), (ITEM_GRAVEL, 1), (ITEM_ORANGE_DYE, 1), (ITEM_SAND, 1), (ITEM_SAND, 1), (ITEM_SAND, 1), (ITEM_SAND, 1)], result: (ITEM_ORANGE_CONCRETE_POWDER, 8), name: "orange_concrete_powder" },
-    Recipe { needs: &[(ITEM_ORANGE_CONCRETE, 3)], result: (ITEM_ORANGE_CONCRETE_SLAB, 6), name: "orange_concrete_slab" },
-    Recipe { needs: &[(ITEM_ORANGE_CONCRETE, 6)], result: (ITEM_ORANGE_CONCRETE_STAIRS, 4), name: "orange_concrete_stairs" },
-    Recipe { needs: &[(ITEM_ORANGE_WOOL_SLAB, 3)], result: (ITEM_ORANGE_CUSHION, 1), name: "orange_cushion" },
-    Recipe { needs: &[(ITEM_OPEN_EYEBLOSSOM, 1)], result: (ITEM_ORANGE_DYE, 1), name: "orange_dye_from_open_eyeblossom" },
-    Recipe { needs: &[(ITEM_ORANGE_TULIP, 1)], result: (ITEM_ORANGE_DYE, 1), name: "orange_dye_from_orange_tulip" },
-    Recipe { needs: &[(ITEM_RED_DYE, 1), (ITEM_YELLOW_DYE, 1)], result: (ITEM_ORANGE_DYE, 2), name: "orange_dye_from_red_yellow" },
-    Recipe { needs: &[(ITEM_TORCHFLOWER, 1)], result: (ITEM_ORANGE_DYE, 1), name: "orange_dye_from_torchflower" },
-    Recipe { needs: &[(ITEM_GLASS, 2), (ITEM_LEATHER, 3), (ITEM_ORANGE_WOOL, 1)], result: (ITEM_ORANGE_HARNESS, 1), name: "orange_harness" },
-    Recipe { needs: &[(ITEM_GLASS, 8), (ITEM_ORANGE_DYE, 1)], result: (ITEM_ORANGE_STAINED_GLASS, 8), name: "orange_stained_glass" },
-    Recipe { needs: &[(ITEM_ORANGE_STAINED_GLASS, 6)], result: (ITEM_ORANGE_STAINED_GLASS_PANE, 16), name: "orange_stained_glass_pane" },
-    Recipe { needs: &[(ITEM_GLASS_PANE, 8), (ITEM_ORANGE_DYE, 1)], result: (ITEM_ORANGE_STAINED_GLASS_PANE, 8), name: "orange_stained_glass_pane_from_glass_pane" },
-    Recipe { needs: &[(ITEM_ORANGE_DYE, 1), (ITEM_TERRACOTTA, 8)], result: (ITEM_ORANGE_TERRACOTTA, 8), name: "orange_terracotta" },
-    Recipe { needs: &[(ITEM_ORANGE_WOOL, 3)], result: (ITEM_ORANGE_WOOL_SLAB, 6), name: "orange_wool_slab" },
-    Recipe { needs: &[(ITEM_ORANGE_WOOL, 6)], result: (ITEM_ORANGE_WOOL_STAIRS, 4), name: "orange_wool_stairs" },
-    Recipe { needs: &[(ITEM_OXIDIZED_CUT_COPPER_SLAB, 2)], result: (ITEM_OXIDIZED_CHISELED_COPPER, 1), name: "oxidized_chiseled_copper" },
-    Recipe { needs: &[(ITEM_BLAZE_ROD, 1), (ITEM_OXIDIZED_COPPER, 3), (ITEM_REDSTONE, 1)], result: (ITEM_OXIDIZED_COPPER_BULB, 4), name: "oxidized_copper_bulb" },
-    Recipe { needs: &[(ITEM_OXIDIZED_COPPER, 4)], result: (ITEM_OXIDIZED_COPPER_GRATE, 4), name: "oxidized_copper_grate" },
-    Recipe { needs: &[(ITEM_OXIDIZED_COPPER, 4)], result: (ITEM_OXIDIZED_CUT_COPPER, 4), name: "oxidized_cut_copper" },
-    Recipe { needs: &[(ITEM_OXIDIZED_CUT_COPPER, 3)], result: (ITEM_OXIDIZED_CUT_COPPER_SLAB, 6), name: "oxidized_cut_copper_slab" },
-    Recipe { needs: &[(ITEM_OXIDIZED_CUT_COPPER, 6)], result: (ITEM_OXIDIZED_CUT_COPPER_STAIRS, 4), name: "oxidized_cut_copper_stairs" },
-    Recipe { needs: &[(ITEM_ICE, 1), (ITEM_ICE, 1), (ITEM_ICE, 1), (ITEM_ICE, 1), (ITEM_ICE, 1), (ITEM_ICE, 1), (ITEM_ICE, 1), (ITEM_ICE, 1), (ITEM_ICE, 1)], result: (ITEM_PACKED_ICE, 1), name: "packed_ice" },
-    Recipe { needs: &[(ITEM_MUD, 1), (WHEAT, 1)], result: (ITEM_PACKED_MUD, 1), name: "packed_mud" },
-    Recipe { needs: &[(STICK, 8), (TAG_SULFUR_CUBE_ARCHETYPE_LIGHT, 1)], result: (ITEM_PAINTING, 1), name: "painting" },
-    Recipe { needs: &[(ITEM_PALE_MOSS_BLOCK, 2)], result: (ITEM_PALE_MOSS_CARPET, 3), name: "pale_moss_carpet" },
-    Recipe { needs: &[(ITEM_PALE_OAK_PLANKS, 5)], result: (ITEM_PALE_OAK_BOAT, 1), name: "pale_oak_boat" },
-    Recipe { needs: &[(ITEM_PALE_OAK_PLANKS, 1)], result: (ITEM_PALE_OAK_BUTTON, 1), name: "pale_oak_button" },
-    Recipe { needs: &[(ITEM_CHEST, 1), (ITEM_PALE_OAK_BOAT, 1)], result: (ITEM_PALE_OAK_CHEST_BOAT, 1), name: "pale_oak_chest_boat" },
-    Recipe { needs: &[(ITEM_PALE_OAK_PLANKS, 6)], result: (ITEM_PALE_OAK_DOOR, 3), name: "pale_oak_door" },
-    Recipe { needs: &[(ITEM_PALE_OAK_PLANKS, 4), (STICK, 2)], result: (ITEM_PALE_OAK_FENCE, 3), name: "pale_oak_fence" },
-    Recipe { needs: &[(ITEM_PALE_OAK_PLANKS, 2), (STICK, 4)], result: (ITEM_PALE_OAK_FENCE_GATE, 1), name: "pale_oak_fence_gate" },
-    Recipe { needs: &[(ITEM_IRON_CHAIN, 2), (ITEM_STRIPPED_PALE_OAK_LOG, 6)], result: (ITEM_PALE_OAK_HANGING_SIGN, 6), name: "pale_oak_hanging_sign" },
-    Recipe { needs: &[(TAG_PALE_OAK_LOGS, 1)], result: (ITEM_PALE_OAK_PLANKS, 4), name: "pale_oak_planks" },
-    Recipe { needs: &[(ITEM_PALE_OAK_PLANKS, 2)], result: (ITEM_PALE_OAK_PRESSURE_PLATE, 1), name: "pale_oak_pressure_plate" },
-    Recipe { needs: &[(ITEM_STRIPPED_PALE_OAK_LOG, 6)], result: (ITEM_PALE_OAK_SHELF, 6), name: "pale_oak_shelf" },
-    Recipe { needs: &[(ITEM_PALE_OAK_PLANKS, 6), (STICK, 1)], result: (ITEM_PALE_OAK_SIGN, 3), name: "pale_oak_sign" },
-    Recipe { needs: &[(ITEM_PALE_OAK_PLANKS, 3)], result: (ITEM_PALE_OAK_SLAB, 6), name: "pale_oak_slab" },
-    Recipe { needs: &[(ITEM_PALE_OAK_PLANKS, 6)], result: (ITEM_PALE_OAK_STAIRS, 4), name: "pale_oak_stairs" },
-    Recipe { needs: &[(ITEM_PALE_OAK_PLANKS, 6)], result: (ITEM_PALE_OAK_TRAPDOOR, 2), name: "pale_oak_trapdoor" },
-    Recipe { needs: &[(ITEM_PALE_OAK_LOG, 4)], result: (ITEM_PALE_OAK_WOOD, 3), name: "pale_oak_wood" },
-    Recipe { needs: &[(ITEM_SUGAR_CANE, 3)], result: (ITEM_PAPER, 3), name: "paper" },
-    Recipe { needs: &[(ITEM_PINK_WOOL, 6), (STICK, 1)], result: (ITEM_PINK_BANNER, 1), name: "pink_banner" },
-    Recipe { needs: &[(ITEM_PINK_WOOL, 3), (TAG_PLANKS, 3)], result: (ITEM_PINK_BED, 1), name: "pink_bed" },
-    Recipe { needs: &[(ITEM_CANDLE, 1), (ITEM_PINK_DYE, 1)], result: (ITEM_PINK_CANDLE, 1), name: "pink_candle" },
-    Recipe { needs: &[(ITEM_PINK_WOOL, 2)], result: (ITEM_PINK_CARPET, 3), name: "pink_carpet" },
-    Recipe { needs: &[(ITEM_GRAVEL, 1), (ITEM_GRAVEL, 1), (ITEM_GRAVEL, 1), (ITEM_GRAVEL, 1), (ITEM_PINK_DYE, 1), (ITEM_SAND, 1), (ITEM_SAND, 1), (ITEM_SAND, 1), (ITEM_SAND, 1)], result: (ITEM_PINK_CONCRETE_POWDER, 8), name: "pink_concrete_powder" },
-    Recipe { needs: &[(ITEM_PINK_CONCRETE, 3)], result: (ITEM_PINK_CONCRETE_SLAB, 6), name: "pink_concrete_slab" },
-    Recipe { needs: &[(ITEM_PINK_CONCRETE, 6)], result: (ITEM_PINK_CONCRETE_STAIRS, 4), name: "pink_concrete_stairs" },
-    Recipe { needs: &[(ITEM_PINK_WOOL_SLAB, 3)], result: (ITEM_PINK_CUSHION, 1), name: "pink_cushion" },
-    Recipe { needs: &[(ITEM_CACTUS_FLOWER, 1)], result: (ITEM_PINK_DYE, 1), name: "pink_dye_from_cactus_flower" },
-    Recipe { needs: &[(ITEM_PEONY, 1)], result: (ITEM_PINK_DYE, 2), name: "pink_dye_from_peony" },
-    Recipe { needs: &[(ITEM_PINK_PETALS, 1)], result: (ITEM_PINK_DYE, 1), name: "pink_dye_from_pink_petals" },
-    Recipe { needs: &[(ITEM_PINK_TULIP, 1)], result: (ITEM_PINK_DYE, 1), name: "pink_dye_from_pink_tulip" },
-    Recipe { needs: &[(ITEM_RED_DYE, 1), (ITEM_WHITE_DYE, 1)], result: (ITEM_PINK_DYE, 2), name: "pink_dye_from_red_white_dye" },
-    Recipe { needs: &[(ITEM_GLASS, 2), (ITEM_LEATHER, 3), (ITEM_PINK_WOOL, 1)], result: (ITEM_PINK_HARNESS, 1), name: "pink_harness" },
-    Recipe { needs: &[(ITEM_GLASS, 8), (ITEM_PINK_DYE, 1)], result: (ITEM_PINK_STAINED_GLASS, 8), name: "pink_stained_glass" },
-    Recipe { needs: &[(ITEM_PINK_STAINED_GLASS, 6)], result: (ITEM_PINK_STAINED_GLASS_PANE, 16), name: "pink_stained_glass_pane" },
-    Recipe { needs: &[(ITEM_GLASS_PANE, 8), (ITEM_PINK_DYE, 1)], result: (ITEM_PINK_STAINED_GLASS_PANE, 8), name: "pink_stained_glass_pane_from_glass_pane" },
-    Recipe { needs: &[(ITEM_PINK_DYE, 1), (ITEM_TERRACOTTA, 8)], result: (ITEM_PINK_TERRACOTTA, 8), name: "pink_terracotta" },
-    Recipe { needs: &[(ITEM_PINK_WOOL, 3)], result: (ITEM_PINK_WOOL_SLAB, 6), name: "pink_wool_slab" },
-    Recipe { needs: &[(ITEM_PINK_WOOL, 6)], result: (ITEM_PINK_WOOL_STAIRS, 4), name: "pink_wool_stairs" },
-    Recipe { needs: &[(COBBLESTONE, 4), (ITEM_IRON_INGOT, 1), (ITEM_REDSTONE, 1), (TAG_PLANKS, 3)], result: (ITEM_PISTON, 1), name: "piston" },
-    Recipe { needs: &[(ITEM_ANDESITE, 4)], result: (ITEM_POLISHED_ANDESITE, 4), name: "polished_andesite" },
-    Recipe { needs: &[(ITEM_POLISHED_ANDESITE, 3)], result: (ITEM_POLISHED_ANDESITE_SLAB, 6), name: "polished_andesite_slab" },
-    Recipe { needs: &[(ITEM_POLISHED_ANDESITE, 6)], result: (ITEM_POLISHED_ANDESITE_STAIRS, 4), name: "polished_andesite_stairs" },
-    Recipe { needs: &[(ITEM_BASALT, 4)], result: (ITEM_POLISHED_BASALT, 4), name: "polished_basalt" },
-    Recipe { needs: &[(ITEM_BLACKSTONE, 4)], result: (ITEM_POLISHED_BLACKSTONE, 4), name: "polished_blackstone" },
-    Recipe { needs: &[(ITEM_POLISHED_BLACKSTONE_BRICKS, 3)], result: (ITEM_POLISHED_BLACKSTONE_BRICK_SLAB, 6), name: "polished_blackstone_brick_slab" },
-    Recipe { needs: &[(ITEM_POLISHED_BLACKSTONE_BRICKS, 6)], result: (ITEM_POLISHED_BLACKSTONE_BRICK_STAIRS, 4), name: "polished_blackstone_brick_stairs" },
-    Recipe { needs: &[(ITEM_POLISHED_BLACKSTONE_BRICKS, 6)], result: (ITEM_POLISHED_BLACKSTONE_BRICK_WALL, 6), name: "polished_blackstone_brick_wall" },
-    Recipe { needs: &[(ITEM_POLISHED_BLACKSTONE, 4)], result: (ITEM_POLISHED_BLACKSTONE_BRICKS, 4), name: "polished_blackstone_bricks" },
-    Recipe { needs: &[(ITEM_POLISHED_BLACKSTONE, 1)], result: (ITEM_POLISHED_BLACKSTONE_BUTTON, 1), name: "polished_blackstone_button" },
-    Recipe { needs: &[(ITEM_POLISHED_BLACKSTONE, 2)], result: (ITEM_POLISHED_BLACKSTONE_PRESSURE_PLATE, 1), name: "polished_blackstone_pressure_plate" },
-    Recipe { needs: &[(ITEM_POLISHED_BLACKSTONE, 3)], result: (ITEM_POLISHED_BLACKSTONE_SLAB, 6), name: "polished_blackstone_slab" },
-    Recipe { needs: &[(ITEM_POLISHED_BLACKSTONE, 6)], result: (ITEM_POLISHED_BLACKSTONE_STAIRS, 4), name: "polished_blackstone_stairs" },
-    Recipe { needs: &[(ITEM_POLISHED_BLACKSTONE, 6)], result: (ITEM_POLISHED_BLACKSTONE_WALL, 6), name: "polished_blackstone_wall" },
-    Recipe { needs: &[(ITEM_CINNABAR, 4)], result: (ITEM_POLISHED_CINNABAR, 4), name: "polished_cinnabar" },
-    Recipe { needs: &[(ITEM_POLISHED_CINNABAR, 3)], result: (ITEM_POLISHED_CINNABAR_SLAB, 6), name: "polished_cinnabar_slab" },
-    Recipe { needs: &[(ITEM_POLISHED_CINNABAR, 6)], result: (ITEM_POLISHED_CINNABAR_STAIRS, 4), name: "polished_cinnabar_stairs" },
-    Recipe { needs: &[(ITEM_POLISHED_CINNABAR, 6)], result: (ITEM_POLISHED_CINNABAR_WALL, 6), name: "polished_cinnabar_wall" },
-    Recipe { needs: &[(ITEM_COBBLED_DEEPSLATE, 4)], result: (ITEM_POLISHED_DEEPSLATE, 4), name: "polished_deepslate" },
-    Recipe { needs: &[(ITEM_POLISHED_DEEPSLATE, 3)], result: (ITEM_POLISHED_DEEPSLATE_SLAB, 6), name: "polished_deepslate_slab" },
-    Recipe { needs: &[(ITEM_POLISHED_DEEPSLATE, 6)], result: (ITEM_POLISHED_DEEPSLATE_STAIRS, 4), name: "polished_deepslate_stairs" },
-    Recipe { needs: &[(ITEM_POLISHED_DEEPSLATE, 6)], result: (ITEM_POLISHED_DEEPSLATE_WALL, 6), name: "polished_deepslate_wall" },
-    Recipe { needs: &[(ITEM_DIORITE, 4)], result: (ITEM_POLISHED_DIORITE, 4), name: "polished_diorite" },
-    Recipe { needs: &[(ITEM_POLISHED_DIORITE, 3)], result: (ITEM_POLISHED_DIORITE_SLAB, 6), name: "polished_diorite_slab" },
-    Recipe { needs: &[(ITEM_POLISHED_DIORITE, 6)], result: (ITEM_POLISHED_DIORITE_STAIRS, 4), name: "polished_diorite_stairs" },
-    Recipe { needs: &[(ITEM_GRANITE, 4)], result: (ITEM_POLISHED_GRANITE, 4), name: "polished_granite" },
-    Recipe { needs: &[(ITEM_POLISHED_GRANITE, 3)], result: (ITEM_POLISHED_GRANITE_SLAB, 6), name: "polished_granite_slab" },
-    Recipe { needs: &[(ITEM_POLISHED_GRANITE, 6)], result: (ITEM_POLISHED_GRANITE_STAIRS, 4), name: "polished_granite_stairs" },
-    Recipe { needs: &[(ITEM_SULFUR, 4)], result: (ITEM_POLISHED_SULFUR, 4), name: "polished_sulfur" },
-    Recipe { needs: &[(ITEM_POLISHED_SULFUR, 3)], result: (ITEM_POLISHED_SULFUR_SLAB, 6), name: "polished_sulfur_slab" },
-    Recipe { needs: &[(ITEM_POLISHED_SULFUR, 6)], result: (ITEM_POLISHED_SULFUR_STAIRS, 4), name: "polished_sulfur_stairs" },
-    Recipe { needs: &[(ITEM_POLISHED_SULFUR, 6)], result: (ITEM_POLISHED_SULFUR_WALL, 6), name: "polished_sulfur_wall" },
-    Recipe { needs: &[(ITEM_TUFF, 4)], result: (ITEM_POLISHED_TUFF, 4), name: "polished_tuff" },
-    Recipe { needs: &[(ITEM_POLISHED_TUFF, 3)], result: (ITEM_POLISHED_TUFF_SLAB, 6), name: "polished_tuff_slab" },
-    Recipe { needs: &[(ITEM_POLISHED_TUFF, 6)], result: (ITEM_POLISHED_TUFF_STAIRS, 4), name: "polished_tuff_stairs" },
-    Recipe { needs: &[(ITEM_POLISHED_TUFF, 6)], result: (ITEM_POLISHED_TUFF_WALL, 6), name: "polished_tuff_wall" },
-    Recipe { needs: &[(ITEM_POPLAR_PLANKS, 5)], result: (ITEM_POPLAR_BOAT, 1), name: "poplar_boat" },
-    Recipe { needs: &[(ITEM_POPLAR_PLANKS, 1)], result: (ITEM_POPLAR_BUTTON, 1), name: "poplar_button" },
-    Recipe { needs: &[(ITEM_CHEST, 1), (ITEM_POPLAR_BOAT, 1)], result: (ITEM_POPLAR_CHEST_BOAT, 1), name: "poplar_chest_boat" },
-    Recipe { needs: &[(ITEM_POPLAR_PLANKS, 6)], result: (ITEM_POPLAR_DOOR, 3), name: "poplar_door" },
-    Recipe { needs: &[(ITEM_POPLAR_PLANKS, 4), (STICK, 2)], result: (ITEM_POPLAR_FENCE, 3), name: "poplar_fence" },
-    Recipe { needs: &[(ITEM_POPLAR_PLANKS, 2), (STICK, 4)], result: (ITEM_POPLAR_FENCE_GATE, 1), name: "poplar_fence_gate" },
-    Recipe { needs: &[(ITEM_IRON_CHAIN, 2), (ITEM_STRIPPED_POPLAR_LOG, 6)], result: (ITEM_POPLAR_HANGING_SIGN, 6), name: "poplar_hanging_sign" },
-    Recipe { needs: &[(TAG_POPLAR_LOGS, 1)], result: (ITEM_POPLAR_PLANKS, 4), name: "poplar_planks" },
-    Recipe { needs: &[(ITEM_POPLAR_PLANKS, 2)], result: (ITEM_POPLAR_PRESSURE_PLATE, 1), name: "poplar_pressure_plate" },
-    Recipe { needs: &[(ITEM_STRIPPED_POPLAR_LOG, 6)], result: (ITEM_POPLAR_SHELF, 6), name: "poplar_shelf" },
-    Recipe { needs: &[(ITEM_POPLAR_PLANKS, 6), (STICK, 1)], result: (ITEM_POPLAR_SIGN, 3), name: "poplar_sign" },
-    Recipe { needs: &[(ITEM_POPLAR_PLANKS, 3)], result: (ITEM_POPLAR_SLAB, 6), name: "poplar_slab" },
-    Recipe { needs: &[(ITEM_POPLAR_PLANKS, 6)], result: (ITEM_POPLAR_STAIRS, 4), name: "poplar_stairs" },
-    Recipe { needs: &[(ITEM_POPLAR_PLANKS, 6)], result: (ITEM_POPLAR_TRAPDOOR, 2), name: "poplar_trapdoor" },
-    Recipe { needs: &[(ITEM_POPLAR_LOG, 4)], result: (ITEM_POPLAR_WOOD, 3), name: "poplar_wood" },
-    Recipe { needs: &[(ITEM_SULFUR, 1), (ITEM_SULFUR, 1), (ITEM_SULFUR, 1), (ITEM_SULFUR, 1), (ITEM_SULFUR, 1), (ITEM_SULFUR, 1), (ITEM_SULFUR, 1), (ITEM_SULFUR, 1), (ITEM_SULFUR, 1)], result: (ITEM_POTENT_SULFUR, 1), name: "potent_sulfur" },
-    Recipe { needs: &[(ITEM_GOLD_INGOT, 6), (ITEM_REDSTONE, 1), (STICK, 1)], result: (ITEM_POWERED_RAIL, 6), name: "powered_rail" },
-    Recipe { needs: &[(ITEM_PRISMARINE_SHARD, 4)], result: (ITEM_PRISMARINE, 1), name: "prismarine" },
-    Recipe { needs: &[(ITEM_PRISMARINE_BRICKS, 3)], result: (ITEM_PRISMARINE_BRICK_SLAB, 6), name: "prismarine_brick_slab" },
-    Recipe { needs: &[(ITEM_PRISMARINE_BRICKS, 6)], result: (ITEM_PRISMARINE_BRICK_STAIRS, 4), name: "prismarine_brick_stairs" },
-    Recipe { needs: &[(ITEM_PRISMARINE_SHARD, 1), (ITEM_PRISMARINE_SHARD, 1), (ITEM_PRISMARINE_SHARD, 1), (ITEM_PRISMARINE_SHARD, 1), (ITEM_PRISMARINE_SHARD, 1), (ITEM_PRISMARINE_SHARD, 1), (ITEM_PRISMARINE_SHARD, 1), (ITEM_PRISMARINE_SHARD, 1), (ITEM_PRISMARINE_SHARD, 1)], result: (ITEM_PRISMARINE_BRICKS, 1), name: "prismarine_bricks" },
-    Recipe { needs: &[(ITEM_PRISMARINE, 3)], result: (ITEM_PRISMARINE_SLAB, 6), name: "prismarine_slab" },
-    Recipe { needs: &[(ITEM_PRISMARINE, 6)], result: (ITEM_PRISMARINE_STAIRS, 4), name: "prismarine_stairs" },
-    Recipe { needs: &[(ITEM_PRISMARINE, 6)], result: (ITEM_PRISMARINE_WALL, 6), name: "prismarine_wall" },
-    Recipe { needs: &[(ITEM_PUMPKIN, 1), (ITEM_SUGAR, 1), (TAG_EGGS, 1)], result: (ITEM_PUMPKIN_PIE, 1), name: "pumpkin_pie" },
-    Recipe { needs: &[(ITEM_PUMPKIN, 1)], result: (ITEM_PUMPKIN_SEEDS, 4), name: "pumpkin_seeds" },
-    Recipe { needs: &[(ITEM_PURPLE_WOOL, 6), (STICK, 1)], result: (ITEM_PURPLE_BANNER, 1), name: "purple_banner" },
-    Recipe { needs: &[(ITEM_PURPLE_WOOL, 3), (TAG_PLANKS, 3)], result: (ITEM_PURPLE_BED, 1), name: "purple_bed" },
-    Recipe { needs: &[(ITEM_CANDLE, 1), (ITEM_PURPLE_DYE, 1)], result: (ITEM_PURPLE_CANDLE, 1), name: "purple_candle" },
-    Recipe { needs: &[(ITEM_PURPLE_WOOL, 2)], result: (ITEM_PURPLE_CARPET, 3), name: "purple_carpet" },
-    Recipe { needs: &[(ITEM_GRAVEL, 1), (ITEM_GRAVEL, 1), (ITEM_GRAVEL, 1), (ITEM_GRAVEL, 1), (ITEM_PURPLE_DYE, 1), (ITEM_SAND, 1), (ITEM_SAND, 1), (ITEM_SAND, 1), (ITEM_SAND, 1)], result: (ITEM_PURPLE_CONCRETE_POWDER, 8), name: "purple_concrete_powder" },
-    Recipe { needs: &[(ITEM_PURPLE_CONCRETE, 3)], result: (ITEM_PURPLE_CONCRETE_SLAB, 6), name: "purple_concrete_slab" },
-    Recipe { needs: &[(ITEM_PURPLE_CONCRETE, 6)], result: (ITEM_PURPLE_CONCRETE_STAIRS, 4), name: "purple_concrete_stairs" },
-    Recipe { needs: &[(ITEM_PURPLE_WOOL_SLAB, 3)], result: (ITEM_PURPLE_CUSHION, 1), name: "purple_cushion" },
-    Recipe { needs: &[(ITEM_BLUE_DYE, 1), (ITEM_RED_DYE, 1)], result: (ITEM_PURPLE_DYE, 2), name: "purple_dye" },
-    Recipe { needs: &[(ITEM_GLASS, 2), (ITEM_LEATHER, 3), (ITEM_PURPLE_WOOL, 1)], result: (ITEM_PURPLE_HARNESS, 1), name: "purple_harness" },
-    Recipe { needs: &[(ITEM_GLASS, 8), (ITEM_PURPLE_DYE, 1)], result: (ITEM_PURPLE_STAINED_GLASS, 8), name: "purple_stained_glass" },
-    Recipe { needs: &[(ITEM_PURPLE_STAINED_GLASS, 6)], result: (ITEM_PURPLE_STAINED_GLASS_PANE, 16), name: "purple_stained_glass_pane" },
-    Recipe { needs: &[(ITEM_GLASS_PANE, 8), (ITEM_PURPLE_DYE, 1)], result: (ITEM_PURPLE_STAINED_GLASS_PANE, 8), name: "purple_stained_glass_pane_from_glass_pane" },
-    Recipe { needs: &[(ITEM_PURPLE_DYE, 1), (ITEM_TERRACOTTA, 8)], result: (ITEM_PURPLE_TERRACOTTA, 8), name: "purple_terracotta" },
-    Recipe { needs: &[(ITEM_PURPLE_WOOL, 3)], result: (ITEM_PURPLE_WOOL_SLAB, 6), name: "purple_wool_slab" },
-    Recipe { needs: &[(ITEM_PURPLE_WOOL, 6)], result: (ITEM_PURPLE_WOOL_STAIRS, 4), name: "purple_wool_stairs" },
-    Recipe { needs: &[(ITEM_POPPED_CHORUS_FRUIT, 4)], result: (ITEM_PURPUR_BLOCK, 4), name: "purpur_block" },
-    Recipe { needs: &[(ITEM_PURPUR_SLAB, 2)], result: (ITEM_PURPUR_PILLAR, 1), name: "purpur_pillar" },
-    Recipe { needs: &[(TAG_ALT_114, 3)], result: (ITEM_PURPUR_SLAB, 6), name: "purpur_slab" },
-    Recipe { needs: &[(TAG_ALT_114, 6)], result: (ITEM_PURPUR_STAIRS, 4), name: "purpur_stairs" },
-    Recipe { needs: &[(ITEM_QUARTZ, 4)], result: (ITEM_QUARTZ_BLOCK, 1), name: "quartz_block" },
-    Recipe { needs: &[(ITEM_QUARTZ_BLOCK, 4)], result: (ITEM_QUARTZ_BRICKS, 4), name: "quartz_bricks" },
-    Recipe { needs: &[(ITEM_QUARTZ_BLOCK, 2)], result: (ITEM_QUARTZ_PILLAR, 2), name: "quartz_pillar" },
-    Recipe { needs: &[(TAG_ALT_115, 3)], result: (ITEM_QUARTZ_SLAB, 6), name: "quartz_slab" },
-    Recipe { needs: &[(TAG_ALT_115, 6)], result: (ITEM_QUARTZ_STAIRS, 4), name: "quartz_stairs" },
-    Recipe { needs: &[(ITEM_BAKED_POTATO, 1), (ITEM_BOWL, 1), (ITEM_BROWN_MUSHROOM, 1), (ITEM_CARROT, 1), (ITEM_COOKED_RABBIT, 1)], result: (ITEM_RABBIT_STEW, 1), name: "rabbit_stew_from_brown_mushroom" },
-    Recipe { needs: &[(ITEM_BAKED_POTATO, 1), (ITEM_BOWL, 1), (ITEM_CARROT, 1), (ITEM_COOKED_RABBIT, 1), (ITEM_RED_MUSHROOM, 1)], result: (ITEM_RABBIT_STEW, 1), name: "rabbit_stew_from_red_mushroom" },
-    Recipe { needs: &[(ITEM_BAKED_POTATO, 1), (ITEM_BOWL, 1), (ITEM_CARROT, 1), (ITEM_COOKED_RABBIT, 1), (ITEM_SHELF_MUSHROOM, 1)], result: (ITEM_RABBIT_STEW, 1), name: "rabbit_stew_from_shelf_mushroom" },
-    Recipe { needs: &[(ITEM_IRON_INGOT, 6), (STICK, 1)], result: (ITEM_RAIL, 16), name: "rail" },
-    Recipe { needs: &[(ITEM_DIAMOND, 7), (ITEM_RAISER_ARMOR_TRIM_SMITHING_TEMPLATE, 1), (ITEM_TERRACOTTA, 1)], result: (ITEM_RAISER_ARMOR_TRIM_SMITHING_TEMPLATE, 2), name: "raiser_armor_trim_smithing_template" },
-    Recipe { needs: &[(ITEM_RAW_COPPER_BLOCK, 1)], result: (ITEM_RAW_COPPER, 9), name: "raw_copper" },
-    Recipe { needs: &[(ITEM_RAW_COPPER, 9)], result: (ITEM_RAW_COPPER_BLOCK, 1), name: "raw_copper_block" },
-    Recipe { needs: &[(ITEM_RAW_GOLD_BLOCK, 1)], result: (ITEM_RAW_GOLD, 9), name: "raw_gold" },
-    Recipe { needs: &[(ITEM_RAW_GOLD, 9)], result: (ITEM_RAW_GOLD_BLOCK, 1), name: "raw_gold_block" },
-    Recipe { needs: &[(ITEM_RAW_IRON_BLOCK, 1)], result: (ITEM_RAW_IRON, 9), name: "raw_iron" },
-    Recipe { needs: &[(ITEM_RAW_IRON, 9)], result: (ITEM_RAW_IRON_BLOCK, 1), name: "raw_iron_block" },
-    Recipe { needs: &[(ITEM_COMPASS, 1), (ITEM_ECHO_SHARD, 8)], result: (ITEM_RECOVERY_COMPASS, 1), name: "recovery_compass" },
-    Recipe { needs: &[(ITEM_RED_WOOL, 6), (STICK, 1)], result: (ITEM_RED_BANNER, 1), name: "red_banner" },
-    Recipe { needs: &[(ITEM_RED_WOOL, 3), (TAG_PLANKS, 3)], result: (ITEM_RED_BED, 1), name: "red_bed" },
-    Recipe { needs: &[(ITEM_CANDLE, 1), (ITEM_RED_DYE, 1)], result: (ITEM_RED_CANDLE, 1), name: "red_candle" },
-    Recipe { needs: &[(ITEM_RED_WOOL, 2)], result: (ITEM_RED_CARPET, 3), name: "red_carpet" },
-    Recipe { needs: &[(ITEM_GRAVEL, 1), (ITEM_GRAVEL, 1), (ITEM_GRAVEL, 1), (ITEM_GRAVEL, 1), (ITEM_RED_DYE, 1), (ITEM_SAND, 1), (ITEM_SAND, 1), (ITEM_SAND, 1), (ITEM_SAND, 1)], result: (ITEM_RED_CONCRETE_POWDER, 8), name: "red_concrete_powder" },
-    Recipe { needs: &[(ITEM_RED_CONCRETE, 3)], result: (ITEM_RED_CONCRETE_SLAB, 6), name: "red_concrete_slab" },
-    Recipe { needs: &[(ITEM_RED_CONCRETE, 6)], result: (ITEM_RED_CONCRETE_STAIRS, 4), name: "red_concrete_stairs" },
-    Recipe { needs: &[(ITEM_RED_WOOL_SLAB, 3)], result: (ITEM_RED_CUSHION, 1), name: "red_cushion" },
-    Recipe { needs: &[(ITEM_BEETROOT, 1)], result: (ITEM_RED_DYE, 1), name: "red_dye_from_beetroot" },
-    Recipe { needs: &[(ITEM_POPPY, 1)], result: (ITEM_RED_DYE, 1), name: "red_dye_from_poppy" },
-    Recipe { needs: &[(ITEM_ROSE_BUSH, 1)], result: (ITEM_RED_DYE, 2), name: "red_dye_from_rose_bush" },
-    Recipe { needs: &[(ITEM_RED_TULIP, 1)], result: (ITEM_RED_DYE, 1), name: "red_dye_from_tulip" },
-    Recipe { needs: &[(ITEM_GLASS, 2), (ITEM_LEATHER, 3), (ITEM_RED_WOOL, 1)], result: (ITEM_RED_HARNESS, 1), name: "red_harness" },
-    Recipe { needs: &[(ITEM_RED_NETHER_BRICKS, 3)], result: (ITEM_RED_NETHER_BRICK_SLAB, 6), name: "red_nether_brick_slab" },
-    Recipe { needs: &[(ITEM_RED_NETHER_BRICKS, 6)], result: (ITEM_RED_NETHER_BRICK_STAIRS, 4), name: "red_nether_brick_stairs" },
-    Recipe { needs: &[(ITEM_RED_NETHER_BRICKS, 6)], result: (ITEM_RED_NETHER_BRICK_WALL, 6), name: "red_nether_brick_wall" },
-    Recipe { needs: &[(ITEM_NETHER_BRICK, 2), (ITEM_NETHER_WART, 2)], result: (ITEM_RED_NETHER_BRICKS, 1), name: "red_nether_bricks" },
-    Recipe { needs: &[(ITEM_RED_SAND, 4)], result: (ITEM_RED_SANDSTONE, 1), name: "red_sandstone" },
-    Recipe { needs: &[(TAG_ALT_116, 3)], result: (ITEM_RED_SANDSTONE_SLAB, 6), name: "red_sandstone_slab" },
-    Recipe { needs: &[(TAG_ALT_117, 6)], result: (ITEM_RED_SANDSTONE_STAIRS, 4), name: "red_sandstone_stairs" },
-    Recipe { needs: &[(ITEM_RED_SANDSTONE, 6)], result: (ITEM_RED_SANDSTONE_WALL, 6), name: "red_sandstone_wall" },
-    Recipe { needs: &[(ITEM_GLASS, 8), (ITEM_RED_DYE, 1)], result: (ITEM_RED_STAINED_GLASS, 8), name: "red_stained_glass" },
-    Recipe { needs: &[(ITEM_RED_STAINED_GLASS, 6)], result: (ITEM_RED_STAINED_GLASS_PANE, 16), name: "red_stained_glass_pane" },
-    Recipe { needs: &[(ITEM_GLASS_PANE, 8), (ITEM_RED_DYE, 1)], result: (ITEM_RED_STAINED_GLASS_PANE, 8), name: "red_stained_glass_pane_from_glass_pane" },
-    Recipe { needs: &[(ITEM_RED_DYE, 1), (ITEM_TERRACOTTA, 8)], result: (ITEM_RED_TERRACOTTA, 8), name: "red_terracotta" },
-    Recipe { needs: &[(ITEM_RED_WOOL, 3)], result: (ITEM_RED_WOOL_SLAB, 6), name: "red_wool_slab" },
-    Recipe { needs: &[(ITEM_RED_WOOL, 6)], result: (ITEM_RED_WOOL_STAIRS, 4), name: "red_wool_stairs" },
-    Recipe { needs: &[(ITEM_REDSTONE_BLOCK, 1)], result: (ITEM_REDSTONE, 9), name: "redstone" },
-    Recipe { needs: &[(ITEM_REDSTONE, 9)], result: (ITEM_REDSTONE_BLOCK, 1), name: "redstone_block" },
-    Recipe { needs: &[(ITEM_GLOWSTONE, 1), (ITEM_REDSTONE, 4)], result: (ITEM_REDSTONE_LAMP, 1), name: "redstone_lamp" },
-    Recipe { needs: &[(ITEM_REDSTONE, 1), (STICK, 1)], result: (ITEM_REDSTONE_TORCH, 1), name: "redstone_torch" },
-    Recipe { needs: &[(ITEM_REDSTONE, 1), (ITEM_REDSTONE_TORCH, 2), (ITEM_STONE, 3)], result: (ITEM_REPEATER, 1), name: "repeater" },
-    Recipe { needs: &[(ITEM_RESIN_CLUMP, 9)], result: (ITEM_RESIN_BLOCK, 1), name: "resin_block" },
-    Recipe { needs: &[(ITEM_RESIN_BRICKS, 3)], result: (ITEM_RESIN_BRICK_SLAB, 6), name: "resin_brick_slab" },
-    Recipe { needs: &[(ITEM_RESIN_BRICKS, 6)], result: (ITEM_RESIN_BRICK_STAIRS, 4), name: "resin_brick_stairs" },
-    Recipe { needs: &[(ITEM_RESIN_BRICKS, 6)], result: (ITEM_RESIN_BRICK_WALL, 6), name: "resin_brick_wall" },
-    Recipe { needs: &[(ITEM_RESIN_BRICK, 4)], result: (ITEM_RESIN_BRICKS, 1), name: "resin_bricks" },
-    Recipe { needs: &[(ITEM_RESIN_BLOCK, 1)], result: (ITEM_RESIN_CLUMP, 9), name: "resin_clump" },
-    Recipe { needs: &[(ITEM_CRYING_OBSIDIAN, 6), (ITEM_GLOWSTONE, 3)], result: (ITEM_RESPAWN_ANCHOR, 1), name: "respawn_anchor" },
-    Recipe { needs: &[(ITEM_DIAMOND, 7), (ITEM_NETHERRACK, 1), (ITEM_RIB_ARMOR_TRIM_SMITHING_TEMPLATE, 1)], result: (ITEM_RIB_ARMOR_TRIM_SMITHING_TEMPLATE, 2), name: "rib_armor_trim_smithing_template" },
-    Recipe { needs: &[(ITEM_IRON_INGOT, 1), (ITEM_LEATHER, 3)], result: (ITEM_SADDLE, 1), name: "saddle" },
-    Recipe { needs: &[(ITEM_SAND, 4)], result: (ITEM_SANDSTONE, 1), name: "sandstone" },
-    Recipe { needs: &[(TAG_ALT_118, 3)], result: (ITEM_SANDSTONE_SLAB, 6), name: "sandstone_slab" },
-    Recipe { needs: &[(TAG_ALT_119, 6)], result: (ITEM_SANDSTONE_STAIRS, 4), name: "sandstone_stairs" },
-    Recipe { needs: &[(ITEM_SANDSTONE, 6)], result: (ITEM_SANDSTONE_WALL, 6), name: "sandstone_wall" },
-    Recipe { needs: &[(ITEM_BAMBOO, 6), (ITEM_STRING, 1)], result: (ITEM_SCAFFOLDING, 6), name: "scaffolding" },
-    Recipe { needs: &[(ITEM_PRISMARINE_CRYSTALS, 5), (ITEM_PRISMARINE_SHARD, 4)], result: (ITEM_SEA_LANTERN, 1), name: "sea_lantern" },
-    Recipe { needs: &[(COBBLESTONE, 1), (ITEM_DIAMOND, 7), (ITEM_SENTRY_ARMOR_TRIM_SMITHING_TEMPLATE, 1)], result: (ITEM_SENTRY_ARMOR_TRIM_SMITHING_TEMPLATE, 2), name: "sentry_armor_trim_smithing_template" },
-    Recipe { needs: &[(ITEM_DIAMOND, 7), (ITEM_SHAPER_ARMOR_TRIM_SMITHING_TEMPLATE, 1), (ITEM_TERRACOTTA, 1)], result: (ITEM_SHAPER_ARMOR_TRIM_SMITHING_TEMPLATE, 2), name: "shaper_armor_trim_smithing_template" },
-    Recipe { needs: &[(ITEM_IRON_INGOT, 2)], result: (ITEM_SHEARS, 1), name: "shears" },
-    Recipe { needs: &[(ITEM_IRON_INGOT, 1), (TAG_PLANKS, 6)], result: (ITEM_SHIELD, 1), name: "shield" },
-    Recipe { needs: &[(ITEM_CHEST, 1), (ITEM_SHULKER_SHELL, 2)], result: (ITEM_SHULKER_BOX, 1), name: "shulker_box" },
-    Recipe { needs: &[(ITEM_COBBLED_DEEPSLATE, 1), (ITEM_DIAMOND, 7), (ITEM_SILENCE_ARMOR_TRIM_SMITHING_TEMPLATE, 1)], result: (ITEM_SILENCE_ARMOR_TRIM_SMITHING_TEMPLATE, 2), name: "silence_armor_trim_smithing_template" },
-    Recipe { needs: &[(ITEM_PAPER, 1), (ITEM_WITHER_SKELETON_SKULL, 1)], result: (ITEM_SKULL_BANNER_PATTERN, 1), name: "skull_banner_pattern" },
-    Recipe { needs: &[(ITEM_SLIME_BLOCK, 1)], result: (ITEM_SLIME_BALL, 9), name: "slime_ball" },
-    Recipe { needs: &[(ITEM_SLIME_BALL, 9)], result: (ITEM_SLIME_BLOCK, 1), name: "slime_block" },
-    Recipe { needs: &[(ITEM_IRON_INGOT, 2), (TAG_PLANKS, 4)], result: (ITEM_SMITHING_TABLE, 1), name: "smithing_table" },
-    Recipe { needs: &[(ITEM_FURNACE, 1), (TAG_LOGS, 4)], result: (ITEM_SMOKER, 1), name: "smoker" },
-    Recipe { needs: &[(ITEM_SMOOTH_QUARTZ, 3)], result: (ITEM_SMOOTH_QUARTZ_SLAB, 6), name: "smooth_quartz_slab" },
-    Recipe { needs: &[(ITEM_SMOOTH_QUARTZ, 6)], result: (ITEM_SMOOTH_QUARTZ_STAIRS, 4), name: "smooth_quartz_stairs" },
-    Recipe { needs: &[(ITEM_SMOOTH_RED_SANDSTONE, 3)], result: (ITEM_SMOOTH_RED_SANDSTONE_SLAB, 6), name: "smooth_red_sandstone_slab" },
-    Recipe { needs: &[(ITEM_SMOOTH_RED_SANDSTONE, 6)], result: (ITEM_SMOOTH_RED_SANDSTONE_STAIRS, 4), name: "smooth_red_sandstone_stairs" },
-    Recipe { needs: &[(ITEM_SMOOTH_SANDSTONE, 3)], result: (ITEM_SMOOTH_SANDSTONE_SLAB, 6), name: "smooth_sandstone_slab" },
-    Recipe { needs: &[(ITEM_SMOOTH_SANDSTONE, 6)], result: (ITEM_SMOOTH_SANDSTONE_STAIRS, 4), name: "smooth_sandstone_stairs" },
-    Recipe { needs: &[(ITEM_SMOOTH_STONE, 3)], result: (ITEM_SMOOTH_STONE_SLAB, 6), name: "smooth_stone_slab" },
-    Recipe { needs: &[(ITEM_BLACKSTONE, 1), (ITEM_DIAMOND, 7), (ITEM_SNOUT_ARMOR_TRIM_SMITHING_TEMPLATE, 1)], result: (ITEM_SNOUT_ARMOR_TRIM_SMITHING_TEMPLATE, 2), name: "snout_armor_trim_smithing_template" },
-    Recipe { needs: &[(ITEM_SNOW_BLOCK, 3)], result: (ITEM_SNOW, 6), name: "snow" },
-    Recipe { needs: &[(ITEM_SNOWBALL, 4)], result: (ITEM_SNOW_BLOCK, 1), name: "snow_block" },
-    Recipe { needs: &[(STICK, 3), (TAG_LOGS, 3), (TAG_SOUL_FIRE_BASE_BLOCKS, 1)], result: (ITEM_SOUL_CAMPFIRE, 1), name: "soul_campfire" },
-    Recipe { needs: &[(ITEM_IRON_NUGGET, 8), (ITEM_SOUL_TORCH, 1)], result: (ITEM_SOUL_LANTERN, 1), name: "soul_lantern" },
-    Recipe { needs: &[(STICK, 1), (TAG_COALS, 1), (TAG_SOUL_FIRE_BASE_BLOCKS, 1)], result: (ITEM_SOUL_TORCH, 4), name: "soul_torch" },
-    Recipe { needs: &[(ITEM_ARROW, 1), (ITEM_GLOWSTONE_DUST, 4)], result: (ITEM_SPECTRAL_ARROW, 2), name: "spectral_arrow" },
-    Recipe { needs: &[(ITEM_DIAMOND, 7), (ITEM_PURPUR_BLOCK, 1), (ITEM_SPIRE_ARMOR_TRIM_SMITHING_TEMPLATE, 1)], result: (ITEM_SPIRE_ARMOR_TRIM_SMITHING_TEMPLATE, 2), name: "spire_armor_trim_smithing_template" },
-    Recipe { needs: &[(ITEM_SPRUCE_PLANKS, 5)], result: (ITEM_SPRUCE_BOAT, 1), name: "spruce_boat" },
-    Recipe { needs: &[(ITEM_SPRUCE_PLANKS, 1)], result: (ITEM_SPRUCE_BUTTON, 1), name: "spruce_button" },
-    Recipe { needs: &[(ITEM_CHEST, 1), (ITEM_SPRUCE_BOAT, 1)], result: (ITEM_SPRUCE_CHEST_BOAT, 1), name: "spruce_chest_boat" },
-    Recipe { needs: &[(ITEM_SPRUCE_PLANKS, 6)], result: (ITEM_SPRUCE_DOOR, 3), name: "spruce_door" },
-    Recipe { needs: &[(ITEM_SPRUCE_PLANKS, 4), (STICK, 2)], result: (ITEM_SPRUCE_FENCE, 3), name: "spruce_fence" },
-    Recipe { needs: &[(ITEM_SPRUCE_PLANKS, 2), (STICK, 4)], result: (ITEM_SPRUCE_FENCE_GATE, 1), name: "spruce_fence_gate" },
-    Recipe { needs: &[(ITEM_IRON_CHAIN, 2), (ITEM_STRIPPED_SPRUCE_LOG, 6)], result: (ITEM_SPRUCE_HANGING_SIGN, 6), name: "spruce_hanging_sign" },
-    Recipe { needs: &[(TAG_SPRUCE_LOGS, 1)], result: (ITEM_SPRUCE_PLANKS, 4), name: "spruce_planks" },
-    Recipe { needs: &[(ITEM_SPRUCE_PLANKS, 2)], result: (ITEM_SPRUCE_PRESSURE_PLATE, 1), name: "spruce_pressure_plate" },
-    Recipe { needs: &[(ITEM_STRIPPED_SPRUCE_LOG, 6)], result: (ITEM_SPRUCE_SHELF, 6), name: "spruce_shelf" },
-    Recipe { needs: &[(ITEM_SPRUCE_PLANKS, 6), (STICK, 1)], result: (ITEM_SPRUCE_SIGN, 3), name: "spruce_sign" },
-    Recipe { needs: &[(ITEM_SPRUCE_PLANKS, 3)], result: (ITEM_SPRUCE_SLAB, 6), name: "spruce_slab" },
-    Recipe { needs: &[(ITEM_SPRUCE_PLANKS, 6)], result: (ITEM_SPRUCE_STAIRS, 4), name: "spruce_stairs" },
-    Recipe { needs: &[(ITEM_SPRUCE_PLANKS, 6)], result: (ITEM_SPRUCE_TRAPDOOR, 2), name: "spruce_trapdoor" },
-    Recipe { needs: &[(ITEM_SPRUCE_LOG, 4)], result: (ITEM_SPRUCE_WOOD, 3), name: "spruce_wood" },
-    Recipe { needs: &[(ITEM_AMETHYST_SHARD, 1), (ITEM_COPPER_INGOT, 2)], result: (ITEM_SPYGLASS, 1), name: "spyglass" },
-    Recipe { needs: &[(TAG_PLANKS, 2)], result: (STICK, 4), name: "stick" },
-    Recipe { needs: &[(ITEM_BAMBOO, 2)], result: (STICK, 1), name: "stick_from_bamboo_item" },
-    Recipe { needs: &[(ITEM_PISTON, 1), (ITEM_SLIME_BALL, 1)], result: (ITEM_STICKY_PISTON, 1), name: "sticky_piston" },
-    Recipe { needs: &[(STICK, 2), (TAG_STONE_CRAFTING_MATERIALS, 3)], result: (ITEM_STONE_AXE, 1), name: "stone_axe" },
-    Recipe { needs: &[(ITEM_STONE_BRICKS, 3)], result: (ITEM_STONE_BRICK_SLAB, 6), name: "stone_brick_slab" },
-    Recipe { needs: &[(ITEM_STONE_BRICKS, 6)], result: (ITEM_STONE_BRICK_STAIRS, 4), name: "stone_brick_stairs" },
-    Recipe { needs: &[(ITEM_STONE_BRICKS, 6)], result: (ITEM_STONE_BRICK_WALL, 6), name: "stone_brick_wall" },
-    Recipe { needs: &[(ITEM_STONE, 4)], result: (ITEM_STONE_BRICKS, 4), name: "stone_bricks" },
-    Recipe { needs: &[(ITEM_STONE, 1)], result: (ITEM_STONE_BUTTON, 1), name: "stone_button" },
-    Recipe { needs: &[(STICK, 2), (TAG_STONE_CRAFTING_MATERIALS, 2)], result: (ITEM_STONE_HOE, 1), name: "stone_hoe" },
-    Recipe { needs: &[(STICK, 2), (TAG_STONE_CRAFTING_MATERIALS, 3)], result: (STONE_PICKAXE, 1), name: "stone_pickaxe" },
-    Recipe { needs: &[(ITEM_STONE, 2)], result: (ITEM_STONE_PRESSURE_PLATE, 1), name: "stone_pressure_plate" },
-    Recipe { needs: &[(STICK, 2), (TAG_STONE_CRAFTING_MATERIALS, 1)], result: (ITEM_STONE_SHOVEL, 1), name: "stone_shovel" },
-    Recipe { needs: &[(ITEM_STONE, 3)], result: (ITEM_STONE_SLAB, 6), name: "stone_slab" },
-    Recipe { needs: &[(STICK, 2), (TAG_STONE_CRAFTING_MATERIALS, 1)], result: (ITEM_STONE_SPEAR, 1), name: "stone_spear" },
-    Recipe { needs: &[(ITEM_STONE, 6)], result: (ITEM_STONE_STAIRS, 4), name: "stone_stairs" },
-    Recipe { needs: &[(STICK, 1), (TAG_STONE_CRAFTING_MATERIALS, 2)], result: (ITEM_STONE_SWORD, 1), name: "stone_sword" },
-    Recipe { needs: &[(ITEM_IRON_INGOT, 1), (ITEM_STONE, 3)], result: (ITEM_STONECUTTER, 1), name: "stonecutter" },
-    Recipe { needs: &[(ITEM_HAY_BLOCK, 3)], result: (ITEM_STRAW_BED, 4), name: "straw_bed" },
-    Recipe { needs: &[(ITEM_STRIPPED_ACACIA_LOG, 4)], result: (ITEM_STRIPPED_ACACIA_WOOD, 3), name: "stripped_acacia_wood" },
-    Recipe { needs: &[(ITEM_STRIPPED_BIRCH_LOG, 4)], result: (ITEM_STRIPPED_BIRCH_WOOD, 3), name: "stripped_birch_wood" },
-    Recipe { needs: &[(ITEM_STRIPPED_CHERRY_LOG, 4)], result: (ITEM_STRIPPED_CHERRY_WOOD, 3), name: "stripped_cherry_wood" },
-    Recipe { needs: &[(ITEM_STRIPPED_CRIMSON_STEM, 4)], result: (ITEM_STRIPPED_CRIMSON_HYPHAE, 3), name: "stripped_crimson_hyphae" },
-    Recipe { needs: &[(ITEM_STRIPPED_DARK_OAK_LOG, 4)], result: (ITEM_STRIPPED_DARK_OAK_WOOD, 3), name: "stripped_dark_oak_wood" },
-    Recipe { needs: &[(ITEM_STRIPPED_JUNGLE_LOG, 4)], result: (ITEM_STRIPPED_JUNGLE_WOOD, 3), name: "stripped_jungle_wood" },
-    Recipe { needs: &[(ITEM_STRIPPED_MANGROVE_LOG, 4)], result: (ITEM_STRIPPED_MANGROVE_WOOD, 3), name: "stripped_mangrove_wood" },
-    Recipe { needs: &[(ITEM_STRIPPED_OAK_LOG, 4)], result: (ITEM_STRIPPED_OAK_WOOD, 3), name: "stripped_oak_wood" },
-    Recipe { needs: &[(ITEM_STRIPPED_PALE_OAK_LOG, 4)], result: (ITEM_STRIPPED_PALE_OAK_WOOD, 3), name: "stripped_pale_oak_wood" },
-    Recipe { needs: &[(ITEM_STRIPPED_POPLAR_LOG, 4)], result: (ITEM_STRIPPED_POPLAR_WOOD, 3), name: "stripped_poplar_wood" },
-    Recipe { needs: &[(ITEM_STRIPPED_SPRUCE_LOG, 4)], result: (ITEM_STRIPPED_SPRUCE_WOOD, 3), name: "stripped_spruce_wood" },
-    Recipe { needs: &[(ITEM_STRIPPED_WARPED_STEM, 4)], result: (ITEM_STRIPPED_WARPED_HYPHAE, 3), name: "stripped_warped_hyphae" },
-    Recipe { needs: &[(ITEM_HONEY_BOTTLE, 1)], result: (ITEM_SUGAR, 3), name: "sugar_from_honey_bottle" },
-    Recipe { needs: &[(ITEM_SUGAR_CANE, 1)], result: (ITEM_SUGAR, 1), name: "sugar_from_sugar_cane" },
-    Recipe { needs: &[(ITEM_SULFUR_BRICKS, 3)], result: (ITEM_SULFUR_BRICK_SLAB, 6), name: "sulfur_brick_slab" },
-    Recipe { needs: &[(ITEM_SULFUR_BRICKS, 6)], result: (ITEM_SULFUR_BRICK_STAIRS, 4), name: "sulfur_brick_stairs" },
-    Recipe { needs: &[(ITEM_SULFUR_BRICKS, 6)], result: (ITEM_SULFUR_BRICK_WALL, 6), name: "sulfur_brick_wall" },
-    Recipe { needs: &[(ITEM_POLISHED_SULFUR, 4)], result: (ITEM_SULFUR_BRICKS, 4), name: "sulfur_bricks" },
-    Recipe { needs: &[(ITEM_SULFUR_SPIKE, 4)], result: (ITEM_SULFUR, 1), name: "sulfur_from_sulfur_spikes" },
-    Recipe { needs: &[(ITEM_SULFUR, 3)], result: (ITEM_SULFUR_SLAB, 6), name: "sulfur_slab" },
-    Recipe { needs: &[(ITEM_SULFUR, 6)], result: (ITEM_SULFUR_STAIRS, 4), name: "sulfur_stairs" },
-    Recipe { needs: &[(ITEM_SULFUR, 6)], result: (ITEM_SULFUR_WALL, 6), name: "sulfur_wall" },
-    Recipe { needs: &[(ITEM_HAY_BLOCK, 1), (ITEM_REDSTONE, 4)], result: (ITEM_TARGET, 1), name: "target" },
-    Recipe { needs: &[(ITEM_DIAMOND, 7), (ITEM_PRISMARINE, 1), (ITEM_TIDE_ARMOR_TRIM_SMITHING_TEMPLATE, 1)], result: (ITEM_TIDE_ARMOR_TRIM_SMITHING_TEMPLATE, 2), name: "tide_armor_trim_smithing_template" },
-    Recipe { needs: &[(ITEM_AMETHYST_SHARD, 4), (ITEM_GLASS, 1)], result: (ITEM_TINTED_GLASS, 2), name: "tinted_glass" },
-    Recipe { needs: &[(ITEM_GUNPOWDER, 5), (TAG_SMELTS_TO_GLASS, 4)], result: (ITEM_TNT, 1), name: "tnt" },
-    Recipe { needs: &[(ITEM_MINECART, 1), (ITEM_TNT, 1)], result: (ITEM_TNT_MINECART, 1), name: "tnt_minecart" },
-    Recipe { needs: &[(STICK, 1), (TAG_COALS, 1)], result: (TORCH, 4), name: "torch" },
-    Recipe { needs: &[(ITEM_CHEST, 1), (ITEM_TRIPWIRE_HOOK, 1)], result: (ITEM_TRAPPED_CHEST, 1), name: "trapped_chest" },
-    Recipe { needs: &[(ITEM_IRON_INGOT, 1), (STICK, 1), (TAG_PLANKS, 1)], result: (ITEM_TRIPWIRE_HOOK, 2), name: "tripwire_hook" },
-    Recipe { needs: &[(ITEM_TUFF_BRICKS, 3)], result: (ITEM_TUFF_BRICK_SLAB, 6), name: "tuff_brick_slab" },
-    Recipe { needs: &[(ITEM_TUFF_BRICKS, 6)], result: (ITEM_TUFF_BRICK_STAIRS, 4), name: "tuff_brick_stairs" },
-    Recipe { needs: &[(ITEM_TUFF_BRICKS, 6)], result: (ITEM_TUFF_BRICK_WALL, 6), name: "tuff_brick_wall" },
-    Recipe { needs: &[(ITEM_POLISHED_TUFF, 4)], result: (ITEM_TUFF_BRICKS, 4), name: "tuff_bricks" },
-    Recipe { needs: &[(ITEM_TUFF, 3)], result: (ITEM_TUFF_SLAB, 6), name: "tuff_slab" },
-    Recipe { needs: &[(ITEM_TUFF, 6)], result: (ITEM_TUFF_STAIRS, 4), name: "tuff_stairs" },
-    Recipe { needs: &[(ITEM_TUFF, 6)], result: (ITEM_TUFF_WALL, 6), name: "tuff_wall" },
-    Recipe { needs: &[(ITEM_TURTLE_SCUTE, 5)], result: (ITEM_TURTLE_HELMET, 1), name: "turtle_helmet" },
-    Recipe { needs: &[(COBBLESTONE, 1), (ITEM_DIAMOND, 7), (ITEM_VEX_ARMOR_TRIM_SMITHING_TEMPLATE, 1)], result: (ITEM_VEX_ARMOR_TRIM_SMITHING_TEMPLATE, 2), name: "vex_armor_trim_smithing_template" },
-    Recipe { needs: &[(ITEM_COBBLED_DEEPSLATE, 1), (ITEM_DIAMOND, 7), (ITEM_WARD_ARMOR_TRIM_SMITHING_TEMPLATE, 1)], result: (ITEM_WARD_ARMOR_TRIM_SMITHING_TEMPLATE, 2), name: "ward_armor_trim_smithing_template" },
-    Recipe { needs: &[(ITEM_WARPED_PLANKS, 1)], result: (ITEM_WARPED_BUTTON, 1), name: "warped_button" },
-    Recipe { needs: &[(ITEM_WARPED_PLANKS, 6)], result: (ITEM_WARPED_DOOR, 3), name: "warped_door" },
-    Recipe { needs: &[(STICK, 2), (ITEM_WARPED_PLANKS, 4)], result: (ITEM_WARPED_FENCE, 3), name: "warped_fence" },
-    Recipe { needs: &[(STICK, 4), (ITEM_WARPED_PLANKS, 2)], result: (ITEM_WARPED_FENCE_GATE, 1), name: "warped_fence_gate" },
-    Recipe { needs: &[(ITEM_FISHING_ROD, 1), (ITEM_WARPED_FUNGUS, 1)], result: (ITEM_WARPED_FUNGUS_ON_A_STICK, 1), name: "warped_fungus_on_a_stick" },
-    Recipe { needs: &[(ITEM_IRON_CHAIN, 2), (ITEM_STRIPPED_WARPED_STEM, 6)], result: (ITEM_WARPED_HANGING_SIGN, 6), name: "warped_hanging_sign" },
-    Recipe { needs: &[(ITEM_WARPED_STEM, 4)], result: (ITEM_WARPED_HYPHAE, 3), name: "warped_hyphae" },
-    Recipe { needs: &[(TAG_WARPED_STEMS, 1)], result: (ITEM_WARPED_PLANKS, 4), name: "warped_planks" },
-    Recipe { needs: &[(ITEM_WARPED_PLANKS, 2)], result: (ITEM_WARPED_PRESSURE_PLATE, 1), name: "warped_pressure_plate" },
-    Recipe { needs: &[(ITEM_STRIPPED_WARPED_STEM, 6)], result: (ITEM_WARPED_SHELF, 6), name: "warped_shelf" },
-    Recipe { needs: &[(STICK, 1), (ITEM_WARPED_PLANKS, 6)], result: (ITEM_WARPED_SIGN, 3), name: "warped_sign" },
-    Recipe { needs: &[(ITEM_WARPED_PLANKS, 3)], result: (ITEM_WARPED_SLAB, 6), name: "warped_slab" },
-    Recipe { needs: &[(ITEM_WARPED_PLANKS, 6)], result: (ITEM_WARPED_STAIRS, 4), name: "warped_stairs" },
-    Recipe { needs: &[(ITEM_WARPED_PLANKS, 6)], result: (ITEM_WARPED_TRAPDOOR, 2), name: "warped_trapdoor" },
-    Recipe { needs: &[(ITEM_WAXED_CUT_COPPER_SLAB, 2)], result: (ITEM_WAXED_CHISELED_COPPER, 1), name: "waxed_chiseled_copper" },
-    Recipe { needs: &[(ITEM_CHISELED_COPPER, 1), (ITEM_HONEYCOMB, 1)], result: (ITEM_WAXED_CHISELED_COPPER, 1), name: "waxed_chiseled_copper_from_honeycomb" },
-    Recipe { needs: &[(ITEM_COPPER_BARS, 1), (ITEM_HONEYCOMB, 1)], result: (ITEM_WAXED_COPPER_BARS, 1), name: "waxed_copper_bars_from_honeycomb" },
-    Recipe { needs: &[(ITEM_COPPER_BLOCK, 1), (ITEM_HONEYCOMB, 1)], result: (ITEM_WAXED_COPPER_BLOCK, 1), name: "waxed_copper_block_from_honeycomb" },
-    Recipe { needs: &[(ITEM_BLAZE_ROD, 1), (ITEM_REDSTONE, 1), (ITEM_WAXED_COPPER_BLOCK, 3)], result: (ITEM_WAXED_COPPER_BULB, 4), name: "waxed_copper_bulb" },
-    Recipe { needs: &[(ITEM_COPPER_BULB, 1), (ITEM_HONEYCOMB, 1)], result: (ITEM_WAXED_COPPER_BULB, 1), name: "waxed_copper_bulb_from_honeycomb" },
-    Recipe { needs: &[(ITEM_COPPER_CHAIN, 1), (ITEM_HONEYCOMB, 1)], result: (ITEM_WAXED_COPPER_CHAIN, 1), name: "waxed_copper_chain_from_honeycomb" },
-    Recipe { needs: &[(ITEM_COPPER_CHEST, 1), (ITEM_HONEYCOMB, 1)], result: (ITEM_WAXED_COPPER_CHEST, 1), name: "waxed_copper_chest_from_honeycomb" },
-    Recipe { needs: &[(ITEM_COPPER_DOOR, 1), (ITEM_HONEYCOMB, 1)], result: (ITEM_WAXED_COPPER_DOOR, 1), name: "waxed_copper_door_from_honeycomb" },
-    Recipe { needs: &[(ITEM_COPPER_GOLEM_STATUE, 1), (ITEM_HONEYCOMB, 1)], result: (ITEM_WAXED_COPPER_GOLEM_STATUE, 1), name: "waxed_copper_golem_statue_from_honeycomb" },
-    Recipe { needs: &[(ITEM_WAXED_COPPER_BLOCK, 4)], result: (ITEM_WAXED_COPPER_GRATE, 4), name: "waxed_copper_grate" },
-    Recipe { needs: &[(ITEM_COPPER_GRATE, 1), (ITEM_HONEYCOMB, 1)], result: (ITEM_WAXED_COPPER_GRATE, 1), name: "waxed_copper_grate_from_honeycomb" },
-    Recipe { needs: &[(ITEM_COPPER_LANTERN, 1), (ITEM_HONEYCOMB, 1)], result: (ITEM_WAXED_COPPER_LANTERN, 1), name: "waxed_copper_lantern_from_honeycomb" },
-    Recipe { needs: &[(ITEM_COPPER_TRAPDOOR, 1), (ITEM_HONEYCOMB, 1)], result: (ITEM_WAXED_COPPER_TRAPDOOR, 1), name: "waxed_copper_trapdoor_from_honeycomb" },
-    Recipe { needs: &[(ITEM_WAXED_COPPER_BLOCK, 4)], result: (ITEM_WAXED_CUT_COPPER, 4), name: "waxed_cut_copper" },
-    Recipe { needs: &[(ITEM_CUT_COPPER, 1), (ITEM_HONEYCOMB, 1)], result: (ITEM_WAXED_CUT_COPPER, 1), name: "waxed_cut_copper_from_honeycomb" },
-    Recipe { needs: &[(ITEM_WAXED_CUT_COPPER, 3)], result: (ITEM_WAXED_CUT_COPPER_SLAB, 6), name: "waxed_cut_copper_slab" },
-    Recipe { needs: &[(ITEM_CUT_COPPER_SLAB, 1), (ITEM_HONEYCOMB, 1)], result: (ITEM_WAXED_CUT_COPPER_SLAB, 1), name: "waxed_cut_copper_slab_from_honeycomb" },
-    Recipe { needs: &[(ITEM_WAXED_CUT_COPPER, 6)], result: (ITEM_WAXED_CUT_COPPER_STAIRS, 4), name: "waxed_cut_copper_stairs" },
-    Recipe { needs: &[(ITEM_CUT_COPPER_STAIRS, 1), (ITEM_HONEYCOMB, 1)], result: (ITEM_WAXED_CUT_COPPER_STAIRS, 1), name: "waxed_cut_copper_stairs_from_honeycomb" },
-    Recipe { needs: &[(ITEM_WAXED_EXPOSED_CUT_COPPER_SLAB, 2)], result: (ITEM_WAXED_EXPOSED_CHISELED_COPPER, 1), name: "waxed_exposed_chiseled_copper" },
-    Recipe { needs: &[(ITEM_EXPOSED_CHISELED_COPPER, 1), (ITEM_HONEYCOMB, 1)], result: (ITEM_WAXED_EXPOSED_CHISELED_COPPER, 1), name: "waxed_exposed_chiseled_copper_from_honeycomb" },
-    Recipe { needs: &[(ITEM_EXPOSED_COPPER_BARS, 1), (ITEM_HONEYCOMB, 1)], result: (ITEM_WAXED_EXPOSED_COPPER_BARS, 1), name: "waxed_exposed_copper_bars_from_honeycomb" },
-    Recipe { needs: &[(ITEM_BLAZE_ROD, 1), (ITEM_REDSTONE, 1), (ITEM_WAXED_EXPOSED_COPPER, 3)], result: (ITEM_WAXED_EXPOSED_COPPER_BULB, 4), name: "waxed_exposed_copper_bulb" },
-    Recipe { needs: &[(ITEM_EXPOSED_COPPER_BULB, 1), (ITEM_HONEYCOMB, 1)], result: (ITEM_WAXED_EXPOSED_COPPER_BULB, 1), name: "waxed_exposed_copper_bulb_from_honeycomb" },
-    Recipe { needs: &[(ITEM_EXPOSED_COPPER_CHAIN, 1), (ITEM_HONEYCOMB, 1)], result: (ITEM_WAXED_EXPOSED_COPPER_CHAIN, 1), name: "waxed_exposed_copper_chain_from_honeycomb" },
-    Recipe { needs: &[(ITEM_EXPOSED_COPPER_CHEST, 1), (ITEM_HONEYCOMB, 1)], result: (ITEM_WAXED_EXPOSED_COPPER_CHEST, 1), name: "waxed_exposed_copper_chest_from_honeycomb" },
-    Recipe { needs: &[(ITEM_EXPOSED_COPPER_DOOR, 1), (ITEM_HONEYCOMB, 1)], result: (ITEM_WAXED_EXPOSED_COPPER_DOOR, 1), name: "waxed_exposed_copper_door_from_honeycomb" },
-    Recipe { needs: &[(ITEM_EXPOSED_COPPER, 1), (ITEM_HONEYCOMB, 1)], result: (ITEM_WAXED_EXPOSED_COPPER, 1), name: "waxed_exposed_copper_from_honeycomb" },
-    Recipe { needs: &[(ITEM_EXPOSED_COPPER_GOLEM_STATUE, 1), (ITEM_HONEYCOMB, 1)], result: (ITEM_WAXED_EXPOSED_COPPER_GOLEM_STATUE, 1), name: "waxed_exposed_copper_golem_statue_from_honeycomb" },
-    Recipe { needs: &[(ITEM_WAXED_EXPOSED_COPPER, 4)], result: (ITEM_WAXED_EXPOSED_COPPER_GRATE, 4), name: "waxed_exposed_copper_grate" },
-    Recipe { needs: &[(ITEM_EXPOSED_COPPER_GRATE, 1), (ITEM_HONEYCOMB, 1)], result: (ITEM_WAXED_EXPOSED_COPPER_GRATE, 1), name: "waxed_exposed_copper_grate_from_honeycomb" },
-    Recipe { needs: &[(ITEM_EXPOSED_COPPER_LANTERN, 1), (ITEM_HONEYCOMB, 1)], result: (ITEM_WAXED_EXPOSED_COPPER_LANTERN, 1), name: "waxed_exposed_copper_lantern_from_honeycomb" },
-    Recipe { needs: &[(ITEM_EXPOSED_COPPER_TRAPDOOR, 1), (ITEM_HONEYCOMB, 1)], result: (ITEM_WAXED_EXPOSED_COPPER_TRAPDOOR, 1), name: "waxed_exposed_copper_trapdoor_from_honeycomb" },
-    Recipe { needs: &[(ITEM_WAXED_EXPOSED_COPPER, 4)], result: (ITEM_WAXED_EXPOSED_CUT_COPPER, 4), name: "waxed_exposed_cut_copper" },
-    Recipe { needs: &[(ITEM_EXPOSED_CUT_COPPER, 1), (ITEM_HONEYCOMB, 1)], result: (ITEM_WAXED_EXPOSED_CUT_COPPER, 1), name: "waxed_exposed_cut_copper_from_honeycomb" },
-    Recipe { needs: &[(ITEM_WAXED_EXPOSED_CUT_COPPER, 3)], result: (ITEM_WAXED_EXPOSED_CUT_COPPER_SLAB, 6), name: "waxed_exposed_cut_copper_slab" },
-    Recipe { needs: &[(ITEM_EXPOSED_CUT_COPPER_SLAB, 1), (ITEM_HONEYCOMB, 1)], result: (ITEM_WAXED_EXPOSED_CUT_COPPER_SLAB, 1), name: "waxed_exposed_cut_copper_slab_from_honeycomb" },
-    Recipe { needs: &[(ITEM_WAXED_EXPOSED_CUT_COPPER, 6)], result: (ITEM_WAXED_EXPOSED_CUT_COPPER_STAIRS, 4), name: "waxed_exposed_cut_copper_stairs" },
-    Recipe { needs: &[(ITEM_EXPOSED_CUT_COPPER_STAIRS, 1), (ITEM_HONEYCOMB, 1)], result: (ITEM_WAXED_EXPOSED_CUT_COPPER_STAIRS, 1), name: "waxed_exposed_cut_copper_stairs_from_honeycomb" },
-    Recipe { needs: &[(ITEM_EXPOSED_LIGHTNING_ROD, 1), (ITEM_HONEYCOMB, 1)], result: (ITEM_WAXED_EXPOSED_LIGHTNING_ROD, 1), name: "waxed_exposed_lightning_rod_from_honeycomb" },
-    Recipe { needs: &[(ITEM_HONEYCOMB, 1), (ITEM_LIGHTNING_ROD, 1)], result: (ITEM_WAXED_LIGHTNING_ROD, 1), name: "waxed_lightning_rod_from_honeycomb" },
-    Recipe { needs: &[(ITEM_WAXED_OXIDIZED_CUT_COPPER_SLAB, 2)], result: (ITEM_WAXED_OXIDIZED_CHISELED_COPPER, 1), name: "waxed_oxidized_chiseled_copper" },
-    Recipe { needs: &[(ITEM_HONEYCOMB, 1), (ITEM_OXIDIZED_CHISELED_COPPER, 1)], result: (ITEM_WAXED_OXIDIZED_CHISELED_COPPER, 1), name: "waxed_oxidized_chiseled_copper_from_honeycomb" },
-    Recipe { needs: &[(ITEM_HONEYCOMB, 1), (ITEM_OXIDIZED_COPPER_BARS, 1)], result: (ITEM_WAXED_OXIDIZED_COPPER_BARS, 1), name: "waxed_oxidized_copper_bars_from_honeycomb" },
-    Recipe { needs: &[(ITEM_BLAZE_ROD, 1), (ITEM_REDSTONE, 1), (ITEM_WAXED_OXIDIZED_COPPER, 3)], result: (ITEM_WAXED_OXIDIZED_COPPER_BULB, 4), name: "waxed_oxidized_copper_bulb" },
-    Recipe { needs: &[(ITEM_HONEYCOMB, 1), (ITEM_OXIDIZED_COPPER_BULB, 1)], result: (ITEM_WAXED_OXIDIZED_COPPER_BULB, 1), name: "waxed_oxidized_copper_bulb_from_honeycomb" },
-    Recipe { needs: &[(ITEM_HONEYCOMB, 1), (ITEM_OXIDIZED_COPPER_CHAIN, 1)], result: (ITEM_WAXED_OXIDIZED_COPPER_CHAIN, 1), name: "waxed_oxidized_copper_chain_from_honeycomb" },
-    Recipe { needs: &[(ITEM_HONEYCOMB, 1), (ITEM_OXIDIZED_COPPER_CHEST, 1)], result: (ITEM_WAXED_OXIDIZED_COPPER_CHEST, 1), name: "waxed_oxidized_copper_chest_from_honeycomb" },
-    Recipe { needs: &[(ITEM_HONEYCOMB, 1), (ITEM_OXIDIZED_COPPER_DOOR, 1)], result: (ITEM_WAXED_OXIDIZED_COPPER_DOOR, 1), name: "waxed_oxidized_copper_door_from_honeycomb" },
-    Recipe { needs: &[(ITEM_HONEYCOMB, 1), (ITEM_OXIDIZED_COPPER, 1)], result: (ITEM_WAXED_OXIDIZED_COPPER, 1), name: "waxed_oxidized_copper_from_honeycomb" },
-    Recipe { needs: &[(ITEM_HONEYCOMB, 1), (ITEM_OXIDIZED_COPPER_GOLEM_STATUE, 1)], result: (ITEM_WAXED_OXIDIZED_COPPER_GOLEM_STATUE, 1), name: "waxed_oxidized_copper_golem_statue_from_honeycomb" },
-    Recipe { needs: &[(ITEM_WAXED_OXIDIZED_COPPER, 4)], result: (ITEM_WAXED_OXIDIZED_COPPER_GRATE, 4), name: "waxed_oxidized_copper_grate" },
-    Recipe { needs: &[(ITEM_HONEYCOMB, 1), (ITEM_OXIDIZED_COPPER_GRATE, 1)], result: (ITEM_WAXED_OXIDIZED_COPPER_GRATE, 1), name: "waxed_oxidized_copper_grate_from_honeycomb" },
-    Recipe { needs: &[(ITEM_HONEYCOMB, 1), (ITEM_OXIDIZED_COPPER_LANTERN, 1)], result: (ITEM_WAXED_OXIDIZED_COPPER_LANTERN, 1), name: "waxed_oxidized_copper_lantern_from_honeycomb" },
-    Recipe { needs: &[(ITEM_HONEYCOMB, 1), (ITEM_OXIDIZED_COPPER_TRAPDOOR, 1)], result: (ITEM_WAXED_OXIDIZED_COPPER_TRAPDOOR, 1), name: "waxed_oxidized_copper_trapdoor_from_honeycomb" },
-    Recipe { needs: &[(ITEM_WAXED_OXIDIZED_COPPER, 4)], result: (ITEM_WAXED_OXIDIZED_CUT_COPPER, 4), name: "waxed_oxidized_cut_copper" },
-    Recipe { needs: &[(ITEM_HONEYCOMB, 1), (ITEM_OXIDIZED_CUT_COPPER, 1)], result: (ITEM_WAXED_OXIDIZED_CUT_COPPER, 1), name: "waxed_oxidized_cut_copper_from_honeycomb" },
-    Recipe { needs: &[(ITEM_WAXED_OXIDIZED_CUT_COPPER, 3)], result: (ITEM_WAXED_OXIDIZED_CUT_COPPER_SLAB, 6), name: "waxed_oxidized_cut_copper_slab" },
-    Recipe { needs: &[(ITEM_HONEYCOMB, 1), (ITEM_OXIDIZED_CUT_COPPER_SLAB, 1)], result: (ITEM_WAXED_OXIDIZED_CUT_COPPER_SLAB, 1), name: "waxed_oxidized_cut_copper_slab_from_honeycomb" },
-    Recipe { needs: &[(ITEM_WAXED_OXIDIZED_CUT_COPPER, 6)], result: (ITEM_WAXED_OXIDIZED_CUT_COPPER_STAIRS, 4), name: "waxed_oxidized_cut_copper_stairs" },
-    Recipe { needs: &[(ITEM_HONEYCOMB, 1), (ITEM_OXIDIZED_CUT_COPPER_STAIRS, 1)], result: (ITEM_WAXED_OXIDIZED_CUT_COPPER_STAIRS, 1), name: "waxed_oxidized_cut_copper_stairs_from_honeycomb" },
-    Recipe { needs: &[(ITEM_HONEYCOMB, 1), (ITEM_OXIDIZED_LIGHTNING_ROD, 1)], result: (ITEM_WAXED_OXIDIZED_LIGHTNING_ROD, 1), name: "waxed_oxidized_lightning_rod_from_honeycomb" },
-    Recipe { needs: &[(ITEM_WAXED_WEATHERED_CUT_COPPER_SLAB, 2)], result: (ITEM_WAXED_WEATHERED_CHISELED_COPPER, 1), name: "waxed_weathered_chiseled_copper" },
-    Recipe { needs: &[(ITEM_HONEYCOMB, 1), (ITEM_WEATHERED_CHISELED_COPPER, 1)], result: (ITEM_WAXED_WEATHERED_CHISELED_COPPER, 1), name: "waxed_weathered_chiseled_copper_from_honeycomb" },
-    Recipe { needs: &[(ITEM_HONEYCOMB, 1), (ITEM_WEATHERED_COPPER_BARS, 1)], result: (ITEM_WAXED_WEATHERED_COPPER_BARS, 1), name: "waxed_weathered_copper_bars_from_honeycomb" },
-    Recipe { needs: &[(ITEM_BLAZE_ROD, 1), (ITEM_REDSTONE, 1), (ITEM_WAXED_WEATHERED_COPPER, 3)], result: (ITEM_WAXED_WEATHERED_COPPER_BULB, 4), name: "waxed_weathered_copper_bulb" },
-    Recipe { needs: &[(ITEM_HONEYCOMB, 1), (ITEM_WEATHERED_COPPER_BULB, 1)], result: (ITEM_WAXED_WEATHERED_COPPER_BULB, 1), name: "waxed_weathered_copper_bulb_from_honeycomb" },
-    Recipe { needs: &[(ITEM_HONEYCOMB, 1), (ITEM_WEATHERED_COPPER_CHAIN, 1)], result: (ITEM_WAXED_WEATHERED_COPPER_CHAIN, 1), name: "waxed_weathered_copper_chain_from_honeycomb" },
-    Recipe { needs: &[(ITEM_HONEYCOMB, 1), (ITEM_WEATHERED_COPPER_CHEST, 1)], result: (ITEM_WAXED_WEATHERED_COPPER_CHEST, 1), name: "waxed_weathered_copper_chest_from_honeycomb" },
-    Recipe { needs: &[(ITEM_HONEYCOMB, 1), (ITEM_WEATHERED_COPPER_DOOR, 1)], result: (ITEM_WAXED_WEATHERED_COPPER_DOOR, 1), name: "waxed_weathered_copper_door_from_honeycomb" },
-    Recipe { needs: &[(ITEM_HONEYCOMB, 1), (ITEM_WEATHERED_COPPER, 1)], result: (ITEM_WAXED_WEATHERED_COPPER, 1), name: "waxed_weathered_copper_from_honeycomb" },
-    Recipe { needs: &[(ITEM_HONEYCOMB, 1), (ITEM_WEATHERED_COPPER_GOLEM_STATUE, 1)], result: (ITEM_WAXED_WEATHERED_COPPER_GOLEM_STATUE, 1), name: "waxed_weathered_copper_golem_statue_from_honeycomb" },
-    Recipe { needs: &[(ITEM_WAXED_WEATHERED_COPPER, 4)], result: (ITEM_WAXED_WEATHERED_COPPER_GRATE, 4), name: "waxed_weathered_copper_grate" },
-    Recipe { needs: &[(ITEM_HONEYCOMB, 1), (ITEM_WEATHERED_COPPER_GRATE, 1)], result: (ITEM_WAXED_WEATHERED_COPPER_GRATE, 1), name: "waxed_weathered_copper_grate_from_honeycomb" },
-    Recipe { needs: &[(ITEM_HONEYCOMB, 1), (ITEM_WEATHERED_COPPER_LANTERN, 1)], result: (ITEM_WAXED_WEATHERED_COPPER_LANTERN, 1), name: "waxed_weathered_copper_lantern_from_honeycomb" },
-    Recipe { needs: &[(ITEM_HONEYCOMB, 1), (ITEM_WEATHERED_COPPER_TRAPDOOR, 1)], result: (ITEM_WAXED_WEATHERED_COPPER_TRAPDOOR, 1), name: "waxed_weathered_copper_trapdoor_from_honeycomb" },
-    Recipe { needs: &[(ITEM_WAXED_WEATHERED_COPPER, 4)], result: (ITEM_WAXED_WEATHERED_CUT_COPPER, 4), name: "waxed_weathered_cut_copper" },
-    Recipe { needs: &[(ITEM_HONEYCOMB, 1), (ITEM_WEATHERED_CUT_COPPER, 1)], result: (ITEM_WAXED_WEATHERED_CUT_COPPER, 1), name: "waxed_weathered_cut_copper_from_honeycomb" },
-    Recipe { needs: &[(ITEM_WAXED_WEATHERED_CUT_COPPER, 3)], result: (ITEM_WAXED_WEATHERED_CUT_COPPER_SLAB, 6), name: "waxed_weathered_cut_copper_slab" },
-    Recipe { needs: &[(ITEM_HONEYCOMB, 1), (ITEM_WEATHERED_CUT_COPPER_SLAB, 1)], result: (ITEM_WAXED_WEATHERED_CUT_COPPER_SLAB, 1), name: "waxed_weathered_cut_copper_slab_from_honeycomb" },
-    Recipe { needs: &[(ITEM_WAXED_WEATHERED_CUT_COPPER, 6)], result: (ITEM_WAXED_WEATHERED_CUT_COPPER_STAIRS, 4), name: "waxed_weathered_cut_copper_stairs" },
-    Recipe { needs: &[(ITEM_HONEYCOMB, 1), (ITEM_WEATHERED_CUT_COPPER_STAIRS, 1)], result: (ITEM_WAXED_WEATHERED_CUT_COPPER_STAIRS, 1), name: "waxed_weathered_cut_copper_stairs_from_honeycomb" },
-    Recipe { needs: &[(ITEM_HONEYCOMB, 1), (ITEM_WEATHERED_LIGHTNING_ROD, 1)], result: (ITEM_WAXED_WEATHERED_LIGHTNING_ROD, 1), name: "waxed_weathered_lightning_rod_from_honeycomb" },
-    Recipe { needs: &[(ITEM_DIAMOND, 7), (ITEM_TERRACOTTA, 1), (ITEM_WAYFINDER_ARMOR_TRIM_SMITHING_TEMPLATE, 1)], result: (ITEM_WAYFINDER_ARMOR_TRIM_SMITHING_TEMPLATE, 2), name: "wayfinder_armor_trim_smithing_template" },
-    Recipe { needs: &[(ITEM_WEATHERED_CUT_COPPER_SLAB, 2)], result: (ITEM_WEATHERED_CHISELED_COPPER, 1), name: "weathered_chiseled_copper" },
-    Recipe { needs: &[(ITEM_BLAZE_ROD, 1), (ITEM_REDSTONE, 1), (ITEM_WEATHERED_COPPER, 3)], result: (ITEM_WEATHERED_COPPER_BULB, 4), name: "weathered_copper_bulb" },
-    Recipe { needs: &[(ITEM_WEATHERED_COPPER, 4)], result: (ITEM_WEATHERED_COPPER_GRATE, 4), name: "weathered_copper_grate" },
-    Recipe { needs: &[(ITEM_WEATHERED_COPPER, 4)], result: (ITEM_WEATHERED_CUT_COPPER, 4), name: "weathered_cut_copper" },
-    Recipe { needs: &[(ITEM_WEATHERED_CUT_COPPER, 3)], result: (ITEM_WEATHERED_CUT_COPPER_SLAB, 6), name: "weathered_cut_copper_slab" },
-    Recipe { needs: &[(ITEM_WEATHERED_CUT_COPPER, 6)], result: (ITEM_WEATHERED_CUT_COPPER_STAIRS, 4), name: "weathered_cut_copper_stairs" },
-    Recipe { needs: &[(ITEM_HAY_BLOCK, 1)], result: (WHEAT, 9), name: "wheat" },
-    Recipe { needs: &[(STICK, 1), (ITEM_WHITE_WOOL, 6)], result: (ITEM_WHITE_BANNER, 1), name: "white_banner" },
-    Recipe { needs: &[(ITEM_WHITE_WOOL, 3), (TAG_PLANKS, 3)], result: (ITEM_WHITE_BED, 1), name: "white_bed" },
-    Recipe { needs: &[(ITEM_CANDLE, 1), (ITEM_WHITE_DYE, 1)], result: (ITEM_WHITE_CANDLE, 1), name: "white_candle" },
-    Recipe { needs: &[(ITEM_WHITE_WOOL, 2)], result: (ITEM_WHITE_CARPET, 3), name: "white_carpet" },
-    Recipe { needs: &[(ITEM_GRAVEL, 1), (ITEM_GRAVEL, 1), (ITEM_GRAVEL, 1), (ITEM_GRAVEL, 1), (ITEM_SAND, 1), (ITEM_SAND, 1), (ITEM_SAND, 1), (ITEM_SAND, 1), (ITEM_WHITE_DYE, 1)], result: (ITEM_WHITE_CONCRETE_POWDER, 8), name: "white_concrete_powder" },
-    Recipe { needs: &[(ITEM_WHITE_CONCRETE, 3)], result: (ITEM_WHITE_CONCRETE_SLAB, 6), name: "white_concrete_slab" },
-    Recipe { needs: &[(ITEM_WHITE_CONCRETE, 6)], result: (ITEM_WHITE_CONCRETE_STAIRS, 4), name: "white_concrete_stairs" },
-    Recipe { needs: &[(ITEM_WHITE_WOOL_SLAB, 3)], result: (ITEM_WHITE_CUSHION, 1), name: "white_cushion" },
-    Recipe { needs: &[(ITEM_BONE_MEAL, 1)], result: (ITEM_WHITE_DYE, 1), name: "white_dye" },
-    Recipe { needs: &[(ITEM_LILY_OF_THE_VALLEY, 1)], result: (ITEM_WHITE_DYE, 1), name: "white_dye_from_lily_of_the_valley" },
-    Recipe { needs: &[(ITEM_GLASS, 2), (ITEM_LEATHER, 3), (ITEM_WHITE_WOOL, 1)], result: (ITEM_WHITE_HARNESS, 1), name: "white_harness" },
-    Recipe { needs: &[(ITEM_GLASS, 8), (ITEM_WHITE_DYE, 1)], result: (ITEM_WHITE_STAINED_GLASS, 8), name: "white_stained_glass" },
-    Recipe { needs: &[(ITEM_WHITE_STAINED_GLASS, 6)], result: (ITEM_WHITE_STAINED_GLASS_PANE, 16), name: "white_stained_glass_pane" },
-    Recipe { needs: &[(ITEM_GLASS_PANE, 8), (ITEM_WHITE_DYE, 1)], result: (ITEM_WHITE_STAINED_GLASS_PANE, 8), name: "white_stained_glass_pane_from_glass_pane" },
-    Recipe { needs: &[(ITEM_TERRACOTTA, 8), (ITEM_WHITE_DYE, 1)], result: (ITEM_WHITE_TERRACOTTA, 8), name: "white_terracotta" },
-    Recipe { needs: &[(ITEM_STRING, 4)], result: (ITEM_WHITE_WOOL, 1), name: "white_wool_from_string" },
-    Recipe { needs: &[(ITEM_WHITE_WOOL, 3)], result: (ITEM_WHITE_WOOL_SLAB, 6), name: "white_wool_slab" },
-    Recipe { needs: &[(ITEM_WHITE_WOOL, 6)], result: (ITEM_WHITE_WOOL_STAIRS, 4), name: "white_wool_stairs" },
-    Recipe { needs: &[(ITEM_DIAMOND, 7), (ITEM_MOSSY_COBBLESTONE, 1), (ITEM_WILD_ARMOR_TRIM_SMITHING_TEMPLATE, 1)], result: (ITEM_WILD_ARMOR_TRIM_SMITHING_TEMPLATE, 2), name: "wild_armor_trim_smithing_template" },
-    Recipe { needs: &[(ITEM_BREEZE_ROD, 1)], result: (ITEM_WIND_CHARGE, 4), name: "wind_charge" },
-    Recipe { needs: &[(ITEM_ARMADILLO_SCUTE, 6)], result: (ITEM_WOLF_ARMOR, 1), name: "wolf_armor" },
-    Recipe { needs: &[(STICK, 2), (TAG_PLANKS, 3)], result: (ITEM_WOODEN_AXE, 1), name: "wooden_axe" },
-    Recipe { needs: &[(STICK, 2), (TAG_PLANKS, 2)], result: (ITEM_WOODEN_HOE, 1), name: "wooden_hoe" },
-    Recipe { needs: &[(STICK, 2), (TAG_PLANKS, 3)], result: (WOODEN_PICKAXE, 1), name: "wooden_pickaxe" },
-    Recipe { needs: &[(STICK, 2), (TAG_PLANKS, 1)], result: (ITEM_WOODEN_SHOVEL, 1), name: "wooden_shovel" },
-    Recipe { needs: &[(STICK, 2), (TAG_PLANKS, 1)], result: (ITEM_WOODEN_SPEAR, 1), name: "wooden_spear" },
-    Recipe { needs: &[(STICK, 1), (TAG_PLANKS, 2)], result: (ITEM_WOODEN_SWORD, 1), name: "wooden_sword" },
-    Recipe { needs: &[(ITEM_BOOK, 1), (ITEM_FEATHER, 1), (ITEM_INK_SAC, 1)], result: (ITEM_WRITABLE_BOOK, 1), name: "writable_book" },
-    Recipe { needs: &[(STICK, 1), (ITEM_YELLOW_WOOL, 6)], result: (ITEM_YELLOW_BANNER, 1), name: "yellow_banner" },
-    Recipe { needs: &[(ITEM_YELLOW_WOOL, 3), (TAG_PLANKS, 3)], result: (ITEM_YELLOW_BED, 1), name: "yellow_bed" },
-    Recipe { needs: &[(ITEM_CANDLE, 1), (ITEM_YELLOW_DYE, 1)], result: (ITEM_YELLOW_CANDLE, 1), name: "yellow_candle" },
-    Recipe { needs: &[(ITEM_YELLOW_WOOL, 2)], result: (ITEM_YELLOW_CARPET, 3), name: "yellow_carpet" },
-    Recipe { needs: &[(ITEM_GRAVEL, 1), (ITEM_GRAVEL, 1), (ITEM_GRAVEL, 1), (ITEM_GRAVEL, 1), (ITEM_SAND, 1), (ITEM_SAND, 1), (ITEM_SAND, 1), (ITEM_SAND, 1), (ITEM_YELLOW_DYE, 1)], result: (ITEM_YELLOW_CONCRETE_POWDER, 8), name: "yellow_concrete_powder" },
-    Recipe { needs: &[(ITEM_YELLOW_CONCRETE, 3)], result: (ITEM_YELLOW_CONCRETE_SLAB, 6), name: "yellow_concrete_slab" },
-    Recipe { needs: &[(ITEM_YELLOW_CONCRETE, 6)], result: (ITEM_YELLOW_CONCRETE_STAIRS, 4), name: "yellow_concrete_stairs" },
-    Recipe { needs: &[(ITEM_YELLOW_WOOL_SLAB, 3)], result: (ITEM_YELLOW_CUSHION, 1), name: "yellow_cushion" },
-    Recipe { needs: &[(ITEM_DANDELION, 1)], result: (ITEM_YELLOW_DYE, 1), name: "yellow_dye_from_dandelion" },
-    Recipe { needs: &[(ITEM_GOLDEN_DANDELION, 1)], result: (ITEM_YELLOW_DYE, 1), name: "yellow_dye_from_golden_dandelion" },
-    Recipe { needs: &[(ITEM_SUNFLOWER, 1)], result: (ITEM_YELLOW_DYE, 2), name: "yellow_dye_from_sunflower" },
-    Recipe { needs: &[(ITEM_WILDFLOWERS, 1)], result: (ITEM_YELLOW_DYE, 1), name: "yellow_dye_from_wildflowers" },
-    Recipe { needs: &[(ITEM_GLASS, 2), (ITEM_LEATHER, 3), (ITEM_YELLOW_WOOL, 1)], result: (ITEM_YELLOW_HARNESS, 1), name: "yellow_harness" },
-    Recipe { needs: &[(ITEM_GLASS, 8), (ITEM_YELLOW_DYE, 1)], result: (ITEM_YELLOW_STAINED_GLASS, 8), name: "yellow_stained_glass" },
-    Recipe { needs: &[(ITEM_YELLOW_STAINED_GLASS, 6)], result: (ITEM_YELLOW_STAINED_GLASS_PANE, 16), name: "yellow_stained_glass_pane" },
-    Recipe { needs: &[(ITEM_GLASS_PANE, 8), (ITEM_YELLOW_DYE, 1)], result: (ITEM_YELLOW_STAINED_GLASS_PANE, 8), name: "yellow_stained_glass_pane_from_glass_pane" },
-    Recipe { needs: &[(ITEM_TERRACOTTA, 8), (ITEM_YELLOW_DYE, 1)], result: (ITEM_YELLOW_TERRACOTTA, 8), name: "yellow_terracotta" },
-    Recipe { needs: &[(ITEM_YELLOW_WOOL, 3)], result: (ITEM_YELLOW_WOOL_SLAB, 6), name: "yellow_wool_slab" },
-    Recipe { needs: &[(ITEM_YELLOW_WOOL, 6)], result: (ITEM_YELLOW_WOOL_STAIRS, 4), name: "yellow_wool_stairs" },
+    Recipe { needs: &[(ITEM_ACACIA_PLANKS, 5)], result: (ITEM_ACACIA_BOAT, 1), name: "acacia_boat", shaped: true, cells: &[(0, 0, ITEM_ACACIA_PLANKS), (2, 0, ITEM_ACACIA_PLANKS), (0, 1, ITEM_ACACIA_PLANKS), (1, 1, ITEM_ACACIA_PLANKS), (2, 1, ITEM_ACACIA_PLANKS)] },
+    Recipe { needs: &[(ITEM_ACACIA_PLANKS, 1)], result: (ITEM_ACACIA_BUTTON, 1), name: "acacia_button", shaped: false, cells: &[] },
+    Recipe { needs: &[(ITEM_ACACIA_BOAT, 1), (ITEM_CHEST, 1)], result: (ITEM_ACACIA_CHEST_BOAT, 1), name: "acacia_chest_boat", shaped: false, cells: &[] },
+    Recipe { needs: &[(ITEM_ACACIA_PLANKS, 6)], result: (ITEM_ACACIA_DOOR, 3), name: "acacia_door", shaped: true, cells: &[(0, 0, ITEM_ACACIA_PLANKS), (1, 0, ITEM_ACACIA_PLANKS), (0, 1, ITEM_ACACIA_PLANKS), (1, 1, ITEM_ACACIA_PLANKS), (0, 2, ITEM_ACACIA_PLANKS), (1, 2, ITEM_ACACIA_PLANKS)] },
+    Recipe { needs: &[(ITEM_ACACIA_PLANKS, 4), (STICK, 2)], result: (ITEM_ACACIA_FENCE, 3), name: "acacia_fence", shaped: true, cells: &[(0, 0, ITEM_ACACIA_PLANKS), (1, 0, STICK), (2, 0, ITEM_ACACIA_PLANKS), (0, 1, ITEM_ACACIA_PLANKS), (1, 1, STICK), (2, 1, ITEM_ACACIA_PLANKS)] },
+    Recipe { needs: &[(ITEM_ACACIA_PLANKS, 2), (STICK, 4)], result: (ITEM_ACACIA_FENCE_GATE, 1), name: "acacia_fence_gate", shaped: true, cells: &[(0, 0, STICK), (1, 0, ITEM_ACACIA_PLANKS), (2, 0, STICK), (0, 1, STICK), (1, 1, ITEM_ACACIA_PLANKS), (2, 1, STICK)] },
+    Recipe { needs: &[(ITEM_IRON_CHAIN, 2), (ITEM_STRIPPED_ACACIA_LOG, 6)], result: (ITEM_ACACIA_HANGING_SIGN, 6), name: "acacia_hanging_sign", shaped: true, cells: &[(0, 0, ITEM_IRON_CHAIN), (2, 0, ITEM_IRON_CHAIN), (0, 1, ITEM_STRIPPED_ACACIA_LOG), (1, 1, ITEM_STRIPPED_ACACIA_LOG), (2, 1, ITEM_STRIPPED_ACACIA_LOG), (0, 2, ITEM_STRIPPED_ACACIA_LOG), (1, 2, ITEM_STRIPPED_ACACIA_LOG), (2, 2, ITEM_STRIPPED_ACACIA_LOG)] },
+    Recipe { needs: &[(TAG_ACACIA_LOGS, 1)], result: (ITEM_ACACIA_PLANKS, 4), name: "acacia_planks", shaped: false, cells: &[] },
+    Recipe { needs: &[(ITEM_ACACIA_PLANKS, 2)], result: (ITEM_ACACIA_PRESSURE_PLATE, 1), name: "acacia_pressure_plate", shaped: true, cells: &[(0, 0, ITEM_ACACIA_PLANKS), (1, 0, ITEM_ACACIA_PLANKS)] },
+    Recipe { needs: &[(ITEM_STRIPPED_ACACIA_LOG, 6)], result: (ITEM_ACACIA_SHELF, 6), name: "acacia_shelf", shaped: true, cells: &[(0, 0, ITEM_STRIPPED_ACACIA_LOG), (1, 0, ITEM_STRIPPED_ACACIA_LOG), (2, 0, ITEM_STRIPPED_ACACIA_LOG), (0, 2, ITEM_STRIPPED_ACACIA_LOG), (1, 2, ITEM_STRIPPED_ACACIA_LOG), (2, 2, ITEM_STRIPPED_ACACIA_LOG)] },
+    Recipe { needs: &[(ITEM_ACACIA_PLANKS, 6), (STICK, 1)], result: (ITEM_ACACIA_SIGN, 3), name: "acacia_sign", shaped: true, cells: &[(0, 0, ITEM_ACACIA_PLANKS), (1, 0, ITEM_ACACIA_PLANKS), (2, 0, ITEM_ACACIA_PLANKS), (0, 1, ITEM_ACACIA_PLANKS), (1, 1, ITEM_ACACIA_PLANKS), (2, 1, ITEM_ACACIA_PLANKS), (1, 2, STICK)] },
+    Recipe { needs: &[(ITEM_ACACIA_PLANKS, 3)], result: (ITEM_ACACIA_SLAB, 6), name: "acacia_slab", shaped: true, cells: &[(0, 0, ITEM_ACACIA_PLANKS), (1, 0, ITEM_ACACIA_PLANKS), (2, 0, ITEM_ACACIA_PLANKS)] },
+    Recipe { needs: &[(ITEM_ACACIA_PLANKS, 6)], result: (ITEM_ACACIA_STAIRS, 4), name: "acacia_stairs", shaped: true, cells: &[(0, 0, ITEM_ACACIA_PLANKS), (0, 1, ITEM_ACACIA_PLANKS), (1, 1, ITEM_ACACIA_PLANKS), (0, 2, ITEM_ACACIA_PLANKS), (1, 2, ITEM_ACACIA_PLANKS), (2, 2, ITEM_ACACIA_PLANKS)] },
+    Recipe { needs: &[(ITEM_ACACIA_PLANKS, 6)], result: (ITEM_ACACIA_TRAPDOOR, 2), name: "acacia_trapdoor", shaped: true, cells: &[(0, 0, ITEM_ACACIA_PLANKS), (1, 0, ITEM_ACACIA_PLANKS), (2, 0, ITEM_ACACIA_PLANKS), (0, 1, ITEM_ACACIA_PLANKS), (1, 1, ITEM_ACACIA_PLANKS), (2, 1, ITEM_ACACIA_PLANKS)] },
+    Recipe { needs: &[(ITEM_ACACIA_LOG, 4)], result: (ITEM_ACACIA_WOOD, 3), name: "acacia_wood", shaped: true, cells: &[(0, 0, ITEM_ACACIA_LOG), (1, 0, ITEM_ACACIA_LOG), (0, 1, ITEM_ACACIA_LOG), (1, 1, ITEM_ACACIA_LOG)] },
+    Recipe { needs: &[(ITEM_IRON_INGOT, 6), (ITEM_REDSTONE_TORCH, 1), (STICK, 2)], result: (ITEM_ACTIVATOR_RAIL, 6), name: "activator_rail", shaped: true, cells: &[(0, 0, ITEM_IRON_INGOT), (1, 0, STICK), (2, 0, ITEM_IRON_INGOT), (0, 1, ITEM_IRON_INGOT), (1, 1, ITEM_REDSTONE_TORCH), (2, 1, ITEM_IRON_INGOT), (0, 2, ITEM_IRON_INGOT), (1, 2, STICK), (2, 2, ITEM_IRON_INGOT)] },
+    Recipe { needs: &[(ITEM_AMETHYST_SHARD, 4)], result: (ITEM_AMETHYST_BLOCK, 1), name: "amethyst_block", shaped: true, cells: &[(0, 0, ITEM_AMETHYST_SHARD), (1, 0, ITEM_AMETHYST_SHARD), (0, 1, ITEM_AMETHYST_SHARD), (1, 1, ITEM_AMETHYST_SHARD)] },
+    Recipe { needs: &[(COBBLESTONE, 1), (ITEM_DIORITE, 1)], result: (ITEM_ANDESITE, 2), name: "andesite", shaped: false, cells: &[] },
+    Recipe { needs: &[(ITEM_ANDESITE, 3)], result: (ITEM_ANDESITE_SLAB, 6), name: "andesite_slab", shaped: true, cells: &[(0, 0, ITEM_ANDESITE), (1, 0, ITEM_ANDESITE), (2, 0, ITEM_ANDESITE)] },
+    Recipe { needs: &[(ITEM_ANDESITE, 6)], result: (ITEM_ANDESITE_STAIRS, 4), name: "andesite_stairs", shaped: true, cells: &[(0, 0, ITEM_ANDESITE), (0, 1, ITEM_ANDESITE), (1, 1, ITEM_ANDESITE), (0, 2, ITEM_ANDESITE), (1, 2, ITEM_ANDESITE), (2, 2, ITEM_ANDESITE)] },
+    Recipe { needs: &[(ITEM_ANDESITE, 6)], result: (ITEM_ANDESITE_WALL, 6), name: "andesite_wall", shaped: true, cells: &[(0, 0, ITEM_ANDESITE), (1, 0, ITEM_ANDESITE), (2, 0, ITEM_ANDESITE), (0, 1, ITEM_ANDESITE), (1, 1, ITEM_ANDESITE), (2, 1, ITEM_ANDESITE)] },
+    Recipe { needs: &[(ITEM_IRON_BLOCK, 3), (ITEM_IRON_INGOT, 4)], result: (ITEM_ANVIL, 1), name: "anvil", shaped: true, cells: &[(0, 0, ITEM_IRON_BLOCK), (1, 0, ITEM_IRON_BLOCK), (2, 0, ITEM_IRON_BLOCK), (1, 1, ITEM_IRON_INGOT), (0, 2, ITEM_IRON_INGOT), (1, 2, ITEM_IRON_INGOT), (2, 2, ITEM_IRON_INGOT)] },
+    Recipe { needs: &[(ITEM_SMOOTH_STONE_SLAB, 1), (STICK, 6)], result: (ITEM_ARMOR_STAND, 1), name: "armor_stand", shaped: true, cells: &[(0, 0, STICK), (1, 0, STICK), (2, 0, STICK), (1, 1, STICK), (0, 2, STICK), (1, 2, ITEM_SMOOTH_STONE_SLAB), (2, 2, STICK)] },
+    Recipe { needs: &[(ITEM_FEATHER, 1), (ITEM_FLINT, 1), (STICK, 1)], result: (ITEM_ARROW, 4), name: "arrow", shaped: true, cells: &[(0, 0, ITEM_FLINT), (0, 1, STICK), (0, 2, ITEM_FEATHER)] },
+    Recipe { needs: &[(ITEM_BAMBOO, 1), (ITEM_BAMBOO, 1), (ITEM_BAMBOO, 1), (ITEM_BAMBOO, 1), (ITEM_BAMBOO, 1), (ITEM_BAMBOO, 1), (ITEM_BAMBOO, 1), (ITEM_BAMBOO, 1), (ITEM_BAMBOO, 1)], result: (ITEM_BAMBOO_BLOCK, 1), name: "bamboo_block", shaped: false, cells: &[] },
+    Recipe { needs: &[(ITEM_BAMBOO_PLANKS, 1)], result: (ITEM_BAMBOO_BUTTON, 1), name: "bamboo_button", shaped: false, cells: &[] },
+    Recipe { needs: &[(ITEM_BAMBOO_RAFT, 1), (ITEM_CHEST, 1)], result: (ITEM_BAMBOO_CHEST_RAFT, 1), name: "bamboo_chest_raft", shaped: false, cells: &[] },
+    Recipe { needs: &[(ITEM_BAMBOO_PLANKS, 6)], result: (ITEM_BAMBOO_DOOR, 3), name: "bamboo_door", shaped: true, cells: &[(0, 0, ITEM_BAMBOO_PLANKS), (1, 0, ITEM_BAMBOO_PLANKS), (0, 1, ITEM_BAMBOO_PLANKS), (1, 1, ITEM_BAMBOO_PLANKS), (0, 2, ITEM_BAMBOO_PLANKS), (1, 2, ITEM_BAMBOO_PLANKS)] },
+    Recipe { needs: &[(ITEM_BAMBOO_PLANKS, 4), (STICK, 2)], result: (ITEM_BAMBOO_FENCE, 3), name: "bamboo_fence", shaped: true, cells: &[(0, 0, ITEM_BAMBOO_PLANKS), (1, 0, STICK), (2, 0, ITEM_BAMBOO_PLANKS), (0, 1, ITEM_BAMBOO_PLANKS), (1, 1, STICK), (2, 1, ITEM_BAMBOO_PLANKS)] },
+    Recipe { needs: &[(ITEM_BAMBOO_PLANKS, 2), (STICK, 4)], result: (ITEM_BAMBOO_FENCE_GATE, 1), name: "bamboo_fence_gate", shaped: true, cells: &[(0, 0, STICK), (1, 0, ITEM_BAMBOO_PLANKS), (2, 0, STICK), (0, 1, STICK), (1, 1, ITEM_BAMBOO_PLANKS), (2, 1, STICK)] },
+    Recipe { needs: &[(ITEM_IRON_CHAIN, 2), (ITEM_STRIPPED_BAMBOO_BLOCK, 6)], result: (ITEM_BAMBOO_HANGING_SIGN, 6), name: "bamboo_hanging_sign", shaped: true, cells: &[(0, 0, ITEM_IRON_CHAIN), (2, 0, ITEM_IRON_CHAIN), (0, 1, ITEM_STRIPPED_BAMBOO_BLOCK), (1, 1, ITEM_STRIPPED_BAMBOO_BLOCK), (2, 1, ITEM_STRIPPED_BAMBOO_BLOCK), (0, 2, ITEM_STRIPPED_BAMBOO_BLOCK), (1, 2, ITEM_STRIPPED_BAMBOO_BLOCK), (2, 2, ITEM_STRIPPED_BAMBOO_BLOCK)] },
+    Recipe { needs: &[(ITEM_BAMBOO_SLAB, 2)], result: (ITEM_BAMBOO_MOSAIC, 1), name: "bamboo_mosaic", shaped: true, cells: &[(0, 0, ITEM_BAMBOO_SLAB), (0, 1, ITEM_BAMBOO_SLAB)] },
+    Recipe { needs: &[(ITEM_BAMBOO_MOSAIC, 3)], result: (ITEM_BAMBOO_MOSAIC_SLAB, 6), name: "bamboo_mosaic_slab", shaped: true, cells: &[(0, 0, ITEM_BAMBOO_MOSAIC), (1, 0, ITEM_BAMBOO_MOSAIC), (2, 0, ITEM_BAMBOO_MOSAIC)] },
+    Recipe { needs: &[(ITEM_BAMBOO_MOSAIC, 6)], result: (ITEM_BAMBOO_MOSAIC_STAIRS, 4), name: "bamboo_mosaic_stairs", shaped: true, cells: &[(0, 0, ITEM_BAMBOO_MOSAIC), (0, 1, ITEM_BAMBOO_MOSAIC), (1, 1, ITEM_BAMBOO_MOSAIC), (0, 2, ITEM_BAMBOO_MOSAIC), (1, 2, ITEM_BAMBOO_MOSAIC), (2, 2, ITEM_BAMBOO_MOSAIC)] },
+    Recipe { needs: &[(TAG_BAMBOO_BLOCKS, 1)], result: (ITEM_BAMBOO_PLANKS, 2), name: "bamboo_planks", shaped: false, cells: &[] },
+    Recipe { needs: &[(ITEM_BAMBOO_PLANKS, 2)], result: (ITEM_BAMBOO_PRESSURE_PLATE, 1), name: "bamboo_pressure_plate", shaped: true, cells: &[(0, 0, ITEM_BAMBOO_PLANKS), (1, 0, ITEM_BAMBOO_PLANKS)] },
+    Recipe { needs: &[(ITEM_BAMBOO_PLANKS, 5)], result: (ITEM_BAMBOO_RAFT, 1), name: "bamboo_raft", shaped: true, cells: &[(0, 0, ITEM_BAMBOO_PLANKS), (2, 0, ITEM_BAMBOO_PLANKS), (0, 1, ITEM_BAMBOO_PLANKS), (1, 1, ITEM_BAMBOO_PLANKS), (2, 1, ITEM_BAMBOO_PLANKS)] },
+    Recipe { needs: &[(ITEM_STRIPPED_BAMBOO_BLOCK, 6)], result: (ITEM_BAMBOO_SHELF, 6), name: "bamboo_shelf", shaped: true, cells: &[(0, 0, ITEM_STRIPPED_BAMBOO_BLOCK), (1, 0, ITEM_STRIPPED_BAMBOO_BLOCK), (2, 0, ITEM_STRIPPED_BAMBOO_BLOCK), (0, 2, ITEM_STRIPPED_BAMBOO_BLOCK), (1, 2, ITEM_STRIPPED_BAMBOO_BLOCK), (2, 2, ITEM_STRIPPED_BAMBOO_BLOCK)] },
+    Recipe { needs: &[(ITEM_BAMBOO_PLANKS, 6), (STICK, 1)], result: (ITEM_BAMBOO_SIGN, 3), name: "bamboo_sign", shaped: true, cells: &[(0, 0, ITEM_BAMBOO_PLANKS), (1, 0, ITEM_BAMBOO_PLANKS), (2, 0, ITEM_BAMBOO_PLANKS), (0, 1, ITEM_BAMBOO_PLANKS), (1, 1, ITEM_BAMBOO_PLANKS), (2, 1, ITEM_BAMBOO_PLANKS), (1, 2, STICK)] },
+    Recipe { needs: &[(ITEM_BAMBOO_PLANKS, 3)], result: (ITEM_BAMBOO_SLAB, 6), name: "bamboo_slab", shaped: true, cells: &[(0, 0, ITEM_BAMBOO_PLANKS), (1, 0, ITEM_BAMBOO_PLANKS), (2, 0, ITEM_BAMBOO_PLANKS)] },
+    Recipe { needs: &[(ITEM_BAMBOO_PLANKS, 6)], result: (ITEM_BAMBOO_STAIRS, 4), name: "bamboo_stairs", shaped: true, cells: &[(0, 0, ITEM_BAMBOO_PLANKS), (0, 1, ITEM_BAMBOO_PLANKS), (1, 1, ITEM_BAMBOO_PLANKS), (0, 2, ITEM_BAMBOO_PLANKS), (1, 2, ITEM_BAMBOO_PLANKS), (2, 2, ITEM_BAMBOO_PLANKS)] },
+    Recipe { needs: &[(ITEM_BAMBOO_PLANKS, 6)], result: (ITEM_BAMBOO_TRAPDOOR, 2), name: "bamboo_trapdoor", shaped: true, cells: &[(0, 0, ITEM_BAMBOO_PLANKS), (1, 0, ITEM_BAMBOO_PLANKS), (2, 0, ITEM_BAMBOO_PLANKS), (0, 1, ITEM_BAMBOO_PLANKS), (1, 1, ITEM_BAMBOO_PLANKS), (2, 1, ITEM_BAMBOO_PLANKS)] },
+    Recipe { needs: &[(TAG_PLANKS, 6), (TAG_WOODEN_SLABS, 2)], result: (ITEM_BARREL, 1), name: "barrel", shaped: true, cells: &[(0, 0, TAG_PLANKS), (1, 0, TAG_WOODEN_SLABS), (2, 0, TAG_PLANKS), (0, 1, TAG_PLANKS), (2, 1, TAG_PLANKS), (0, 2, TAG_PLANKS), (1, 2, TAG_WOODEN_SLABS), (2, 2, TAG_PLANKS)] },
+    Recipe { needs: &[(ITEM_GLASS, 5), (ITEM_NETHER_STAR, 1), (ITEM_OBSIDIAN, 3)], result: (ITEM_BEACON, 1), name: "beacon", shaped: true, cells: &[(0, 0, ITEM_GLASS), (1, 0, ITEM_GLASS), (2, 0, ITEM_GLASS), (0, 1, ITEM_GLASS), (1, 1, ITEM_NETHER_STAR), (2, 1, ITEM_GLASS), (0, 2, ITEM_OBSIDIAN), (1, 2, ITEM_OBSIDIAN), (2, 2, ITEM_OBSIDIAN)] },
+    Recipe { needs: &[(ITEM_HONEYCOMB, 3), (TAG_PLANKS, 6)], result: (ITEM_BEEHIVE, 1), name: "beehive", shaped: true, cells: &[(0, 0, TAG_PLANKS), (1, 0, TAG_PLANKS), (2, 0, TAG_PLANKS), (0, 1, ITEM_HONEYCOMB), (1, 1, ITEM_HONEYCOMB), (2, 1, ITEM_HONEYCOMB), (0, 2, TAG_PLANKS), (1, 2, TAG_PLANKS), (2, 2, TAG_PLANKS)] },
+    Recipe { needs: &[(ITEM_BEETROOT, 1), (ITEM_BEETROOT, 1), (ITEM_BEETROOT, 1), (ITEM_BEETROOT, 1), (ITEM_BEETROOT, 1), (ITEM_BEETROOT, 1), (ITEM_BOWL, 1)], result: (ITEM_BEETROOT_SOUP, 1), name: "beetroot_soup", shaped: false, cells: &[] },
+    Recipe { needs: &[(ITEM_BIRCH_PLANKS, 5)], result: (ITEM_BIRCH_BOAT, 1), name: "birch_boat", shaped: true, cells: &[(0, 0, ITEM_BIRCH_PLANKS), (2, 0, ITEM_BIRCH_PLANKS), (0, 1, ITEM_BIRCH_PLANKS), (1, 1, ITEM_BIRCH_PLANKS), (2, 1, ITEM_BIRCH_PLANKS)] },
+    Recipe { needs: &[(ITEM_BIRCH_PLANKS, 1)], result: (ITEM_BIRCH_BUTTON, 1), name: "birch_button", shaped: false, cells: &[] },
+    Recipe { needs: &[(ITEM_BIRCH_BOAT, 1), (ITEM_CHEST, 1)], result: (ITEM_BIRCH_CHEST_BOAT, 1), name: "birch_chest_boat", shaped: false, cells: &[] },
+    Recipe { needs: &[(ITEM_BIRCH_PLANKS, 6)], result: (ITEM_BIRCH_DOOR, 3), name: "birch_door", shaped: true, cells: &[(0, 0, ITEM_BIRCH_PLANKS), (1, 0, ITEM_BIRCH_PLANKS), (0, 1, ITEM_BIRCH_PLANKS), (1, 1, ITEM_BIRCH_PLANKS), (0, 2, ITEM_BIRCH_PLANKS), (1, 2, ITEM_BIRCH_PLANKS)] },
+    Recipe { needs: &[(ITEM_BIRCH_PLANKS, 4), (STICK, 2)], result: (ITEM_BIRCH_FENCE, 3), name: "birch_fence", shaped: true, cells: &[(0, 0, ITEM_BIRCH_PLANKS), (1, 0, STICK), (2, 0, ITEM_BIRCH_PLANKS), (0, 1, ITEM_BIRCH_PLANKS), (1, 1, STICK), (2, 1, ITEM_BIRCH_PLANKS)] },
+    Recipe { needs: &[(ITEM_BIRCH_PLANKS, 2), (STICK, 4)], result: (ITEM_BIRCH_FENCE_GATE, 1), name: "birch_fence_gate", shaped: true, cells: &[(0, 0, STICK), (1, 0, ITEM_BIRCH_PLANKS), (2, 0, STICK), (0, 1, STICK), (1, 1, ITEM_BIRCH_PLANKS), (2, 1, STICK)] },
+    Recipe { needs: &[(ITEM_IRON_CHAIN, 2), (ITEM_STRIPPED_BIRCH_LOG, 6)], result: (ITEM_BIRCH_HANGING_SIGN, 6), name: "birch_hanging_sign", shaped: true, cells: &[(0, 0, ITEM_IRON_CHAIN), (2, 0, ITEM_IRON_CHAIN), (0, 1, ITEM_STRIPPED_BIRCH_LOG), (1, 1, ITEM_STRIPPED_BIRCH_LOG), (2, 1, ITEM_STRIPPED_BIRCH_LOG), (0, 2, ITEM_STRIPPED_BIRCH_LOG), (1, 2, ITEM_STRIPPED_BIRCH_LOG), (2, 2, ITEM_STRIPPED_BIRCH_LOG)] },
+    Recipe { needs: &[(TAG_BIRCH_LOGS, 1)], result: (ITEM_BIRCH_PLANKS, 4), name: "birch_planks", shaped: false, cells: &[] },
+    Recipe { needs: &[(ITEM_BIRCH_PLANKS, 2)], result: (ITEM_BIRCH_PRESSURE_PLATE, 1), name: "birch_pressure_plate", shaped: true, cells: &[(0, 0, ITEM_BIRCH_PLANKS), (1, 0, ITEM_BIRCH_PLANKS)] },
+    Recipe { needs: &[(ITEM_STRIPPED_BIRCH_LOG, 6)], result: (ITEM_BIRCH_SHELF, 6), name: "birch_shelf", shaped: true, cells: &[(0, 0, ITEM_STRIPPED_BIRCH_LOG), (1, 0, ITEM_STRIPPED_BIRCH_LOG), (2, 0, ITEM_STRIPPED_BIRCH_LOG), (0, 2, ITEM_STRIPPED_BIRCH_LOG), (1, 2, ITEM_STRIPPED_BIRCH_LOG), (2, 2, ITEM_STRIPPED_BIRCH_LOG)] },
+    Recipe { needs: &[(ITEM_BIRCH_PLANKS, 6), (STICK, 1)], result: (ITEM_BIRCH_SIGN, 3), name: "birch_sign", shaped: true, cells: &[(0, 0, ITEM_BIRCH_PLANKS), (1, 0, ITEM_BIRCH_PLANKS), (2, 0, ITEM_BIRCH_PLANKS), (0, 1, ITEM_BIRCH_PLANKS), (1, 1, ITEM_BIRCH_PLANKS), (2, 1, ITEM_BIRCH_PLANKS), (1, 2, STICK)] },
+    Recipe { needs: &[(ITEM_BIRCH_PLANKS, 3)], result: (ITEM_BIRCH_SLAB, 6), name: "birch_slab", shaped: true, cells: &[(0, 0, ITEM_BIRCH_PLANKS), (1, 0, ITEM_BIRCH_PLANKS), (2, 0, ITEM_BIRCH_PLANKS)] },
+    Recipe { needs: &[(ITEM_BIRCH_PLANKS, 6)], result: (ITEM_BIRCH_STAIRS, 4), name: "birch_stairs", shaped: true, cells: &[(0, 0, ITEM_BIRCH_PLANKS), (0, 1, ITEM_BIRCH_PLANKS), (1, 1, ITEM_BIRCH_PLANKS), (0, 2, ITEM_BIRCH_PLANKS), (1, 2, ITEM_BIRCH_PLANKS), (2, 2, ITEM_BIRCH_PLANKS)] },
+    Recipe { needs: &[(ITEM_BIRCH_PLANKS, 6)], result: (ITEM_BIRCH_TRAPDOOR, 2), name: "birch_trapdoor", shaped: true, cells: &[(0, 0, ITEM_BIRCH_PLANKS), (1, 0, ITEM_BIRCH_PLANKS), (2, 0, ITEM_BIRCH_PLANKS), (0, 1, ITEM_BIRCH_PLANKS), (1, 1, ITEM_BIRCH_PLANKS), (2, 1, ITEM_BIRCH_PLANKS)] },
+    Recipe { needs: &[(ITEM_BIRCH_LOG, 4)], result: (ITEM_BIRCH_WOOD, 3), name: "birch_wood", shaped: true, cells: &[(0, 0, ITEM_BIRCH_LOG), (1, 0, ITEM_BIRCH_LOG), (0, 1, ITEM_BIRCH_LOG), (1, 1, ITEM_BIRCH_LOG)] },
+    Recipe { needs: &[(ITEM_BLACK_WOOL, 6), (STICK, 1)], result: (ITEM_BLACK_BANNER, 1), name: "black_banner", shaped: true, cells: &[(0, 0, ITEM_BLACK_WOOL), (1, 0, ITEM_BLACK_WOOL), (2, 0, ITEM_BLACK_WOOL), (0, 1, ITEM_BLACK_WOOL), (1, 1, ITEM_BLACK_WOOL), (2, 1, ITEM_BLACK_WOOL), (1, 2, STICK)] },
+    Recipe { needs: &[(ITEM_BLACK_WOOL, 3), (TAG_PLANKS, 3)], result: (ITEM_BLACK_BED, 1), name: "black_bed", shaped: true, cells: &[(0, 0, ITEM_BLACK_WOOL), (1, 0, ITEM_BLACK_WOOL), (2, 0, ITEM_BLACK_WOOL), (0, 1, TAG_PLANKS), (1, 1, TAG_PLANKS), (2, 1, TAG_PLANKS)] },
+    Recipe { needs: &[(ITEM_BLACK_DYE, 1), (ITEM_CANDLE, 1)], result: (ITEM_BLACK_CANDLE, 1), name: "black_candle", shaped: false, cells: &[] },
+    Recipe { needs: &[(ITEM_BLACK_WOOL, 2)], result: (ITEM_BLACK_CARPET, 3), name: "black_carpet", shaped: true, cells: &[(0, 0, ITEM_BLACK_WOOL), (1, 0, ITEM_BLACK_WOOL)] },
+    Recipe { needs: &[(ITEM_BLACK_DYE, 1), (ITEM_GRAVEL, 1), (ITEM_GRAVEL, 1), (ITEM_GRAVEL, 1), (ITEM_GRAVEL, 1), (ITEM_SAND, 1), (ITEM_SAND, 1), (ITEM_SAND, 1), (ITEM_SAND, 1)], result: (ITEM_BLACK_CONCRETE_POWDER, 8), name: "black_concrete_powder", shaped: false, cells: &[] },
+    Recipe { needs: &[(ITEM_BLACK_CONCRETE, 3)], result: (ITEM_BLACK_CONCRETE_SLAB, 6), name: "black_concrete_slab", shaped: true, cells: &[(0, 0, ITEM_BLACK_CONCRETE), (1, 0, ITEM_BLACK_CONCRETE), (2, 0, ITEM_BLACK_CONCRETE)] },
+    Recipe { needs: &[(ITEM_BLACK_CONCRETE, 6)], result: (ITEM_BLACK_CONCRETE_STAIRS, 4), name: "black_concrete_stairs", shaped: true, cells: &[(0, 0, ITEM_BLACK_CONCRETE), (0, 1, ITEM_BLACK_CONCRETE), (1, 1, ITEM_BLACK_CONCRETE), (0, 2, ITEM_BLACK_CONCRETE), (1, 2, ITEM_BLACK_CONCRETE), (2, 2, ITEM_BLACK_CONCRETE)] },
+    Recipe { needs: &[(ITEM_BLACK_WOOL_SLAB, 3)], result: (ITEM_BLACK_CUSHION, 1), name: "black_cushion", shaped: true, cells: &[(0, 0, ITEM_BLACK_WOOL_SLAB), (1, 0, ITEM_BLACK_WOOL_SLAB), (2, 0, ITEM_BLACK_WOOL_SLAB)] },
+    Recipe { needs: &[(ITEM_INK_SAC, 1)], result: (ITEM_BLACK_DYE, 1), name: "black_dye", shaped: false, cells: &[] },
+    Recipe { needs: &[(ITEM_WITHER_ROSE, 1)], result: (ITEM_BLACK_DYE, 1), name: "black_dye_from_wither_rose", shaped: false, cells: &[] },
+    Recipe { needs: &[(ITEM_BLACK_WOOL, 1), (ITEM_GLASS, 2), (ITEM_LEATHER, 3)], result: (ITEM_BLACK_HARNESS, 1), name: "black_harness", shaped: true, cells: &[(0, 0, ITEM_LEATHER), (1, 0, ITEM_LEATHER), (2, 0, ITEM_LEATHER), (0, 1, ITEM_GLASS), (1, 1, ITEM_BLACK_WOOL), (2, 1, ITEM_GLASS)] },
+    Recipe { needs: &[(ITEM_BLACK_DYE, 1), (ITEM_GLASS, 8)], result: (ITEM_BLACK_STAINED_GLASS, 8), name: "black_stained_glass", shaped: true, cells: &[(0, 0, ITEM_GLASS), (1, 0, ITEM_GLASS), (2, 0, ITEM_GLASS), (0, 1, ITEM_GLASS), (1, 1, ITEM_BLACK_DYE), (2, 1, ITEM_GLASS), (0, 2, ITEM_GLASS), (1, 2, ITEM_GLASS), (2, 2, ITEM_GLASS)] },
+    Recipe { needs: &[(ITEM_BLACK_STAINED_GLASS, 6)], result: (ITEM_BLACK_STAINED_GLASS_PANE, 16), name: "black_stained_glass_pane", shaped: true, cells: &[(0, 0, ITEM_BLACK_STAINED_GLASS), (1, 0, ITEM_BLACK_STAINED_GLASS), (2, 0, ITEM_BLACK_STAINED_GLASS), (0, 1, ITEM_BLACK_STAINED_GLASS), (1, 1, ITEM_BLACK_STAINED_GLASS), (2, 1, ITEM_BLACK_STAINED_GLASS)] },
+    Recipe { needs: &[(ITEM_BLACK_DYE, 1), (ITEM_GLASS_PANE, 8)], result: (ITEM_BLACK_STAINED_GLASS_PANE, 8), name: "black_stained_glass_pane_from_glass_pane", shaped: true, cells: &[(0, 0, ITEM_GLASS_PANE), (1, 0, ITEM_GLASS_PANE), (2, 0, ITEM_GLASS_PANE), (0, 1, ITEM_GLASS_PANE), (1, 1, ITEM_BLACK_DYE), (2, 1, ITEM_GLASS_PANE), (0, 2, ITEM_GLASS_PANE), (1, 2, ITEM_GLASS_PANE), (2, 2, ITEM_GLASS_PANE)] },
+    Recipe { needs: &[(ITEM_BLACK_DYE, 1), (ITEM_TERRACOTTA, 8)], result: (ITEM_BLACK_TERRACOTTA, 8), name: "black_terracotta", shaped: true, cells: &[(0, 0, ITEM_TERRACOTTA), (1, 0, ITEM_TERRACOTTA), (2, 0, ITEM_TERRACOTTA), (0, 1, ITEM_TERRACOTTA), (1, 1, ITEM_BLACK_DYE), (2, 1, ITEM_TERRACOTTA), (0, 2, ITEM_TERRACOTTA), (1, 2, ITEM_TERRACOTTA), (2, 2, ITEM_TERRACOTTA)] },
+    Recipe { needs: &[(ITEM_BLACK_WOOL, 3)], result: (ITEM_BLACK_WOOL_SLAB, 6), name: "black_wool_slab", shaped: true, cells: &[(0, 0, ITEM_BLACK_WOOL), (1, 0, ITEM_BLACK_WOOL), (2, 0, ITEM_BLACK_WOOL)] },
+    Recipe { needs: &[(ITEM_BLACK_WOOL, 6)], result: (ITEM_BLACK_WOOL_STAIRS, 4), name: "black_wool_stairs", shaped: true, cells: &[(0, 0, ITEM_BLACK_WOOL), (0, 1, ITEM_BLACK_WOOL), (1, 1, ITEM_BLACK_WOOL), (0, 2, ITEM_BLACK_WOOL), (1, 2, ITEM_BLACK_WOOL), (2, 2, ITEM_BLACK_WOOL)] },
+    Recipe { needs: &[(ITEM_BLACKSTONE, 3)], result: (ITEM_BLACKSTONE_SLAB, 6), name: "blackstone_slab", shaped: true, cells: &[(0, 0, ITEM_BLACKSTONE), (1, 0, ITEM_BLACKSTONE), (2, 0, ITEM_BLACKSTONE)] },
+    Recipe { needs: &[(ITEM_BLACKSTONE, 6)], result: (ITEM_BLACKSTONE_STAIRS, 4), name: "blackstone_stairs", shaped: true, cells: &[(0, 0, ITEM_BLACKSTONE), (0, 1, ITEM_BLACKSTONE), (1, 1, ITEM_BLACKSTONE), (0, 2, ITEM_BLACKSTONE), (1, 2, ITEM_BLACKSTONE), (2, 2, ITEM_BLACKSTONE)] },
+    Recipe { needs: &[(ITEM_BLACKSTONE, 6)], result: (ITEM_BLACKSTONE_WALL, 6), name: "blackstone_wall", shaped: true, cells: &[(0, 0, ITEM_BLACKSTONE), (1, 0, ITEM_BLACKSTONE), (2, 0, ITEM_BLACKSTONE), (0, 1, ITEM_BLACKSTONE), (1, 1, ITEM_BLACKSTONE), (2, 1, ITEM_BLACKSTONE)] },
+    Recipe { needs: &[(ITEM_FURNACE, 1), (ITEM_IRON_INGOT, 5), (ITEM_SMOOTH_STONE, 3)], result: (ITEM_BLAST_FURNACE, 1), name: "blast_furnace", shaped: true, cells: &[(0, 0, ITEM_IRON_INGOT), (1, 0, ITEM_IRON_INGOT), (2, 0, ITEM_IRON_INGOT), (0, 1, ITEM_IRON_INGOT), (1, 1, ITEM_FURNACE), (2, 1, ITEM_IRON_INGOT), (0, 2, ITEM_SMOOTH_STONE), (1, 2, ITEM_SMOOTH_STONE), (2, 2, ITEM_SMOOTH_STONE)] },
+    Recipe { needs: &[(ITEM_BLAZE_ROD, 1)], result: (ITEM_BLAZE_POWDER, 2), name: "blaze_powder", shaped: false, cells: &[] },
+    Recipe { needs: &[(ITEM_BLUE_WOOL, 6), (STICK, 1)], result: (ITEM_BLUE_BANNER, 1), name: "blue_banner", shaped: true, cells: &[(0, 0, ITEM_BLUE_WOOL), (1, 0, ITEM_BLUE_WOOL), (2, 0, ITEM_BLUE_WOOL), (0, 1, ITEM_BLUE_WOOL), (1, 1, ITEM_BLUE_WOOL), (2, 1, ITEM_BLUE_WOOL), (1, 2, STICK)] },
+    Recipe { needs: &[(ITEM_BLUE_WOOL, 3), (TAG_PLANKS, 3)], result: (ITEM_BLUE_BED, 1), name: "blue_bed", shaped: true, cells: &[(0, 0, ITEM_BLUE_WOOL), (1, 0, ITEM_BLUE_WOOL), (2, 0, ITEM_BLUE_WOOL), (0, 1, TAG_PLANKS), (1, 1, TAG_PLANKS), (2, 1, TAG_PLANKS)] },
+    Recipe { needs: &[(ITEM_BLUE_DYE, 1), (ITEM_CANDLE, 1)], result: (ITEM_BLUE_CANDLE, 1), name: "blue_candle", shaped: false, cells: &[] },
+    Recipe { needs: &[(ITEM_BLUE_WOOL, 2)], result: (ITEM_BLUE_CARPET, 3), name: "blue_carpet", shaped: true, cells: &[(0, 0, ITEM_BLUE_WOOL), (1, 0, ITEM_BLUE_WOOL)] },
+    Recipe { needs: &[(ITEM_BLUE_DYE, 1), (ITEM_GRAVEL, 1), (ITEM_GRAVEL, 1), (ITEM_GRAVEL, 1), (ITEM_GRAVEL, 1), (ITEM_SAND, 1), (ITEM_SAND, 1), (ITEM_SAND, 1), (ITEM_SAND, 1)], result: (ITEM_BLUE_CONCRETE_POWDER, 8), name: "blue_concrete_powder", shaped: false, cells: &[] },
+    Recipe { needs: &[(ITEM_BLUE_CONCRETE, 3)], result: (ITEM_BLUE_CONCRETE_SLAB, 6), name: "blue_concrete_slab", shaped: true, cells: &[(0, 0, ITEM_BLUE_CONCRETE), (1, 0, ITEM_BLUE_CONCRETE), (2, 0, ITEM_BLUE_CONCRETE)] },
+    Recipe { needs: &[(ITEM_BLUE_CONCRETE, 6)], result: (ITEM_BLUE_CONCRETE_STAIRS, 4), name: "blue_concrete_stairs", shaped: true, cells: &[(0, 0, ITEM_BLUE_CONCRETE), (0, 1, ITEM_BLUE_CONCRETE), (1, 1, ITEM_BLUE_CONCRETE), (0, 2, ITEM_BLUE_CONCRETE), (1, 2, ITEM_BLUE_CONCRETE), (2, 2, ITEM_BLUE_CONCRETE)] },
+    Recipe { needs: &[(ITEM_BLUE_WOOL_SLAB, 3)], result: (ITEM_BLUE_CUSHION, 1), name: "blue_cushion", shaped: true, cells: &[(0, 0, ITEM_BLUE_WOOL_SLAB), (1, 0, ITEM_BLUE_WOOL_SLAB), (2, 0, ITEM_BLUE_WOOL_SLAB)] },
+    Recipe { needs: &[(ITEM_LAPIS_LAZULI, 1)], result: (ITEM_BLUE_DYE, 1), name: "blue_dye", shaped: false, cells: &[] },
+    Recipe { needs: &[(ITEM_CORNFLOWER, 1)], result: (ITEM_BLUE_DYE, 1), name: "blue_dye_from_cornflower", shaped: false, cells: &[] },
+    Recipe { needs: &[(ITEM_BLUE_WOOL, 1), (ITEM_GLASS, 2), (ITEM_LEATHER, 3)], result: (ITEM_BLUE_HARNESS, 1), name: "blue_harness", shaped: true, cells: &[(0, 0, ITEM_LEATHER), (1, 0, ITEM_LEATHER), (2, 0, ITEM_LEATHER), (0, 1, ITEM_GLASS), (1, 1, ITEM_BLUE_WOOL), (2, 1, ITEM_GLASS)] },
+    Recipe { needs: &[(ITEM_PACKED_ICE, 1), (ITEM_PACKED_ICE, 1), (ITEM_PACKED_ICE, 1), (ITEM_PACKED_ICE, 1), (ITEM_PACKED_ICE, 1), (ITEM_PACKED_ICE, 1), (ITEM_PACKED_ICE, 1), (ITEM_PACKED_ICE, 1), (ITEM_PACKED_ICE, 1)], result: (ITEM_BLUE_ICE, 1), name: "blue_ice", shaped: false, cells: &[] },
+    Recipe { needs: &[(ITEM_BLUE_DYE, 1), (ITEM_GLASS, 8)], result: (ITEM_BLUE_STAINED_GLASS, 8), name: "blue_stained_glass", shaped: true, cells: &[(0, 0, ITEM_GLASS), (1, 0, ITEM_GLASS), (2, 0, ITEM_GLASS), (0, 1, ITEM_GLASS), (1, 1, ITEM_BLUE_DYE), (2, 1, ITEM_GLASS), (0, 2, ITEM_GLASS), (1, 2, ITEM_GLASS), (2, 2, ITEM_GLASS)] },
+    Recipe { needs: &[(ITEM_BLUE_STAINED_GLASS, 6)], result: (ITEM_BLUE_STAINED_GLASS_PANE, 16), name: "blue_stained_glass_pane", shaped: true, cells: &[(0, 0, ITEM_BLUE_STAINED_GLASS), (1, 0, ITEM_BLUE_STAINED_GLASS), (2, 0, ITEM_BLUE_STAINED_GLASS), (0, 1, ITEM_BLUE_STAINED_GLASS), (1, 1, ITEM_BLUE_STAINED_GLASS), (2, 1, ITEM_BLUE_STAINED_GLASS)] },
+    Recipe { needs: &[(ITEM_BLUE_DYE, 1), (ITEM_GLASS_PANE, 8)], result: (ITEM_BLUE_STAINED_GLASS_PANE, 8), name: "blue_stained_glass_pane_from_glass_pane", shaped: true, cells: &[(0, 0, ITEM_GLASS_PANE), (1, 0, ITEM_GLASS_PANE), (2, 0, ITEM_GLASS_PANE), (0, 1, ITEM_GLASS_PANE), (1, 1, ITEM_BLUE_DYE), (2, 1, ITEM_GLASS_PANE), (0, 2, ITEM_GLASS_PANE), (1, 2, ITEM_GLASS_PANE), (2, 2, ITEM_GLASS_PANE)] },
+    Recipe { needs: &[(ITEM_BLUE_DYE, 1), (ITEM_TERRACOTTA, 8)], result: (ITEM_BLUE_TERRACOTTA, 8), name: "blue_terracotta", shaped: true, cells: &[(0, 0, ITEM_TERRACOTTA), (1, 0, ITEM_TERRACOTTA), (2, 0, ITEM_TERRACOTTA), (0, 1, ITEM_TERRACOTTA), (1, 1, ITEM_BLUE_DYE), (2, 1, ITEM_TERRACOTTA), (0, 2, ITEM_TERRACOTTA), (1, 2, ITEM_TERRACOTTA), (2, 2, ITEM_TERRACOTTA)] },
+    Recipe { needs: &[(ITEM_BLUE_WOOL, 3)], result: (ITEM_BLUE_WOOL_SLAB, 6), name: "blue_wool_slab", shaped: true, cells: &[(0, 0, ITEM_BLUE_WOOL), (1, 0, ITEM_BLUE_WOOL), (2, 0, ITEM_BLUE_WOOL)] },
+    Recipe { needs: &[(ITEM_BLUE_WOOL, 6)], result: (ITEM_BLUE_WOOL_STAIRS, 4), name: "blue_wool_stairs", shaped: true, cells: &[(0, 0, ITEM_BLUE_WOOL), (0, 1, ITEM_BLUE_WOOL), (1, 1, ITEM_BLUE_WOOL), (0, 2, ITEM_BLUE_WOOL), (1, 2, ITEM_BLUE_WOOL), (2, 2, ITEM_BLUE_WOOL)] },
+    Recipe { needs: &[(ITEM_BOLT_ARMOR_TRIM_SMITHING_TEMPLATE, 1), (ITEM_DIAMOND, 7), (TAG_ALT_0, 1)], result: (ITEM_BOLT_ARMOR_TRIM_SMITHING_TEMPLATE, 2), name: "bolt_armor_trim_smithing_template", shaped: true, cells: &[(0, 0, ITEM_DIAMOND), (1, 0, ITEM_BOLT_ARMOR_TRIM_SMITHING_TEMPLATE), (2, 0, ITEM_DIAMOND), (0, 1, ITEM_DIAMOND), (1, 1, TAG_ALT_0), (2, 1, ITEM_DIAMOND), (0, 2, ITEM_DIAMOND), (1, 2, ITEM_DIAMOND), (2, 2, ITEM_DIAMOND)] },
+    Recipe { needs: &[(ITEM_BONE_MEAL, 9)], result: (ITEM_BONE_BLOCK, 1), name: "bone_block", shaped: true, cells: &[(0, 0, ITEM_BONE_MEAL), (1, 0, ITEM_BONE_MEAL), (2, 0, ITEM_BONE_MEAL), (0, 1, ITEM_BONE_MEAL), (1, 1, ITEM_BONE_MEAL), (2, 1, ITEM_BONE_MEAL), (0, 2, ITEM_BONE_MEAL), (1, 2, ITEM_BONE_MEAL), (2, 2, ITEM_BONE_MEAL)] },
+    Recipe { needs: &[(ITEM_BONE, 1)], result: (ITEM_BONE_MEAL, 3), name: "bone_meal", shaped: false, cells: &[] },
+    Recipe { needs: &[(ITEM_BONE_BLOCK, 1)], result: (ITEM_BONE_MEAL, 9), name: "bone_meal_from_bone_block", shaped: false, cells: &[] },
+    Recipe { needs: &[(ITEM_LEATHER, 1), (ITEM_PAPER, 1), (ITEM_PAPER, 1), (ITEM_PAPER, 1)], result: (ITEM_BOOK, 1), name: "book", shaped: false, cells: &[] },
+    Recipe { needs: &[(ITEM_BOOK, 3), (TAG_PLANKS, 6)], result: (ITEM_BOOKSHELF, 1), name: "bookshelf", shaped: true, cells: &[(0, 0, TAG_PLANKS), (1, 0, TAG_PLANKS), (2, 0, TAG_PLANKS), (0, 1, ITEM_BOOK), (1, 1, ITEM_BOOK), (2, 1, ITEM_BOOK), (0, 2, TAG_PLANKS), (1, 2, TAG_PLANKS), (2, 2, TAG_PLANKS)] },
+    Recipe { needs: &[(ITEM_PAPER, 1), (ITEM_VINE, 1)], result: (ITEM_BORDURE_INDENTED_BANNER_PATTERN, 1), name: "bordure_indented_banner_pattern", shaped: false, cells: &[] },
+    Recipe { needs: &[(STICK, 3), (ITEM_STRING, 3)], result: (ITEM_BOW, 1), name: "bow", shaped: true, cells: &[(1, 0, STICK), (2, 0, ITEM_STRING), (0, 1, STICK), (2, 1, ITEM_STRING), (1, 2, STICK), (2, 2, ITEM_STRING)] },
+    Recipe { needs: &[(TAG_PLANKS, 3)], result: (ITEM_BOWL, 4), name: "bowl", shaped: true, cells: &[(0, 0, TAG_PLANKS), (2, 0, TAG_PLANKS), (1, 1, TAG_PLANKS)] },
+    Recipe { needs: &[(WHEAT, 3)], result: (BREAD, 1), name: "bread", shaped: true, cells: &[(0, 0, WHEAT), (1, 0, WHEAT), (2, 0, WHEAT)] },
+    Recipe { needs: &[(ITEM_BLAZE_ROD, 1), (TAG_STONE_CRAFTING_MATERIALS, 3)], result: (ITEM_BREWING_STAND, 1), name: "brewing_stand", shaped: true, cells: &[(1, 0, ITEM_BLAZE_ROD), (0, 1, TAG_STONE_CRAFTING_MATERIALS), (1, 1, TAG_STONE_CRAFTING_MATERIALS), (2, 1, TAG_STONE_CRAFTING_MATERIALS)] },
+    Recipe { needs: &[(ITEM_BRICKS, 3)], result: (ITEM_BRICK_SLAB, 6), name: "brick_slab", shaped: true, cells: &[(0, 0, ITEM_BRICKS), (1, 0, ITEM_BRICKS), (2, 0, ITEM_BRICKS)] },
+    Recipe { needs: &[(ITEM_BRICKS, 6)], result: (ITEM_BRICK_STAIRS, 4), name: "brick_stairs", shaped: true, cells: &[(0, 0, ITEM_BRICKS), (0, 1, ITEM_BRICKS), (1, 1, ITEM_BRICKS), (0, 2, ITEM_BRICKS), (1, 2, ITEM_BRICKS), (2, 2, ITEM_BRICKS)] },
+    Recipe { needs: &[(ITEM_BRICKS, 6)], result: (ITEM_BRICK_WALL, 6), name: "brick_wall", shaped: true, cells: &[(0, 0, ITEM_BRICKS), (1, 0, ITEM_BRICKS), (2, 0, ITEM_BRICKS), (0, 1, ITEM_BRICKS), (1, 1, ITEM_BRICKS), (2, 1, ITEM_BRICKS)] },
+    Recipe { needs: &[(ITEM_BRICK, 4)], result: (ITEM_BRICKS, 1), name: "bricks", shaped: true, cells: &[(0, 0, ITEM_BRICK), (1, 0, ITEM_BRICK), (0, 1, ITEM_BRICK), (1, 1, ITEM_BRICK)] },
+    Recipe { needs: &[(ITEM_BROWN_WOOL, 6), (STICK, 1)], result: (ITEM_BROWN_BANNER, 1), name: "brown_banner", shaped: true, cells: &[(0, 0, ITEM_BROWN_WOOL), (1, 0, ITEM_BROWN_WOOL), (2, 0, ITEM_BROWN_WOOL), (0, 1, ITEM_BROWN_WOOL), (1, 1, ITEM_BROWN_WOOL), (2, 1, ITEM_BROWN_WOOL), (1, 2, STICK)] },
+    Recipe { needs: &[(ITEM_BROWN_WOOL, 3), (TAG_PLANKS, 3)], result: (ITEM_BROWN_BED, 1), name: "brown_bed", shaped: true, cells: &[(0, 0, ITEM_BROWN_WOOL), (1, 0, ITEM_BROWN_WOOL), (2, 0, ITEM_BROWN_WOOL), (0, 1, TAG_PLANKS), (1, 1, TAG_PLANKS), (2, 1, TAG_PLANKS)] },
+    Recipe { needs: &[(ITEM_BROWN_DYE, 1), (ITEM_CANDLE, 1)], result: (ITEM_BROWN_CANDLE, 1), name: "brown_candle", shaped: false, cells: &[] },
+    Recipe { needs: &[(ITEM_BROWN_WOOL, 2)], result: (ITEM_BROWN_CARPET, 3), name: "brown_carpet", shaped: true, cells: &[(0, 0, ITEM_BROWN_WOOL), (1, 0, ITEM_BROWN_WOOL)] },
+    Recipe { needs: &[(ITEM_BROWN_DYE, 1), (ITEM_GRAVEL, 1), (ITEM_GRAVEL, 1), (ITEM_GRAVEL, 1), (ITEM_GRAVEL, 1), (ITEM_SAND, 1), (ITEM_SAND, 1), (ITEM_SAND, 1), (ITEM_SAND, 1)], result: (ITEM_BROWN_CONCRETE_POWDER, 8), name: "brown_concrete_powder", shaped: false, cells: &[] },
+    Recipe { needs: &[(ITEM_BROWN_CONCRETE, 3)], result: (ITEM_BROWN_CONCRETE_SLAB, 6), name: "brown_concrete_slab", shaped: true, cells: &[(0, 0, ITEM_BROWN_CONCRETE), (1, 0, ITEM_BROWN_CONCRETE), (2, 0, ITEM_BROWN_CONCRETE)] },
+    Recipe { needs: &[(ITEM_BROWN_CONCRETE, 6)], result: (ITEM_BROWN_CONCRETE_STAIRS, 4), name: "brown_concrete_stairs", shaped: true, cells: &[(0, 0, ITEM_BROWN_CONCRETE), (0, 1, ITEM_BROWN_CONCRETE), (1, 1, ITEM_BROWN_CONCRETE), (0, 2, ITEM_BROWN_CONCRETE), (1, 2, ITEM_BROWN_CONCRETE), (2, 2, ITEM_BROWN_CONCRETE)] },
+    Recipe { needs: &[(ITEM_BROWN_WOOL_SLAB, 3)], result: (ITEM_BROWN_CUSHION, 1), name: "brown_cushion", shaped: true, cells: &[(0, 0, ITEM_BROWN_WOOL_SLAB), (1, 0, ITEM_BROWN_WOOL_SLAB), (2, 0, ITEM_BROWN_WOOL_SLAB)] },
+    Recipe { needs: &[(ITEM_COCOA_BEANS, 1)], result: (ITEM_BROWN_DYE, 1), name: "brown_dye", shaped: false, cells: &[] },
+    Recipe { needs: &[(ITEM_BROWN_WOOL, 1), (ITEM_GLASS, 2), (ITEM_LEATHER, 3)], result: (ITEM_BROWN_HARNESS, 1), name: "brown_harness", shaped: true, cells: &[(0, 0, ITEM_LEATHER), (1, 0, ITEM_LEATHER), (2, 0, ITEM_LEATHER), (0, 1, ITEM_GLASS), (1, 1, ITEM_BROWN_WOOL), (2, 1, ITEM_GLASS)] },
+    Recipe { needs: &[(ITEM_BROWN_DYE, 1), (ITEM_GLASS, 8)], result: (ITEM_BROWN_STAINED_GLASS, 8), name: "brown_stained_glass", shaped: true, cells: &[(0, 0, ITEM_GLASS), (1, 0, ITEM_GLASS), (2, 0, ITEM_GLASS), (0, 1, ITEM_GLASS), (1, 1, ITEM_BROWN_DYE), (2, 1, ITEM_GLASS), (0, 2, ITEM_GLASS), (1, 2, ITEM_GLASS), (2, 2, ITEM_GLASS)] },
+    Recipe { needs: &[(ITEM_BROWN_STAINED_GLASS, 6)], result: (ITEM_BROWN_STAINED_GLASS_PANE, 16), name: "brown_stained_glass_pane", shaped: true, cells: &[(0, 0, ITEM_BROWN_STAINED_GLASS), (1, 0, ITEM_BROWN_STAINED_GLASS), (2, 0, ITEM_BROWN_STAINED_GLASS), (0, 1, ITEM_BROWN_STAINED_GLASS), (1, 1, ITEM_BROWN_STAINED_GLASS), (2, 1, ITEM_BROWN_STAINED_GLASS)] },
+    Recipe { needs: &[(ITEM_BROWN_DYE, 1), (ITEM_GLASS_PANE, 8)], result: (ITEM_BROWN_STAINED_GLASS_PANE, 8), name: "brown_stained_glass_pane_from_glass_pane", shaped: true, cells: &[(0, 0, ITEM_GLASS_PANE), (1, 0, ITEM_GLASS_PANE), (2, 0, ITEM_GLASS_PANE), (0, 1, ITEM_GLASS_PANE), (1, 1, ITEM_BROWN_DYE), (2, 1, ITEM_GLASS_PANE), (0, 2, ITEM_GLASS_PANE), (1, 2, ITEM_GLASS_PANE), (2, 2, ITEM_GLASS_PANE)] },
+    Recipe { needs: &[(ITEM_BROWN_DYE, 1), (ITEM_TERRACOTTA, 8)], result: (ITEM_BROWN_TERRACOTTA, 8), name: "brown_terracotta", shaped: true, cells: &[(0, 0, ITEM_TERRACOTTA), (1, 0, ITEM_TERRACOTTA), (2, 0, ITEM_TERRACOTTA), (0, 1, ITEM_TERRACOTTA), (1, 1, ITEM_BROWN_DYE), (2, 1, ITEM_TERRACOTTA), (0, 2, ITEM_TERRACOTTA), (1, 2, ITEM_TERRACOTTA), (2, 2, ITEM_TERRACOTTA)] },
+    Recipe { needs: &[(ITEM_BROWN_WOOL, 3)], result: (ITEM_BROWN_WOOL_SLAB, 6), name: "brown_wool_slab", shaped: true, cells: &[(0, 0, ITEM_BROWN_WOOL), (1, 0, ITEM_BROWN_WOOL), (2, 0, ITEM_BROWN_WOOL)] },
+    Recipe { needs: &[(ITEM_BROWN_WOOL, 6)], result: (ITEM_BROWN_WOOL_STAIRS, 4), name: "brown_wool_stairs", shaped: true, cells: &[(0, 0, ITEM_BROWN_WOOL), (0, 1, ITEM_BROWN_WOOL), (1, 1, ITEM_BROWN_WOOL), (0, 2, ITEM_BROWN_WOOL), (1, 2, ITEM_BROWN_WOOL), (2, 2, ITEM_BROWN_WOOL)] },
+    Recipe { needs: &[(ITEM_COPPER_INGOT, 1), (ITEM_FEATHER, 1), (STICK, 1)], result: (ITEM_BRUSH, 1), name: "brush", shaped: true, cells: &[(0, 0, ITEM_FEATHER), (0, 1, ITEM_COPPER_INGOT), (0, 2, STICK)] },
+    Recipe { needs: &[(ITEM_IRON_INGOT, 3)], result: (ITEM_BUCKET, 1), name: "bucket", shaped: true, cells: &[(0, 0, ITEM_IRON_INGOT), (2, 0, ITEM_IRON_INGOT), (1, 1, ITEM_IRON_INGOT)] },
+    Recipe { needs: &[(ITEM_LEATHER, 1), (ITEM_STRING, 1)], result: (ITEM_BUNDLE, 1), name: "bundle", shaped: true, cells: &[(0, 0, ITEM_STRING), (0, 1, ITEM_LEATHER)] },
+    Recipe { needs: &[(ITEM_MILK_BUCKET, 3), (ITEM_SUGAR, 2), (WHEAT, 3), (TAG_EGGS, 1)], result: (ITEM_CAKE, 1), name: "cake", shaped: true, cells: &[(0, 0, ITEM_MILK_BUCKET), (1, 0, ITEM_MILK_BUCKET), (2, 0, ITEM_MILK_BUCKET), (0, 1, ITEM_SUGAR), (1, 1, TAG_EGGS), (2, 1, ITEM_SUGAR), (0, 2, WHEAT), (1, 2, WHEAT), (2, 2, WHEAT)] },
+    Recipe { needs: &[(ITEM_AMETHYST_SHARD, 3), (ITEM_SCULK_SENSOR, 1)], result: (ITEM_CALIBRATED_SCULK_SENSOR, 1), name: "calibrated_sculk_sensor", shaped: true, cells: &[(1, 0, ITEM_AMETHYST_SHARD), (0, 1, ITEM_AMETHYST_SHARD), (1, 1, ITEM_SCULK_SENSOR), (2, 1, ITEM_AMETHYST_SHARD)] },
+    Recipe { needs: &[(STICK, 3), (TAG_LOGS, 3), (TAG_COALS, 1)], result: (ITEM_CAMPFIRE, 1), name: "campfire", shaped: true, cells: &[(1, 0, STICK), (0, 1, STICK), (1, 1, TAG_COALS), (2, 1, STICK), (0, 2, TAG_LOGS), (1, 2, TAG_LOGS), (2, 2, TAG_LOGS)] },
+    Recipe { needs: &[(ITEM_HONEYCOMB, 1), (ITEM_STRING, 1)], result: (ITEM_CANDLE, 1), name: "candle", shaped: true, cells: &[(0, 0, ITEM_STRING), (0, 1, ITEM_HONEYCOMB)] },
+    Recipe { needs: &[(ITEM_CARROT, 1), (ITEM_FISHING_ROD, 1)], result: (ITEM_CARROT_ON_A_STICK, 1), name: "carrot_on_a_stick", shaped: true, cells: &[(0, 0, ITEM_FISHING_ROD), (1, 1, ITEM_CARROT)] },
+    Recipe { needs: &[(ITEM_PAPER, 2), (TAG_PLANKS, 4)], result: (ITEM_CARTOGRAPHY_TABLE, 1), name: "cartography_table", shaped: true, cells: &[(0, 0, ITEM_PAPER), (1, 0, ITEM_PAPER), (0, 1, TAG_PLANKS), (1, 1, TAG_PLANKS), (0, 2, TAG_PLANKS), (1, 2, TAG_PLANKS)] },
+    Recipe { needs: &[(ITEM_IRON_INGOT, 7)], result: (ITEM_CAULDRON, 1), name: "cauldron", shaped: true, cells: &[(0, 0, ITEM_IRON_INGOT), (2, 0, ITEM_IRON_INGOT), (0, 1, ITEM_IRON_INGOT), (2, 1, ITEM_IRON_INGOT), (0, 2, ITEM_IRON_INGOT), (1, 2, ITEM_IRON_INGOT), (2, 2, ITEM_IRON_INGOT)] },
+    Recipe { needs: &[(ITEM_CHERRY_PLANKS, 5)], result: (ITEM_CHERRY_BOAT, 1), name: "cherry_boat", shaped: true, cells: &[(0, 0, ITEM_CHERRY_PLANKS), (2, 0, ITEM_CHERRY_PLANKS), (0, 1, ITEM_CHERRY_PLANKS), (1, 1, ITEM_CHERRY_PLANKS), (2, 1, ITEM_CHERRY_PLANKS)] },
+    Recipe { needs: &[(ITEM_CHERRY_PLANKS, 1)], result: (ITEM_CHERRY_BUTTON, 1), name: "cherry_button", shaped: false, cells: &[] },
+    Recipe { needs: &[(ITEM_CHERRY_BOAT, 1), (ITEM_CHEST, 1)], result: (ITEM_CHERRY_CHEST_BOAT, 1), name: "cherry_chest_boat", shaped: false, cells: &[] },
+    Recipe { needs: &[(ITEM_CHERRY_PLANKS, 6)], result: (ITEM_CHERRY_DOOR, 3), name: "cherry_door", shaped: true, cells: &[(0, 0, ITEM_CHERRY_PLANKS), (1, 0, ITEM_CHERRY_PLANKS), (0, 1, ITEM_CHERRY_PLANKS), (1, 1, ITEM_CHERRY_PLANKS), (0, 2, ITEM_CHERRY_PLANKS), (1, 2, ITEM_CHERRY_PLANKS)] },
+    Recipe { needs: &[(ITEM_CHERRY_PLANKS, 4), (STICK, 2)], result: (ITEM_CHERRY_FENCE, 3), name: "cherry_fence", shaped: true, cells: &[(0, 0, ITEM_CHERRY_PLANKS), (1, 0, STICK), (2, 0, ITEM_CHERRY_PLANKS), (0, 1, ITEM_CHERRY_PLANKS), (1, 1, STICK), (2, 1, ITEM_CHERRY_PLANKS)] },
+    Recipe { needs: &[(ITEM_CHERRY_PLANKS, 2), (STICK, 4)], result: (ITEM_CHERRY_FENCE_GATE, 1), name: "cherry_fence_gate", shaped: true, cells: &[(0, 0, STICK), (1, 0, ITEM_CHERRY_PLANKS), (2, 0, STICK), (0, 1, STICK), (1, 1, ITEM_CHERRY_PLANKS), (2, 1, STICK)] },
+    Recipe { needs: &[(ITEM_IRON_CHAIN, 2), (ITEM_STRIPPED_CHERRY_LOG, 6)], result: (ITEM_CHERRY_HANGING_SIGN, 6), name: "cherry_hanging_sign", shaped: true, cells: &[(0, 0, ITEM_IRON_CHAIN), (2, 0, ITEM_IRON_CHAIN), (0, 1, ITEM_STRIPPED_CHERRY_LOG), (1, 1, ITEM_STRIPPED_CHERRY_LOG), (2, 1, ITEM_STRIPPED_CHERRY_LOG), (0, 2, ITEM_STRIPPED_CHERRY_LOG), (1, 2, ITEM_STRIPPED_CHERRY_LOG), (2, 2, ITEM_STRIPPED_CHERRY_LOG)] },
+    Recipe { needs: &[(TAG_CHERRY_LOGS, 1)], result: (ITEM_CHERRY_PLANKS, 4), name: "cherry_planks", shaped: false, cells: &[] },
+    Recipe { needs: &[(ITEM_CHERRY_PLANKS, 2)], result: (ITEM_CHERRY_PRESSURE_PLATE, 1), name: "cherry_pressure_plate", shaped: true, cells: &[(0, 0, ITEM_CHERRY_PLANKS), (1, 0, ITEM_CHERRY_PLANKS)] },
+    Recipe { needs: &[(ITEM_STRIPPED_CHERRY_LOG, 6)], result: (ITEM_CHERRY_SHELF, 6), name: "cherry_shelf", shaped: true, cells: &[(0, 0, ITEM_STRIPPED_CHERRY_LOG), (1, 0, ITEM_STRIPPED_CHERRY_LOG), (2, 0, ITEM_STRIPPED_CHERRY_LOG), (0, 2, ITEM_STRIPPED_CHERRY_LOG), (1, 2, ITEM_STRIPPED_CHERRY_LOG), (2, 2, ITEM_STRIPPED_CHERRY_LOG)] },
+    Recipe { needs: &[(ITEM_CHERRY_PLANKS, 6), (STICK, 1)], result: (ITEM_CHERRY_SIGN, 3), name: "cherry_sign", shaped: true, cells: &[(0, 0, ITEM_CHERRY_PLANKS), (1, 0, ITEM_CHERRY_PLANKS), (2, 0, ITEM_CHERRY_PLANKS), (0, 1, ITEM_CHERRY_PLANKS), (1, 1, ITEM_CHERRY_PLANKS), (2, 1, ITEM_CHERRY_PLANKS), (1, 2, STICK)] },
+    Recipe { needs: &[(ITEM_CHERRY_PLANKS, 3)], result: (ITEM_CHERRY_SLAB, 6), name: "cherry_slab", shaped: true, cells: &[(0, 0, ITEM_CHERRY_PLANKS), (1, 0, ITEM_CHERRY_PLANKS), (2, 0, ITEM_CHERRY_PLANKS)] },
+    Recipe { needs: &[(ITEM_CHERRY_PLANKS, 6)], result: (ITEM_CHERRY_STAIRS, 4), name: "cherry_stairs", shaped: true, cells: &[(0, 0, ITEM_CHERRY_PLANKS), (0, 1, ITEM_CHERRY_PLANKS), (1, 1, ITEM_CHERRY_PLANKS), (0, 2, ITEM_CHERRY_PLANKS), (1, 2, ITEM_CHERRY_PLANKS), (2, 2, ITEM_CHERRY_PLANKS)] },
+    Recipe { needs: &[(ITEM_CHERRY_PLANKS, 6)], result: (ITEM_CHERRY_TRAPDOOR, 2), name: "cherry_trapdoor", shaped: true, cells: &[(0, 0, ITEM_CHERRY_PLANKS), (1, 0, ITEM_CHERRY_PLANKS), (2, 0, ITEM_CHERRY_PLANKS), (0, 1, ITEM_CHERRY_PLANKS), (1, 1, ITEM_CHERRY_PLANKS), (2, 1, ITEM_CHERRY_PLANKS)] },
+    Recipe { needs: &[(ITEM_CHERRY_LOG, 4)], result: (ITEM_CHERRY_WOOD, 3), name: "cherry_wood", shaped: true, cells: &[(0, 0, ITEM_CHERRY_LOG), (1, 0, ITEM_CHERRY_LOG), (0, 1, ITEM_CHERRY_LOG), (1, 1, ITEM_CHERRY_LOG)] },
+    Recipe { needs: &[(TAG_PLANKS, 8)], result: (ITEM_CHEST, 1), name: "chest", shaped: true, cells: &[(0, 0, TAG_PLANKS), (1, 0, TAG_PLANKS), (2, 0, TAG_PLANKS), (0, 1, TAG_PLANKS), (2, 1, TAG_PLANKS), (0, 2, TAG_PLANKS), (1, 2, TAG_PLANKS), (2, 2, TAG_PLANKS)] },
+    Recipe { needs: &[(ITEM_CHEST, 1), (ITEM_MINECART, 1)], result: (ITEM_CHEST_MINECART, 1), name: "chest_minecart", shaped: false, cells: &[] },
+    Recipe { needs: &[(TAG_PLANKS, 6), (TAG_WOODEN_SLABS, 3)], result: (ITEM_CHISELED_BOOKSHELF, 1), name: "chiseled_bookshelf", shaped: true, cells: &[(0, 0, TAG_PLANKS), (1, 0, TAG_PLANKS), (2, 0, TAG_PLANKS), (0, 1, TAG_WOODEN_SLABS), (1, 1, TAG_WOODEN_SLABS), (2, 1, TAG_WOODEN_SLABS), (0, 2, TAG_PLANKS), (1, 2, TAG_PLANKS), (2, 2, TAG_PLANKS)] },
+    Recipe { needs: &[(ITEM_CINNABAR_SLAB, 2)], result: (ITEM_CHISELED_CINNABAR, 1), name: "chiseled_cinnabar", shaped: true, cells: &[(0, 0, ITEM_CINNABAR_SLAB), (0, 1, ITEM_CINNABAR_SLAB)] },
+    Recipe { needs: &[(ITEM_CUT_COPPER_SLAB, 2)], result: (ITEM_CHISELED_COPPER, 1), name: "chiseled_copper", shaped: true, cells: &[(0, 0, ITEM_CUT_COPPER_SLAB), (0, 1, ITEM_CUT_COPPER_SLAB)] },
+    Recipe { needs: &[(ITEM_COBBLED_DEEPSLATE_SLAB, 2)], result: (ITEM_CHISELED_DEEPSLATE, 1), name: "chiseled_deepslate", shaped: true, cells: &[(0, 0, ITEM_COBBLED_DEEPSLATE_SLAB), (0, 1, ITEM_COBBLED_DEEPSLATE_SLAB)] },
+    Recipe { needs: &[(ITEM_NETHER_BRICK_SLAB, 2)], result: (ITEM_CHISELED_NETHER_BRICKS, 1), name: "chiseled_nether_bricks", shaped: true, cells: &[(0, 0, ITEM_NETHER_BRICK_SLAB), (0, 1, ITEM_NETHER_BRICK_SLAB)] },
+    Recipe { needs: &[(ITEM_POLISHED_BLACKSTONE_SLAB, 2)], result: (ITEM_CHISELED_POLISHED_BLACKSTONE, 1), name: "chiseled_polished_blackstone", shaped: true, cells: &[(0, 0, ITEM_POLISHED_BLACKSTONE_SLAB), (0, 1, ITEM_POLISHED_BLACKSTONE_SLAB)] },
+    Recipe { needs: &[(ITEM_QUARTZ_SLAB, 2)], result: (ITEM_CHISELED_QUARTZ_BLOCK, 1), name: "chiseled_quartz_block", shaped: true, cells: &[(0, 0, ITEM_QUARTZ_SLAB), (0, 1, ITEM_QUARTZ_SLAB)] },
+    Recipe { needs: &[(ITEM_RED_SANDSTONE_SLAB, 2)], result: (ITEM_CHISELED_RED_SANDSTONE, 1), name: "chiseled_red_sandstone", shaped: true, cells: &[(0, 0, ITEM_RED_SANDSTONE_SLAB), (0, 1, ITEM_RED_SANDSTONE_SLAB)] },
+    Recipe { needs: &[(ITEM_RESIN_BRICK_SLAB, 2)], result: (ITEM_CHISELED_RESIN_BRICKS, 1), name: "chiseled_resin_bricks", shaped: true, cells: &[(0, 0, ITEM_RESIN_BRICK_SLAB), (0, 1, ITEM_RESIN_BRICK_SLAB)] },
+    Recipe { needs: &[(ITEM_SANDSTONE_SLAB, 2)], result: (ITEM_CHISELED_SANDSTONE, 1), name: "chiseled_sandstone", shaped: true, cells: &[(0, 0, ITEM_SANDSTONE_SLAB), (0, 1, ITEM_SANDSTONE_SLAB)] },
+    Recipe { needs: &[(ITEM_STONE_BRICK_SLAB, 2)], result: (ITEM_CHISELED_STONE_BRICKS, 1), name: "chiseled_stone_bricks", shaped: true, cells: &[(0, 0, ITEM_STONE_BRICK_SLAB), (0, 1, ITEM_STONE_BRICK_SLAB)] },
+    Recipe { needs: &[(ITEM_SULFUR_SLAB, 2)], result: (ITEM_CHISELED_SULFUR, 1), name: "chiseled_sulfur", shaped: true, cells: &[(0, 0, ITEM_SULFUR_SLAB), (0, 1, ITEM_SULFUR_SLAB)] },
+    Recipe { needs: &[(ITEM_TUFF_SLAB, 2)], result: (ITEM_CHISELED_TUFF, 1), name: "chiseled_tuff", shaped: true, cells: &[(0, 0, ITEM_TUFF_SLAB), (0, 1, ITEM_TUFF_SLAB)] },
+    Recipe { needs: &[(ITEM_TUFF_BRICK_SLAB, 2)], result: (ITEM_CHISELED_TUFF_BRICKS, 1), name: "chiseled_tuff_bricks", shaped: true, cells: &[(0, 0, ITEM_TUFF_BRICK_SLAB), (0, 1, ITEM_TUFF_BRICK_SLAB)] },
+    Recipe { needs: &[(ITEM_CINNABAR_BRICKS, 3)], result: (ITEM_CINNABAR_BRICK_SLAB, 6), name: "cinnabar_brick_slab", shaped: true, cells: &[(0, 0, ITEM_CINNABAR_BRICKS), (1, 0, ITEM_CINNABAR_BRICKS), (2, 0, ITEM_CINNABAR_BRICKS)] },
+    Recipe { needs: &[(ITEM_CINNABAR_BRICKS, 6)], result: (ITEM_CINNABAR_BRICK_STAIRS, 4), name: "cinnabar_brick_stairs", shaped: true, cells: &[(0, 0, ITEM_CINNABAR_BRICKS), (0, 1, ITEM_CINNABAR_BRICKS), (1, 1, ITEM_CINNABAR_BRICKS), (0, 2, ITEM_CINNABAR_BRICKS), (1, 2, ITEM_CINNABAR_BRICKS), (2, 2, ITEM_CINNABAR_BRICKS)] },
+    Recipe { needs: &[(ITEM_CINNABAR_BRICKS, 6)], result: (ITEM_CINNABAR_BRICK_WALL, 6), name: "cinnabar_brick_wall", shaped: true, cells: &[(0, 0, ITEM_CINNABAR_BRICKS), (1, 0, ITEM_CINNABAR_BRICKS), (2, 0, ITEM_CINNABAR_BRICKS), (0, 1, ITEM_CINNABAR_BRICKS), (1, 1, ITEM_CINNABAR_BRICKS), (2, 1, ITEM_CINNABAR_BRICKS)] },
+    Recipe { needs: &[(ITEM_POLISHED_CINNABAR, 4)], result: (ITEM_CINNABAR_BRICKS, 4), name: "cinnabar_bricks", shaped: true, cells: &[(0, 0, ITEM_POLISHED_CINNABAR), (1, 0, ITEM_POLISHED_CINNABAR), (0, 1, ITEM_POLISHED_CINNABAR), (1, 1, ITEM_POLISHED_CINNABAR)] },
+    Recipe { needs: &[(ITEM_CINNABAR, 3)], result: (ITEM_CINNABAR_SLAB, 6), name: "cinnabar_slab", shaped: true, cells: &[(0, 0, ITEM_CINNABAR), (1, 0, ITEM_CINNABAR), (2, 0, ITEM_CINNABAR)] },
+    Recipe { needs: &[(ITEM_CINNABAR, 6)], result: (ITEM_CINNABAR_STAIRS, 4), name: "cinnabar_stairs", shaped: true, cells: &[(0, 0, ITEM_CINNABAR), (0, 1, ITEM_CINNABAR), (1, 1, ITEM_CINNABAR), (0, 2, ITEM_CINNABAR), (1, 2, ITEM_CINNABAR), (2, 2, ITEM_CINNABAR)] },
+    Recipe { needs: &[(ITEM_CINNABAR, 6)], result: (ITEM_CINNABAR_WALL, 6), name: "cinnabar_wall", shaped: true, cells: &[(0, 0, ITEM_CINNABAR), (1, 0, ITEM_CINNABAR), (2, 0, ITEM_CINNABAR), (0, 1, ITEM_CINNABAR), (1, 1, ITEM_CINNABAR), (2, 1, ITEM_CINNABAR)] },
+    Recipe { needs: &[(ITEM_CLAY_BALL, 4)], result: (ITEM_CLAY, 1), name: "clay", shaped: true, cells: &[(0, 0, ITEM_CLAY_BALL), (1, 0, ITEM_CLAY_BALL), (0, 1, ITEM_CLAY_BALL), (1, 1, ITEM_CLAY_BALL)] },
+    Recipe { needs: &[(ITEM_GOLD_INGOT, 4), (ITEM_REDSTONE, 1)], result: (ITEM_CLOCK, 1), name: "clock", shaped: true, cells: &[(1, 0, ITEM_GOLD_INGOT), (0, 1, ITEM_GOLD_INGOT), (1, 1, ITEM_REDSTONE), (2, 1, ITEM_GOLD_INGOT), (1, 2, ITEM_GOLD_INGOT)] },
+    Recipe { needs: &[(ITEM_COAL_BLOCK, 1)], result: (COAL, 9), name: "coal", shaped: false, cells: &[] },
+    Recipe { needs: &[(COAL, 9)], result: (ITEM_COAL_BLOCK, 1), name: "coal_block", shaped: true, cells: &[(0, 0, COAL), (1, 0, COAL), (2, 0, COAL), (0, 1, COAL), (1, 1, COAL), (2, 1, COAL), (0, 2, COAL), (1, 2, COAL), (2, 2, COAL)] },
+    Recipe { needs: &[(ITEM_DIRT, 2), (ITEM_GRAVEL, 2)], result: (ITEM_COARSE_DIRT, 4), name: "coarse_dirt", shaped: true, cells: &[(0, 0, ITEM_DIRT), (1, 0, ITEM_GRAVEL), (0, 1, ITEM_GRAVEL), (1, 1, ITEM_DIRT)] },
+    Recipe { needs: &[(ITEM_COAST_ARMOR_TRIM_SMITHING_TEMPLATE, 1), (COBBLESTONE, 1), (ITEM_DIAMOND, 7)], result: (ITEM_COAST_ARMOR_TRIM_SMITHING_TEMPLATE, 2), name: "coast_armor_trim_smithing_template", shaped: true, cells: &[(0, 0, ITEM_DIAMOND), (1, 0, ITEM_COAST_ARMOR_TRIM_SMITHING_TEMPLATE), (2, 0, ITEM_DIAMOND), (0, 1, ITEM_DIAMOND), (1, 1, COBBLESTONE), (2, 1, ITEM_DIAMOND), (0, 2, ITEM_DIAMOND), (1, 2, ITEM_DIAMOND), (2, 2, ITEM_DIAMOND)] },
+    Recipe { needs: &[(ITEM_COBBLED_DEEPSLATE, 3)], result: (ITEM_COBBLED_DEEPSLATE_SLAB, 6), name: "cobbled_deepslate_slab", shaped: true, cells: &[(0, 0, ITEM_COBBLED_DEEPSLATE), (1, 0, ITEM_COBBLED_DEEPSLATE), (2, 0, ITEM_COBBLED_DEEPSLATE)] },
+    Recipe { needs: &[(ITEM_COBBLED_DEEPSLATE, 6)], result: (ITEM_COBBLED_DEEPSLATE_STAIRS, 4), name: "cobbled_deepslate_stairs", shaped: true, cells: &[(0, 0, ITEM_COBBLED_DEEPSLATE), (0, 1, ITEM_COBBLED_DEEPSLATE), (1, 1, ITEM_COBBLED_DEEPSLATE), (0, 2, ITEM_COBBLED_DEEPSLATE), (1, 2, ITEM_COBBLED_DEEPSLATE), (2, 2, ITEM_COBBLED_DEEPSLATE)] },
+    Recipe { needs: &[(ITEM_COBBLED_DEEPSLATE, 6)], result: (ITEM_COBBLED_DEEPSLATE_WALL, 6), name: "cobbled_deepslate_wall", shaped: true, cells: &[(0, 0, ITEM_COBBLED_DEEPSLATE), (1, 0, ITEM_COBBLED_DEEPSLATE), (2, 0, ITEM_COBBLED_DEEPSLATE), (0, 1, ITEM_COBBLED_DEEPSLATE), (1, 1, ITEM_COBBLED_DEEPSLATE), (2, 1, ITEM_COBBLED_DEEPSLATE)] },
+    Recipe { needs: &[(COBBLESTONE, 3)], result: (ITEM_COBBLESTONE_SLAB, 6), name: "cobblestone_slab", shaped: true, cells: &[(0, 0, COBBLESTONE), (1, 0, COBBLESTONE), (2, 0, COBBLESTONE)] },
+    Recipe { needs: &[(COBBLESTONE, 6)], result: (ITEM_COBBLESTONE_STAIRS, 4), name: "cobblestone_stairs", shaped: true, cells: &[(0, 0, COBBLESTONE), (0, 1, COBBLESTONE), (1, 1, COBBLESTONE), (0, 2, COBBLESTONE), (1, 2, COBBLESTONE), (2, 2, COBBLESTONE)] },
+    Recipe { needs: &[(COBBLESTONE, 6)], result: (ITEM_COBBLESTONE_WALL, 6), name: "cobblestone_wall", shaped: true, cells: &[(0, 0, COBBLESTONE), (1, 0, COBBLESTONE), (2, 0, COBBLESTONE), (0, 1, COBBLESTONE), (1, 1, COBBLESTONE), (2, 1, COBBLESTONE)] },
+    Recipe { needs: &[(ITEM_QUARTZ, 1), (ITEM_REDSTONE_TORCH, 3), (ITEM_STONE, 3)], result: (ITEM_COMPARATOR, 1), name: "comparator", shaped: true, cells: &[(1, 0, ITEM_REDSTONE_TORCH), (0, 1, ITEM_REDSTONE_TORCH), (1, 1, ITEM_QUARTZ), (2, 1, ITEM_REDSTONE_TORCH), (0, 2, ITEM_STONE), (1, 2, ITEM_STONE), (2, 2, ITEM_STONE)] },
+    Recipe { needs: &[(ITEM_IRON_INGOT, 4), (ITEM_REDSTONE, 1)], result: (ITEM_COMPASS, 1), name: "compass", shaped: true, cells: &[(1, 0, ITEM_IRON_INGOT), (0, 1, ITEM_IRON_INGOT), (1, 1, ITEM_REDSTONE), (2, 1, ITEM_IRON_INGOT), (1, 2, ITEM_IRON_INGOT)] },
+    Recipe { needs: &[(TAG_WOODEN_SLABS, 7)], result: (ITEM_COMPOSTER, 1), name: "composter", shaped: true, cells: &[(0, 0, TAG_WOODEN_SLABS), (2, 0, TAG_WOODEN_SLABS), (0, 1, TAG_WOODEN_SLABS), (2, 1, TAG_WOODEN_SLABS), (0, 2, TAG_WOODEN_SLABS), (1, 2, TAG_WOODEN_SLABS), (2, 2, TAG_WOODEN_SLABS)] },
+    Recipe { needs: &[(ITEM_HEART_OF_THE_SEA, 1), (ITEM_NAUTILUS_SHELL, 8)], result: (ITEM_CONDUIT, 1), name: "conduit", shaped: true, cells: &[(0, 0, ITEM_NAUTILUS_SHELL), (1, 0, ITEM_NAUTILUS_SHELL), (2, 0, ITEM_NAUTILUS_SHELL), (0, 1, ITEM_NAUTILUS_SHELL), (1, 1, ITEM_HEART_OF_THE_SEA), (2, 1, ITEM_NAUTILUS_SHELL), (0, 2, ITEM_NAUTILUS_SHELL), (1, 2, ITEM_NAUTILUS_SHELL), (2, 2, ITEM_NAUTILUS_SHELL)] },
+    Recipe { needs: &[(ITEM_COCOA_BEANS, 1), (WHEAT, 2)], result: (ITEM_COOKIE, 8), name: "cookie", shaped: true, cells: &[(0, 0, WHEAT), (1, 0, ITEM_COCOA_BEANS), (2, 0, WHEAT)] },
+    Recipe { needs: &[(STICK, 2), (TAG_COPPER_TOOL_MATERIALS, 3)], result: (ITEM_COPPER_AXE, 1), name: "copper_axe", shaped: true, cells: &[(0, 0, TAG_COPPER_TOOL_MATERIALS), (1, 0, TAG_COPPER_TOOL_MATERIALS), (0, 1, TAG_COPPER_TOOL_MATERIALS), (1, 1, STICK), (1, 2, STICK)] },
+    Recipe { needs: &[(ITEM_COPPER_INGOT, 6)], result: (ITEM_COPPER_BARS, 16), name: "copper_bars", shaped: true, cells: &[(0, 0, ITEM_COPPER_INGOT), (1, 0, ITEM_COPPER_INGOT), (2, 0, ITEM_COPPER_INGOT), (0, 1, ITEM_COPPER_INGOT), (1, 1, ITEM_COPPER_INGOT), (2, 1, ITEM_COPPER_INGOT)] },
+    Recipe { needs: &[(ITEM_COPPER_INGOT, 9)], result: (ITEM_COPPER_BLOCK, 1), name: "copper_block", shaped: true, cells: &[(0, 0, ITEM_COPPER_INGOT), (1, 0, ITEM_COPPER_INGOT), (2, 0, ITEM_COPPER_INGOT), (0, 1, ITEM_COPPER_INGOT), (1, 1, ITEM_COPPER_INGOT), (2, 1, ITEM_COPPER_INGOT), (0, 2, ITEM_COPPER_INGOT), (1, 2, ITEM_COPPER_INGOT), (2, 2, ITEM_COPPER_INGOT)] },
+    Recipe { needs: &[(ITEM_COPPER_INGOT, 4)], result: (ITEM_COPPER_BOOTS, 1), name: "copper_boots", shaped: true, cells: &[(0, 0, ITEM_COPPER_INGOT), (2, 0, ITEM_COPPER_INGOT), (0, 1, ITEM_COPPER_INGOT), (2, 1, ITEM_COPPER_INGOT)] },
+    Recipe { needs: &[(ITEM_BLAZE_ROD, 1), (ITEM_COPPER_BLOCK, 3), (ITEM_REDSTONE, 1)], result: (ITEM_COPPER_BULB, 4), name: "copper_bulb", shaped: true, cells: &[(1, 0, ITEM_COPPER_BLOCK), (0, 1, ITEM_COPPER_BLOCK), (1, 1, ITEM_BLAZE_ROD), (2, 1, ITEM_COPPER_BLOCK), (1, 2, ITEM_REDSTONE)] },
+    Recipe { needs: &[(ITEM_COPPER_INGOT, 1), (ITEM_COPPER_NUGGET, 2)], result: (ITEM_COPPER_CHAIN, 1), name: "copper_chain", shaped: true, cells: &[(0, 0, ITEM_COPPER_NUGGET), (0, 1, ITEM_COPPER_INGOT), (0, 2, ITEM_COPPER_NUGGET)] },
+    Recipe { needs: &[(ITEM_CHEST, 1), (ITEM_COPPER_INGOT, 8)], result: (ITEM_COPPER_CHEST, 1), name: "copper_chest", shaped: true, cells: &[(0, 0, ITEM_COPPER_INGOT), (1, 0, ITEM_COPPER_INGOT), (2, 0, ITEM_COPPER_INGOT), (0, 1, ITEM_COPPER_INGOT), (1, 1, ITEM_CHEST), (2, 1, ITEM_COPPER_INGOT), (0, 2, ITEM_COPPER_INGOT), (1, 2, ITEM_COPPER_INGOT), (2, 2, ITEM_COPPER_INGOT)] },
+    Recipe { needs: &[(ITEM_COPPER_INGOT, 8)], result: (ITEM_COPPER_CHESTPLATE, 1), name: "copper_chestplate", shaped: true, cells: &[(0, 0, ITEM_COPPER_INGOT), (2, 0, ITEM_COPPER_INGOT), (0, 1, ITEM_COPPER_INGOT), (1, 1, ITEM_COPPER_INGOT), (2, 1, ITEM_COPPER_INGOT), (0, 2, ITEM_COPPER_INGOT), (1, 2, ITEM_COPPER_INGOT), (2, 2, ITEM_COPPER_INGOT)] },
+    Recipe { needs: &[(ITEM_COPPER_INGOT, 6)], result: (ITEM_COPPER_DOOR, 3), name: "copper_door", shaped: true, cells: &[(0, 0, ITEM_COPPER_INGOT), (1, 0, ITEM_COPPER_INGOT), (0, 1, ITEM_COPPER_INGOT), (1, 1, ITEM_COPPER_INGOT), (0, 2, ITEM_COPPER_INGOT), (1, 2, ITEM_COPPER_INGOT)] },
+    Recipe { needs: &[(ITEM_COPPER_BLOCK, 4)], result: (ITEM_COPPER_GRATE, 4), name: "copper_grate", shaped: true, cells: &[(1, 0, ITEM_COPPER_BLOCK), (0, 1, ITEM_COPPER_BLOCK), (2, 1, ITEM_COPPER_BLOCK), (1, 2, ITEM_COPPER_BLOCK)] },
+    Recipe { needs: &[(ITEM_COPPER_INGOT, 5)], result: (ITEM_COPPER_HELMET, 1), name: "copper_helmet", shaped: true, cells: &[(0, 0, ITEM_COPPER_INGOT), (1, 0, ITEM_COPPER_INGOT), (2, 0, ITEM_COPPER_INGOT), (0, 1, ITEM_COPPER_INGOT), (2, 1, ITEM_COPPER_INGOT)] },
+    Recipe { needs: &[(STICK, 2), (TAG_COPPER_TOOL_MATERIALS, 2)], result: (ITEM_COPPER_HOE, 1), name: "copper_hoe", shaped: true, cells: &[(0, 0, TAG_COPPER_TOOL_MATERIALS), (1, 0, TAG_COPPER_TOOL_MATERIALS), (1, 1, STICK), (1, 2, STICK)] },
+    Recipe { needs: &[(ITEM_COPPER_BLOCK, 1)], result: (ITEM_COPPER_INGOT, 9), name: "copper_ingot", shaped: false, cells: &[] },
+    Recipe { needs: &[(ITEM_COPPER_NUGGET, 9)], result: (ITEM_COPPER_INGOT, 1), name: "copper_ingot_from_nuggets", shaped: true, cells: &[(0, 0, ITEM_COPPER_NUGGET), (1, 0, ITEM_COPPER_NUGGET), (2, 0, ITEM_COPPER_NUGGET), (0, 1, ITEM_COPPER_NUGGET), (1, 1, ITEM_COPPER_NUGGET), (2, 1, ITEM_COPPER_NUGGET), (0, 2, ITEM_COPPER_NUGGET), (1, 2, ITEM_COPPER_NUGGET), (2, 2, ITEM_COPPER_NUGGET)] },
+    Recipe { needs: &[(ITEM_WAXED_COPPER_BLOCK, 1)], result: (ITEM_COPPER_INGOT, 9), name: "copper_ingot_from_waxed_copper_block", shaped: false, cells: &[] },
+    Recipe { needs: &[(ITEM_COPPER_NUGGET, 8), (ITEM_COPPER_TORCH, 1)], result: (ITEM_COPPER_LANTERN, 1), name: "copper_lantern", shaped: true, cells: &[(0, 0, ITEM_COPPER_NUGGET), (1, 0, ITEM_COPPER_NUGGET), (2, 0, ITEM_COPPER_NUGGET), (0, 1, ITEM_COPPER_NUGGET), (1, 1, ITEM_COPPER_TORCH), (2, 1, ITEM_COPPER_NUGGET), (0, 2, ITEM_COPPER_NUGGET), (1, 2, ITEM_COPPER_NUGGET), (2, 2, ITEM_COPPER_NUGGET)] },
+    Recipe { needs: &[(ITEM_COPPER_INGOT, 7)], result: (ITEM_COPPER_LEGGINGS, 1), name: "copper_leggings", shaped: true, cells: &[(0, 0, ITEM_COPPER_INGOT), (1, 0, ITEM_COPPER_INGOT), (2, 0, ITEM_COPPER_INGOT), (0, 1, ITEM_COPPER_INGOT), (2, 1, ITEM_COPPER_INGOT), (0, 2, ITEM_COPPER_INGOT), (2, 2, ITEM_COPPER_INGOT)] },
+    Recipe { needs: &[(ITEM_COPPER_INGOT, 1)], result: (ITEM_COPPER_NUGGET, 9), name: "copper_nugget", shaped: false, cells: &[] },
+    Recipe { needs: &[(STICK, 2), (TAG_COPPER_TOOL_MATERIALS, 3)], result: (ITEM_COPPER_PICKAXE, 1), name: "copper_pickaxe", shaped: true, cells: &[(0, 0, TAG_COPPER_TOOL_MATERIALS), (1, 0, TAG_COPPER_TOOL_MATERIALS), (2, 0, TAG_COPPER_TOOL_MATERIALS), (1, 1, STICK), (1, 2, STICK)] },
+    Recipe { needs: &[(STICK, 2), (TAG_COPPER_TOOL_MATERIALS, 1)], result: (ITEM_COPPER_SHOVEL, 1), name: "copper_shovel", shaped: true, cells: &[(0, 0, TAG_COPPER_TOOL_MATERIALS), (0, 1, STICK), (0, 2, STICK)] },
+    Recipe { needs: &[(STICK, 2), (TAG_COPPER_TOOL_MATERIALS, 1)], result: (ITEM_COPPER_SPEAR, 1), name: "copper_spear", shaped: true, cells: &[(2, 0, TAG_COPPER_TOOL_MATERIALS), (1, 1, STICK), (0, 2, STICK)] },
+    Recipe { needs: &[(STICK, 1), (TAG_COPPER_TOOL_MATERIALS, 2)], result: (ITEM_COPPER_SWORD, 1), name: "copper_sword", shaped: true, cells: &[(0, 0, TAG_COPPER_TOOL_MATERIALS), (0, 1, TAG_COPPER_TOOL_MATERIALS), (0, 2, STICK)] },
+    Recipe { needs: &[(ITEM_COPPER_NUGGET, 1), (STICK, 1), (TAG_COALS, 1)], result: (ITEM_COPPER_TORCH, 4), name: "copper_torch", shaped: true, cells: &[(0, 0, ITEM_COPPER_NUGGET), (0, 1, TAG_COALS), (0, 2, STICK)] },
+    Recipe { needs: &[(ITEM_COPPER_INGOT, 4)], result: (ITEM_COPPER_TRAPDOOR, 1), name: "copper_trapdoor", shaped: true, cells: &[(0, 0, ITEM_COPPER_INGOT), (1, 0, ITEM_COPPER_INGOT), (0, 1, ITEM_COPPER_INGOT), (1, 1, ITEM_COPPER_INGOT)] },
+    Recipe { needs: &[(CRAFTING_TABLE, 1), (ITEM_DROPPER, 1), (ITEM_IRON_INGOT, 5), (ITEM_REDSTONE, 2)], result: (ITEM_CRAFTER, 1), name: "crafter", shaped: true, cells: &[(0, 0, ITEM_IRON_INGOT), (1, 0, ITEM_IRON_INGOT), (2, 0, ITEM_IRON_INGOT), (0, 1, ITEM_IRON_INGOT), (1, 1, CRAFTING_TABLE), (2, 1, ITEM_IRON_INGOT), (0, 2, ITEM_REDSTONE), (1, 2, ITEM_DROPPER), (2, 2, ITEM_REDSTONE)] },
+    Recipe { needs: &[(TAG_PLANKS, 4)], result: (CRAFTING_TABLE, 1), name: "crafting_table", shaped: true, cells: &[(0, 0, TAG_PLANKS), (1, 0, TAG_PLANKS), (0, 1, TAG_PLANKS), (1, 1, TAG_PLANKS)] },
+    Recipe { needs: &[(ITEM_PALE_OAK_LOG, 2), (ITEM_RESIN_BLOCK, 1)], result: (ITEM_CREAKING_HEART, 1), name: "creaking_heart", shaped: true, cells: &[(0, 0, ITEM_PALE_OAK_LOG), (0, 1, ITEM_RESIN_BLOCK), (0, 2, ITEM_PALE_OAK_LOG)] },
+    Recipe { needs: &[(ITEM_CREEPER_HEAD, 1), (ITEM_PAPER, 1)], result: (ITEM_CREEPER_BANNER_PATTERN, 1), name: "creeper_banner_pattern", shaped: false, cells: &[] },
+    Recipe { needs: &[(ITEM_CRIMSON_PLANKS, 1)], result: (ITEM_CRIMSON_BUTTON, 1), name: "crimson_button", shaped: false, cells: &[] },
+    Recipe { needs: &[(ITEM_CRIMSON_PLANKS, 6)], result: (ITEM_CRIMSON_DOOR, 3), name: "crimson_door", shaped: true, cells: &[(0, 0, ITEM_CRIMSON_PLANKS), (1, 0, ITEM_CRIMSON_PLANKS), (0, 1, ITEM_CRIMSON_PLANKS), (1, 1, ITEM_CRIMSON_PLANKS), (0, 2, ITEM_CRIMSON_PLANKS), (1, 2, ITEM_CRIMSON_PLANKS)] },
+    Recipe { needs: &[(ITEM_CRIMSON_PLANKS, 4), (STICK, 2)], result: (ITEM_CRIMSON_FENCE, 3), name: "crimson_fence", shaped: true, cells: &[(0, 0, ITEM_CRIMSON_PLANKS), (1, 0, STICK), (2, 0, ITEM_CRIMSON_PLANKS), (0, 1, ITEM_CRIMSON_PLANKS), (1, 1, STICK), (2, 1, ITEM_CRIMSON_PLANKS)] },
+    Recipe { needs: &[(ITEM_CRIMSON_PLANKS, 2), (STICK, 4)], result: (ITEM_CRIMSON_FENCE_GATE, 1), name: "crimson_fence_gate", shaped: true, cells: &[(0, 0, STICK), (1, 0, ITEM_CRIMSON_PLANKS), (2, 0, STICK), (0, 1, STICK), (1, 1, ITEM_CRIMSON_PLANKS), (2, 1, STICK)] },
+    Recipe { needs: &[(ITEM_IRON_CHAIN, 2), (ITEM_STRIPPED_CRIMSON_STEM, 6)], result: (ITEM_CRIMSON_HANGING_SIGN, 6), name: "crimson_hanging_sign", shaped: true, cells: &[(0, 0, ITEM_IRON_CHAIN), (2, 0, ITEM_IRON_CHAIN), (0, 1, ITEM_STRIPPED_CRIMSON_STEM), (1, 1, ITEM_STRIPPED_CRIMSON_STEM), (2, 1, ITEM_STRIPPED_CRIMSON_STEM), (0, 2, ITEM_STRIPPED_CRIMSON_STEM), (1, 2, ITEM_STRIPPED_CRIMSON_STEM), (2, 2, ITEM_STRIPPED_CRIMSON_STEM)] },
+    Recipe { needs: &[(ITEM_CRIMSON_STEM, 4)], result: (ITEM_CRIMSON_HYPHAE, 3), name: "crimson_hyphae", shaped: true, cells: &[(0, 0, ITEM_CRIMSON_STEM), (1, 0, ITEM_CRIMSON_STEM), (0, 1, ITEM_CRIMSON_STEM), (1, 1, ITEM_CRIMSON_STEM)] },
+    Recipe { needs: &[(TAG_CRIMSON_STEMS, 1)], result: (ITEM_CRIMSON_PLANKS, 4), name: "crimson_planks", shaped: false, cells: &[] },
+    Recipe { needs: &[(ITEM_CRIMSON_PLANKS, 2)], result: (ITEM_CRIMSON_PRESSURE_PLATE, 1), name: "crimson_pressure_plate", shaped: true, cells: &[(0, 0, ITEM_CRIMSON_PLANKS), (1, 0, ITEM_CRIMSON_PLANKS)] },
+    Recipe { needs: &[(ITEM_STRIPPED_CRIMSON_STEM, 6)], result: (ITEM_CRIMSON_SHELF, 6), name: "crimson_shelf", shaped: true, cells: &[(0, 0, ITEM_STRIPPED_CRIMSON_STEM), (1, 0, ITEM_STRIPPED_CRIMSON_STEM), (2, 0, ITEM_STRIPPED_CRIMSON_STEM), (0, 2, ITEM_STRIPPED_CRIMSON_STEM), (1, 2, ITEM_STRIPPED_CRIMSON_STEM), (2, 2, ITEM_STRIPPED_CRIMSON_STEM)] },
+    Recipe { needs: &[(ITEM_CRIMSON_PLANKS, 6), (STICK, 1)], result: (ITEM_CRIMSON_SIGN, 3), name: "crimson_sign", shaped: true, cells: &[(0, 0, ITEM_CRIMSON_PLANKS), (1, 0, ITEM_CRIMSON_PLANKS), (2, 0, ITEM_CRIMSON_PLANKS), (0, 1, ITEM_CRIMSON_PLANKS), (1, 1, ITEM_CRIMSON_PLANKS), (2, 1, ITEM_CRIMSON_PLANKS), (1, 2, STICK)] },
+    Recipe { needs: &[(ITEM_CRIMSON_PLANKS, 3)], result: (ITEM_CRIMSON_SLAB, 6), name: "crimson_slab", shaped: true, cells: &[(0, 0, ITEM_CRIMSON_PLANKS), (1, 0, ITEM_CRIMSON_PLANKS), (2, 0, ITEM_CRIMSON_PLANKS)] },
+    Recipe { needs: &[(ITEM_CRIMSON_PLANKS, 6)], result: (ITEM_CRIMSON_STAIRS, 4), name: "crimson_stairs", shaped: true, cells: &[(0, 0, ITEM_CRIMSON_PLANKS), (0, 1, ITEM_CRIMSON_PLANKS), (1, 1, ITEM_CRIMSON_PLANKS), (0, 2, ITEM_CRIMSON_PLANKS), (1, 2, ITEM_CRIMSON_PLANKS), (2, 2, ITEM_CRIMSON_PLANKS)] },
+    Recipe { needs: &[(ITEM_CRIMSON_PLANKS, 6)], result: (ITEM_CRIMSON_TRAPDOOR, 2), name: "crimson_trapdoor", shaped: true, cells: &[(0, 0, ITEM_CRIMSON_PLANKS), (1, 0, ITEM_CRIMSON_PLANKS), (2, 0, ITEM_CRIMSON_PLANKS), (0, 1, ITEM_CRIMSON_PLANKS), (1, 1, ITEM_CRIMSON_PLANKS), (2, 1, ITEM_CRIMSON_PLANKS)] },
+    Recipe { needs: &[(ITEM_IRON_INGOT, 1), (STICK, 3), (ITEM_STRING, 2), (ITEM_TRIPWIRE_HOOK, 1)], result: (ITEM_CROSSBOW, 1), name: "crossbow", shaped: true, cells: &[(0, 0, STICK), (1, 0, ITEM_IRON_INGOT), (2, 0, STICK), (0, 1, ITEM_STRING), (1, 1, ITEM_TRIPWIRE_HOOK), (2, 1, ITEM_STRING), (1, 2, STICK)] },
+    Recipe { needs: &[(ITEM_COPPER_BLOCK, 4)], result: (ITEM_CUT_COPPER, 4), name: "cut_copper", shaped: true, cells: &[(0, 0, ITEM_COPPER_BLOCK), (1, 0, ITEM_COPPER_BLOCK), (0, 1, ITEM_COPPER_BLOCK), (1, 1, ITEM_COPPER_BLOCK)] },
+    Recipe { needs: &[(ITEM_CUT_COPPER, 3)], result: (ITEM_CUT_COPPER_SLAB, 6), name: "cut_copper_slab", shaped: true, cells: &[(0, 0, ITEM_CUT_COPPER), (1, 0, ITEM_CUT_COPPER), (2, 0, ITEM_CUT_COPPER)] },
+    Recipe { needs: &[(ITEM_CUT_COPPER, 6)], result: (ITEM_CUT_COPPER_STAIRS, 4), name: "cut_copper_stairs", shaped: true, cells: &[(0, 0, ITEM_CUT_COPPER), (0, 1, ITEM_CUT_COPPER), (1, 1, ITEM_CUT_COPPER), (0, 2, ITEM_CUT_COPPER), (1, 2, ITEM_CUT_COPPER), (2, 2, ITEM_CUT_COPPER)] },
+    Recipe { needs: &[(ITEM_RED_SANDSTONE, 4)], result: (ITEM_CUT_RED_SANDSTONE, 4), name: "cut_red_sandstone", shaped: true, cells: &[(0, 0, ITEM_RED_SANDSTONE), (1, 0, ITEM_RED_SANDSTONE), (0, 1, ITEM_RED_SANDSTONE), (1, 1, ITEM_RED_SANDSTONE)] },
+    Recipe { needs: &[(ITEM_CUT_RED_SANDSTONE, 3)], result: (ITEM_CUT_RED_SANDSTONE_SLAB, 6), name: "cut_red_sandstone_slab", shaped: true, cells: &[(0, 0, ITEM_CUT_RED_SANDSTONE), (1, 0, ITEM_CUT_RED_SANDSTONE), (2, 0, ITEM_CUT_RED_SANDSTONE)] },
+    Recipe { needs: &[(ITEM_SANDSTONE, 4)], result: (ITEM_CUT_SANDSTONE, 4), name: "cut_sandstone", shaped: true, cells: &[(0, 0, ITEM_SANDSTONE), (1, 0, ITEM_SANDSTONE), (0, 1, ITEM_SANDSTONE), (1, 1, ITEM_SANDSTONE)] },
+    Recipe { needs: &[(ITEM_CUT_SANDSTONE, 3)], result: (ITEM_CUT_SANDSTONE_SLAB, 6), name: "cut_sandstone_slab", shaped: true, cells: &[(0, 0, ITEM_CUT_SANDSTONE), (1, 0, ITEM_CUT_SANDSTONE), (2, 0, ITEM_CUT_SANDSTONE)] },
+    Recipe { needs: &[(ITEM_CYAN_WOOL, 6), (STICK, 1)], result: (ITEM_CYAN_BANNER, 1), name: "cyan_banner", shaped: true, cells: &[(0, 0, ITEM_CYAN_WOOL), (1, 0, ITEM_CYAN_WOOL), (2, 0, ITEM_CYAN_WOOL), (0, 1, ITEM_CYAN_WOOL), (1, 1, ITEM_CYAN_WOOL), (2, 1, ITEM_CYAN_WOOL), (1, 2, STICK)] },
+    Recipe { needs: &[(ITEM_CYAN_WOOL, 3), (TAG_PLANKS, 3)], result: (ITEM_CYAN_BED, 1), name: "cyan_bed", shaped: true, cells: &[(0, 0, ITEM_CYAN_WOOL), (1, 0, ITEM_CYAN_WOOL), (2, 0, ITEM_CYAN_WOOL), (0, 1, TAG_PLANKS), (1, 1, TAG_PLANKS), (2, 1, TAG_PLANKS)] },
+    Recipe { needs: &[(ITEM_CANDLE, 1), (ITEM_CYAN_DYE, 1)], result: (ITEM_CYAN_CANDLE, 1), name: "cyan_candle", shaped: false, cells: &[] },
+    Recipe { needs: &[(ITEM_CYAN_WOOL, 2)], result: (ITEM_CYAN_CARPET, 3), name: "cyan_carpet", shaped: true, cells: &[(0, 0, ITEM_CYAN_WOOL), (1, 0, ITEM_CYAN_WOOL)] },
+    Recipe { needs: &[(ITEM_CYAN_DYE, 1), (ITEM_GRAVEL, 1), (ITEM_GRAVEL, 1), (ITEM_GRAVEL, 1), (ITEM_GRAVEL, 1), (ITEM_SAND, 1), (ITEM_SAND, 1), (ITEM_SAND, 1), (ITEM_SAND, 1)], result: (ITEM_CYAN_CONCRETE_POWDER, 8), name: "cyan_concrete_powder", shaped: false, cells: &[] },
+    Recipe { needs: &[(ITEM_CYAN_CONCRETE, 3)], result: (ITEM_CYAN_CONCRETE_SLAB, 6), name: "cyan_concrete_slab", shaped: true, cells: &[(0, 0, ITEM_CYAN_CONCRETE), (1, 0, ITEM_CYAN_CONCRETE), (2, 0, ITEM_CYAN_CONCRETE)] },
+    Recipe { needs: &[(ITEM_CYAN_CONCRETE, 6)], result: (ITEM_CYAN_CONCRETE_STAIRS, 4), name: "cyan_concrete_stairs", shaped: true, cells: &[(0, 0, ITEM_CYAN_CONCRETE), (0, 1, ITEM_CYAN_CONCRETE), (1, 1, ITEM_CYAN_CONCRETE), (0, 2, ITEM_CYAN_CONCRETE), (1, 2, ITEM_CYAN_CONCRETE), (2, 2, ITEM_CYAN_CONCRETE)] },
+    Recipe { needs: &[(ITEM_CYAN_WOOL_SLAB, 3)], result: (ITEM_CYAN_CUSHION, 1), name: "cyan_cushion", shaped: true, cells: &[(0, 0, ITEM_CYAN_WOOL_SLAB), (1, 0, ITEM_CYAN_WOOL_SLAB), (2, 0, ITEM_CYAN_WOOL_SLAB)] },
+    Recipe { needs: &[(ITEM_BLUE_DYE, 1), (ITEM_GREEN_DYE, 1)], result: (ITEM_CYAN_DYE, 2), name: "cyan_dye", shaped: false, cells: &[] },
+    Recipe { needs: &[(ITEM_PITCHER_PLANT, 1)], result: (ITEM_CYAN_DYE, 2), name: "cyan_dye_from_pitcher_plant", shaped: false, cells: &[] },
+    Recipe { needs: &[(ITEM_CYAN_WOOL, 1), (ITEM_GLASS, 2), (ITEM_LEATHER, 3)], result: (ITEM_CYAN_HARNESS, 1), name: "cyan_harness", shaped: true, cells: &[(0, 0, ITEM_LEATHER), (1, 0, ITEM_LEATHER), (2, 0, ITEM_LEATHER), (0, 1, ITEM_GLASS), (1, 1, ITEM_CYAN_WOOL), (2, 1, ITEM_GLASS)] },
+    Recipe { needs: &[(ITEM_CYAN_DYE, 1), (ITEM_GLASS, 8)], result: (ITEM_CYAN_STAINED_GLASS, 8), name: "cyan_stained_glass", shaped: true, cells: &[(0, 0, ITEM_GLASS), (1, 0, ITEM_GLASS), (2, 0, ITEM_GLASS), (0, 1, ITEM_GLASS), (1, 1, ITEM_CYAN_DYE), (2, 1, ITEM_GLASS), (0, 2, ITEM_GLASS), (1, 2, ITEM_GLASS), (2, 2, ITEM_GLASS)] },
+    Recipe { needs: &[(ITEM_CYAN_STAINED_GLASS, 6)], result: (ITEM_CYAN_STAINED_GLASS_PANE, 16), name: "cyan_stained_glass_pane", shaped: true, cells: &[(0, 0, ITEM_CYAN_STAINED_GLASS), (1, 0, ITEM_CYAN_STAINED_GLASS), (2, 0, ITEM_CYAN_STAINED_GLASS), (0, 1, ITEM_CYAN_STAINED_GLASS), (1, 1, ITEM_CYAN_STAINED_GLASS), (2, 1, ITEM_CYAN_STAINED_GLASS)] },
+    Recipe { needs: &[(ITEM_CYAN_DYE, 1), (ITEM_GLASS_PANE, 8)], result: (ITEM_CYAN_STAINED_GLASS_PANE, 8), name: "cyan_stained_glass_pane_from_glass_pane", shaped: true, cells: &[(0, 0, ITEM_GLASS_PANE), (1, 0, ITEM_GLASS_PANE), (2, 0, ITEM_GLASS_PANE), (0, 1, ITEM_GLASS_PANE), (1, 1, ITEM_CYAN_DYE), (2, 1, ITEM_GLASS_PANE), (0, 2, ITEM_GLASS_PANE), (1, 2, ITEM_GLASS_PANE), (2, 2, ITEM_GLASS_PANE)] },
+    Recipe { needs: &[(ITEM_CYAN_DYE, 1), (ITEM_TERRACOTTA, 8)], result: (ITEM_CYAN_TERRACOTTA, 8), name: "cyan_terracotta", shaped: true, cells: &[(0, 0, ITEM_TERRACOTTA), (1, 0, ITEM_TERRACOTTA), (2, 0, ITEM_TERRACOTTA), (0, 1, ITEM_TERRACOTTA), (1, 1, ITEM_CYAN_DYE), (2, 1, ITEM_TERRACOTTA), (0, 2, ITEM_TERRACOTTA), (1, 2, ITEM_TERRACOTTA), (2, 2, ITEM_TERRACOTTA)] },
+    Recipe { needs: &[(ITEM_CYAN_WOOL, 3)], result: (ITEM_CYAN_WOOL_SLAB, 6), name: "cyan_wool_slab", shaped: true, cells: &[(0, 0, ITEM_CYAN_WOOL), (1, 0, ITEM_CYAN_WOOL), (2, 0, ITEM_CYAN_WOOL)] },
+    Recipe { needs: &[(ITEM_CYAN_WOOL, 6)], result: (ITEM_CYAN_WOOL_STAIRS, 4), name: "cyan_wool_stairs", shaped: true, cells: &[(0, 0, ITEM_CYAN_WOOL), (0, 1, ITEM_CYAN_WOOL), (1, 1, ITEM_CYAN_WOOL), (0, 2, ITEM_CYAN_WOOL), (1, 2, ITEM_CYAN_WOOL), (2, 2, ITEM_CYAN_WOOL)] },
+    Recipe { needs: &[(ITEM_DARK_OAK_PLANKS, 5)], result: (ITEM_DARK_OAK_BOAT, 1), name: "dark_oak_boat", shaped: true, cells: &[(0, 0, ITEM_DARK_OAK_PLANKS), (2, 0, ITEM_DARK_OAK_PLANKS), (0, 1, ITEM_DARK_OAK_PLANKS), (1, 1, ITEM_DARK_OAK_PLANKS), (2, 1, ITEM_DARK_OAK_PLANKS)] },
+    Recipe { needs: &[(ITEM_DARK_OAK_PLANKS, 1)], result: (ITEM_DARK_OAK_BUTTON, 1), name: "dark_oak_button", shaped: false, cells: &[] },
+    Recipe { needs: &[(ITEM_CHEST, 1), (ITEM_DARK_OAK_BOAT, 1)], result: (ITEM_DARK_OAK_CHEST_BOAT, 1), name: "dark_oak_chest_boat", shaped: false, cells: &[] },
+    Recipe { needs: &[(ITEM_DARK_OAK_PLANKS, 6)], result: (ITEM_DARK_OAK_DOOR, 3), name: "dark_oak_door", shaped: true, cells: &[(0, 0, ITEM_DARK_OAK_PLANKS), (1, 0, ITEM_DARK_OAK_PLANKS), (0, 1, ITEM_DARK_OAK_PLANKS), (1, 1, ITEM_DARK_OAK_PLANKS), (0, 2, ITEM_DARK_OAK_PLANKS), (1, 2, ITEM_DARK_OAK_PLANKS)] },
+    Recipe { needs: &[(ITEM_DARK_OAK_PLANKS, 4), (STICK, 2)], result: (ITEM_DARK_OAK_FENCE, 3), name: "dark_oak_fence", shaped: true, cells: &[(0, 0, ITEM_DARK_OAK_PLANKS), (1, 0, STICK), (2, 0, ITEM_DARK_OAK_PLANKS), (0, 1, ITEM_DARK_OAK_PLANKS), (1, 1, STICK), (2, 1, ITEM_DARK_OAK_PLANKS)] },
+    Recipe { needs: &[(ITEM_DARK_OAK_PLANKS, 2), (STICK, 4)], result: (ITEM_DARK_OAK_FENCE_GATE, 1), name: "dark_oak_fence_gate", shaped: true, cells: &[(0, 0, STICK), (1, 0, ITEM_DARK_OAK_PLANKS), (2, 0, STICK), (0, 1, STICK), (1, 1, ITEM_DARK_OAK_PLANKS), (2, 1, STICK)] },
+    Recipe { needs: &[(ITEM_IRON_CHAIN, 2), (ITEM_STRIPPED_DARK_OAK_LOG, 6)], result: (ITEM_DARK_OAK_HANGING_SIGN, 6), name: "dark_oak_hanging_sign", shaped: true, cells: &[(0, 0, ITEM_IRON_CHAIN), (2, 0, ITEM_IRON_CHAIN), (0, 1, ITEM_STRIPPED_DARK_OAK_LOG), (1, 1, ITEM_STRIPPED_DARK_OAK_LOG), (2, 1, ITEM_STRIPPED_DARK_OAK_LOG), (0, 2, ITEM_STRIPPED_DARK_OAK_LOG), (1, 2, ITEM_STRIPPED_DARK_OAK_LOG), (2, 2, ITEM_STRIPPED_DARK_OAK_LOG)] },
+    Recipe { needs: &[(TAG_DARK_OAK_LOGS, 1)], result: (ITEM_DARK_OAK_PLANKS, 4), name: "dark_oak_planks", shaped: false, cells: &[] },
+    Recipe { needs: &[(ITEM_DARK_OAK_PLANKS, 2)], result: (ITEM_DARK_OAK_PRESSURE_PLATE, 1), name: "dark_oak_pressure_plate", shaped: true, cells: &[(0, 0, ITEM_DARK_OAK_PLANKS), (1, 0, ITEM_DARK_OAK_PLANKS)] },
+    Recipe { needs: &[(ITEM_STRIPPED_DARK_OAK_LOG, 6)], result: (ITEM_DARK_OAK_SHELF, 6), name: "dark_oak_shelf", shaped: true, cells: &[(0, 0, ITEM_STRIPPED_DARK_OAK_LOG), (1, 0, ITEM_STRIPPED_DARK_OAK_LOG), (2, 0, ITEM_STRIPPED_DARK_OAK_LOG), (0, 2, ITEM_STRIPPED_DARK_OAK_LOG), (1, 2, ITEM_STRIPPED_DARK_OAK_LOG), (2, 2, ITEM_STRIPPED_DARK_OAK_LOG)] },
+    Recipe { needs: &[(ITEM_DARK_OAK_PLANKS, 6), (STICK, 1)], result: (ITEM_DARK_OAK_SIGN, 3), name: "dark_oak_sign", shaped: true, cells: &[(0, 0, ITEM_DARK_OAK_PLANKS), (1, 0, ITEM_DARK_OAK_PLANKS), (2, 0, ITEM_DARK_OAK_PLANKS), (0, 1, ITEM_DARK_OAK_PLANKS), (1, 1, ITEM_DARK_OAK_PLANKS), (2, 1, ITEM_DARK_OAK_PLANKS), (1, 2, STICK)] },
+    Recipe { needs: &[(ITEM_DARK_OAK_PLANKS, 3)], result: (ITEM_DARK_OAK_SLAB, 6), name: "dark_oak_slab", shaped: true, cells: &[(0, 0, ITEM_DARK_OAK_PLANKS), (1, 0, ITEM_DARK_OAK_PLANKS), (2, 0, ITEM_DARK_OAK_PLANKS)] },
+    Recipe { needs: &[(ITEM_DARK_OAK_PLANKS, 6)], result: (ITEM_DARK_OAK_STAIRS, 4), name: "dark_oak_stairs", shaped: true, cells: &[(0, 0, ITEM_DARK_OAK_PLANKS), (0, 1, ITEM_DARK_OAK_PLANKS), (1, 1, ITEM_DARK_OAK_PLANKS), (0, 2, ITEM_DARK_OAK_PLANKS), (1, 2, ITEM_DARK_OAK_PLANKS), (2, 2, ITEM_DARK_OAK_PLANKS)] },
+    Recipe { needs: &[(ITEM_DARK_OAK_PLANKS, 6)], result: (ITEM_DARK_OAK_TRAPDOOR, 2), name: "dark_oak_trapdoor", shaped: true, cells: &[(0, 0, ITEM_DARK_OAK_PLANKS), (1, 0, ITEM_DARK_OAK_PLANKS), (2, 0, ITEM_DARK_OAK_PLANKS), (0, 1, ITEM_DARK_OAK_PLANKS), (1, 1, ITEM_DARK_OAK_PLANKS), (2, 1, ITEM_DARK_OAK_PLANKS)] },
+    Recipe { needs: &[(ITEM_DARK_OAK_LOG, 4)], result: (ITEM_DARK_OAK_WOOD, 3), name: "dark_oak_wood", shaped: true, cells: &[(0, 0, ITEM_DARK_OAK_LOG), (1, 0, ITEM_DARK_OAK_LOG), (0, 1, ITEM_DARK_OAK_LOG), (1, 1, ITEM_DARK_OAK_LOG)] },
+    Recipe { needs: &[(ITEM_BLACK_DYE, 1), (ITEM_PRISMARINE_SHARD, 8)], result: (ITEM_DARK_PRISMARINE, 1), name: "dark_prismarine", shaped: true, cells: &[(0, 0, ITEM_PRISMARINE_SHARD), (1, 0, ITEM_PRISMARINE_SHARD), (2, 0, ITEM_PRISMARINE_SHARD), (0, 1, ITEM_PRISMARINE_SHARD), (1, 1, ITEM_BLACK_DYE), (2, 1, ITEM_PRISMARINE_SHARD), (0, 2, ITEM_PRISMARINE_SHARD), (1, 2, ITEM_PRISMARINE_SHARD), (2, 2, ITEM_PRISMARINE_SHARD)] },
+    Recipe { needs: &[(ITEM_DARK_PRISMARINE, 3)], result: (ITEM_DARK_PRISMARINE_SLAB, 6), name: "dark_prismarine_slab", shaped: true, cells: &[(0, 0, ITEM_DARK_PRISMARINE), (1, 0, ITEM_DARK_PRISMARINE), (2, 0, ITEM_DARK_PRISMARINE)] },
+    Recipe { needs: &[(ITEM_DARK_PRISMARINE, 6)], result: (ITEM_DARK_PRISMARINE_STAIRS, 4), name: "dark_prismarine_stairs", shaped: true, cells: &[(0, 0, ITEM_DARK_PRISMARINE), (0, 1, ITEM_DARK_PRISMARINE), (1, 1, ITEM_DARK_PRISMARINE), (0, 2, ITEM_DARK_PRISMARINE), (1, 2, ITEM_DARK_PRISMARINE), (2, 2, ITEM_DARK_PRISMARINE)] },
+    Recipe { needs: &[(ITEM_GLASS, 3), (ITEM_QUARTZ, 3), (TAG_WOODEN_SLABS, 3)], result: (ITEM_DAYLIGHT_DETECTOR, 1), name: "daylight_detector", shaped: true, cells: &[(0, 0, ITEM_GLASS), (1, 0, ITEM_GLASS), (2, 0, ITEM_GLASS), (0, 1, ITEM_QUARTZ), (1, 1, ITEM_QUARTZ), (2, 1, ITEM_QUARTZ), (0, 2, TAG_WOODEN_SLABS), (1, 2, TAG_WOODEN_SLABS), (2, 2, TAG_WOODEN_SLABS)] },
+    Recipe { needs: &[(ITEM_BRICK, 4)], result: (ITEM_DECORATED_POT, 1), name: "decorated_pot_simple", shaped: true, cells: &[(1, 0, ITEM_BRICK), (0, 1, ITEM_BRICK), (2, 1, ITEM_BRICK), (1, 2, ITEM_BRICK)] },
+    Recipe { needs: &[(ITEM_DEEPSLATE_BRICKS, 3)], result: (ITEM_DEEPSLATE_BRICK_SLAB, 6), name: "deepslate_brick_slab", shaped: true, cells: &[(0, 0, ITEM_DEEPSLATE_BRICKS), (1, 0, ITEM_DEEPSLATE_BRICKS), (2, 0, ITEM_DEEPSLATE_BRICKS)] },
+    Recipe { needs: &[(ITEM_DEEPSLATE_BRICKS, 6)], result: (ITEM_DEEPSLATE_BRICK_STAIRS, 4), name: "deepslate_brick_stairs", shaped: true, cells: &[(0, 0, ITEM_DEEPSLATE_BRICKS), (0, 1, ITEM_DEEPSLATE_BRICKS), (1, 1, ITEM_DEEPSLATE_BRICKS), (0, 2, ITEM_DEEPSLATE_BRICKS), (1, 2, ITEM_DEEPSLATE_BRICKS), (2, 2, ITEM_DEEPSLATE_BRICKS)] },
+    Recipe { needs: &[(ITEM_DEEPSLATE_BRICKS, 6)], result: (ITEM_DEEPSLATE_BRICK_WALL, 6), name: "deepslate_brick_wall", shaped: true, cells: &[(0, 0, ITEM_DEEPSLATE_BRICKS), (1, 0, ITEM_DEEPSLATE_BRICKS), (2, 0, ITEM_DEEPSLATE_BRICKS), (0, 1, ITEM_DEEPSLATE_BRICKS), (1, 1, ITEM_DEEPSLATE_BRICKS), (2, 1, ITEM_DEEPSLATE_BRICKS)] },
+    Recipe { needs: &[(ITEM_POLISHED_DEEPSLATE, 4)], result: (ITEM_DEEPSLATE_BRICKS, 4), name: "deepslate_bricks", shaped: true, cells: &[(0, 0, ITEM_POLISHED_DEEPSLATE), (1, 0, ITEM_POLISHED_DEEPSLATE), (0, 1, ITEM_POLISHED_DEEPSLATE), (1, 1, ITEM_POLISHED_DEEPSLATE)] },
+    Recipe { needs: &[(ITEM_DEEPSLATE_TILES, 3)], result: (ITEM_DEEPSLATE_TILE_SLAB, 6), name: "deepslate_tile_slab", shaped: true, cells: &[(0, 0, ITEM_DEEPSLATE_TILES), (1, 0, ITEM_DEEPSLATE_TILES), (2, 0, ITEM_DEEPSLATE_TILES)] },
+    Recipe { needs: &[(ITEM_DEEPSLATE_TILES, 6)], result: (ITEM_DEEPSLATE_TILE_STAIRS, 4), name: "deepslate_tile_stairs", shaped: true, cells: &[(0, 0, ITEM_DEEPSLATE_TILES), (0, 1, ITEM_DEEPSLATE_TILES), (1, 1, ITEM_DEEPSLATE_TILES), (0, 2, ITEM_DEEPSLATE_TILES), (1, 2, ITEM_DEEPSLATE_TILES), (2, 2, ITEM_DEEPSLATE_TILES)] },
+    Recipe { needs: &[(ITEM_DEEPSLATE_TILES, 6)], result: (ITEM_DEEPSLATE_TILE_WALL, 6), name: "deepslate_tile_wall", shaped: true, cells: &[(0, 0, ITEM_DEEPSLATE_TILES), (1, 0, ITEM_DEEPSLATE_TILES), (2, 0, ITEM_DEEPSLATE_TILES), (0, 1, ITEM_DEEPSLATE_TILES), (1, 1, ITEM_DEEPSLATE_TILES), (2, 1, ITEM_DEEPSLATE_TILES)] },
+    Recipe { needs: &[(ITEM_DEEPSLATE_BRICKS, 4)], result: (ITEM_DEEPSLATE_TILES, 4), name: "deepslate_tiles", shaped: true, cells: &[(0, 0, ITEM_DEEPSLATE_BRICKS), (1, 0, ITEM_DEEPSLATE_BRICKS), (0, 1, ITEM_DEEPSLATE_BRICKS), (1, 1, ITEM_DEEPSLATE_BRICKS)] },
+    Recipe { needs: &[(ITEM_IRON_INGOT, 6), (ITEM_REDSTONE, 1), (ITEM_STONE_PRESSURE_PLATE, 1)], result: (ITEM_DETECTOR_RAIL, 6), name: "detector_rail", shaped: true, cells: &[(0, 0, ITEM_IRON_INGOT), (2, 0, ITEM_IRON_INGOT), (0, 1, ITEM_IRON_INGOT), (1, 1, ITEM_STONE_PRESSURE_PLATE), (2, 1, ITEM_IRON_INGOT), (0, 2, ITEM_IRON_INGOT), (1, 2, ITEM_REDSTONE), (2, 2, ITEM_IRON_INGOT)] },
+    Recipe { needs: &[(ITEM_DIAMOND_BLOCK, 1)], result: (ITEM_DIAMOND, 9), name: "diamond", shaped: false, cells: &[] },
+    Recipe { needs: &[(STICK, 2), (TAG_DIAMOND_TOOL_MATERIALS, 3)], result: (ITEM_DIAMOND_AXE, 1), name: "diamond_axe", shaped: true, cells: &[(0, 0, TAG_DIAMOND_TOOL_MATERIALS), (1, 0, TAG_DIAMOND_TOOL_MATERIALS), (0, 1, TAG_DIAMOND_TOOL_MATERIALS), (1, 1, STICK), (1, 2, STICK)] },
+    Recipe { needs: &[(ITEM_DIAMOND, 9)], result: (ITEM_DIAMOND_BLOCK, 1), name: "diamond_block", shaped: true, cells: &[(0, 0, ITEM_DIAMOND), (1, 0, ITEM_DIAMOND), (2, 0, ITEM_DIAMOND), (0, 1, ITEM_DIAMOND), (1, 1, ITEM_DIAMOND), (2, 1, ITEM_DIAMOND), (0, 2, ITEM_DIAMOND), (1, 2, ITEM_DIAMOND), (2, 2, ITEM_DIAMOND)] },
+    Recipe { needs: &[(ITEM_DIAMOND, 4)], result: (ITEM_DIAMOND_BOOTS, 1), name: "diamond_boots", shaped: true, cells: &[(0, 0, ITEM_DIAMOND), (2, 0, ITEM_DIAMOND), (0, 1, ITEM_DIAMOND), (2, 1, ITEM_DIAMOND)] },
+    Recipe { needs: &[(ITEM_DIAMOND, 8)], result: (ITEM_DIAMOND_CHESTPLATE, 1), name: "diamond_chestplate", shaped: true, cells: &[(0, 0, ITEM_DIAMOND), (2, 0, ITEM_DIAMOND), (0, 1, ITEM_DIAMOND), (1, 1, ITEM_DIAMOND), (2, 1, ITEM_DIAMOND), (0, 2, ITEM_DIAMOND), (1, 2, ITEM_DIAMOND), (2, 2, ITEM_DIAMOND)] },
+    Recipe { needs: &[(ITEM_DIAMOND, 5)], result: (ITEM_DIAMOND_HELMET, 1), name: "diamond_helmet", shaped: true, cells: &[(0, 0, ITEM_DIAMOND), (1, 0, ITEM_DIAMOND), (2, 0, ITEM_DIAMOND), (0, 1, ITEM_DIAMOND), (2, 1, ITEM_DIAMOND)] },
+    Recipe { needs: &[(STICK, 2), (TAG_DIAMOND_TOOL_MATERIALS, 2)], result: (ITEM_DIAMOND_HOE, 1), name: "diamond_hoe", shaped: true, cells: &[(0, 0, TAG_DIAMOND_TOOL_MATERIALS), (1, 0, TAG_DIAMOND_TOOL_MATERIALS), (1, 1, STICK), (1, 2, STICK)] },
+    Recipe { needs: &[(ITEM_DIAMOND, 7)], result: (ITEM_DIAMOND_LEGGINGS, 1), name: "diamond_leggings", shaped: true, cells: &[(0, 0, ITEM_DIAMOND), (1, 0, ITEM_DIAMOND), (2, 0, ITEM_DIAMOND), (0, 1, ITEM_DIAMOND), (2, 1, ITEM_DIAMOND), (0, 2, ITEM_DIAMOND), (2, 2, ITEM_DIAMOND)] },
+    Recipe { needs: &[(STICK, 2), (TAG_DIAMOND_TOOL_MATERIALS, 3)], result: (ITEM_DIAMOND_PICKAXE, 1), name: "diamond_pickaxe", shaped: true, cells: &[(0, 0, TAG_DIAMOND_TOOL_MATERIALS), (1, 0, TAG_DIAMOND_TOOL_MATERIALS), (2, 0, TAG_DIAMOND_TOOL_MATERIALS), (1, 1, STICK), (1, 2, STICK)] },
+    Recipe { needs: &[(STICK, 2), (TAG_DIAMOND_TOOL_MATERIALS, 1)], result: (ITEM_DIAMOND_SHOVEL, 1), name: "diamond_shovel", shaped: true, cells: &[(0, 0, TAG_DIAMOND_TOOL_MATERIALS), (0, 1, STICK), (0, 2, STICK)] },
+    Recipe { needs: &[(STICK, 2), (TAG_DIAMOND_TOOL_MATERIALS, 1)], result: (ITEM_DIAMOND_SPEAR, 1), name: "diamond_spear", shaped: true, cells: &[(2, 0, TAG_DIAMOND_TOOL_MATERIALS), (1, 1, STICK), (0, 2, STICK)] },
+    Recipe { needs: &[(STICK, 1), (TAG_DIAMOND_TOOL_MATERIALS, 2)], result: (ITEM_DIAMOND_SWORD, 1), name: "diamond_sword", shaped: true, cells: &[(0, 0, TAG_DIAMOND_TOOL_MATERIALS), (0, 1, TAG_DIAMOND_TOOL_MATERIALS), (0, 2, STICK)] },
+    Recipe { needs: &[(COBBLESTONE, 2), (ITEM_QUARTZ, 2)], result: (ITEM_DIORITE, 2), name: "diorite", shaped: true, cells: &[(0, 0, COBBLESTONE), (1, 0, ITEM_QUARTZ), (0, 1, ITEM_QUARTZ), (1, 1, COBBLESTONE)] },
+    Recipe { needs: &[(ITEM_DIORITE, 3)], result: (ITEM_DIORITE_SLAB, 6), name: "diorite_slab", shaped: true, cells: &[(0, 0, ITEM_DIORITE), (1, 0, ITEM_DIORITE), (2, 0, ITEM_DIORITE)] },
+    Recipe { needs: &[(ITEM_DIORITE, 6)], result: (ITEM_DIORITE_STAIRS, 4), name: "diorite_stairs", shaped: true, cells: &[(0, 0, ITEM_DIORITE), (0, 1, ITEM_DIORITE), (1, 1, ITEM_DIORITE), (0, 2, ITEM_DIORITE), (1, 2, ITEM_DIORITE), (2, 2, ITEM_DIORITE)] },
+    Recipe { needs: &[(ITEM_DIORITE, 6)], result: (ITEM_DIORITE_WALL, 6), name: "diorite_wall", shaped: true, cells: &[(0, 0, ITEM_DIORITE), (1, 0, ITEM_DIORITE), (2, 0, ITEM_DIORITE), (0, 1, ITEM_DIORITE), (1, 1, ITEM_DIORITE), (2, 1, ITEM_DIORITE)] },
+    Recipe { needs: &[(ITEM_BOW, 1), (COBBLESTONE, 7), (ITEM_REDSTONE, 1)], result: (ITEM_DISPENSER, 1), name: "dispenser", shaped: true, cells: &[(0, 0, COBBLESTONE), (1, 0, COBBLESTONE), (2, 0, COBBLESTONE), (0, 1, COBBLESTONE), (1, 1, ITEM_BOW), (2, 1, COBBLESTONE), (0, 2, COBBLESTONE), (1, 2, ITEM_REDSTONE), (2, 2, COBBLESTONE)] },
+    Recipe { needs: &[(ITEM_GHAST_TEAR, 8), (ITEM_SOUL_SAND, 1)], result: (ITEM_DRIED_GHAST, 1), name: "dried_ghast", shaped: true, cells: &[(0, 0, ITEM_GHAST_TEAR), (1, 0, ITEM_GHAST_TEAR), (2, 0, ITEM_GHAST_TEAR), (0, 1, ITEM_GHAST_TEAR), (1, 1, ITEM_SOUL_SAND), (2, 1, ITEM_GHAST_TEAR), (0, 2, ITEM_GHAST_TEAR), (1, 2, ITEM_GHAST_TEAR), (2, 2, ITEM_GHAST_TEAR)] },
+    Recipe { needs: &[(ITEM_DRIED_KELP_BLOCK, 1)], result: (ITEM_DRIED_KELP, 9), name: "dried_kelp", shaped: false, cells: &[] },
+    Recipe { needs: &[(ITEM_DRIED_KELP, 9)], result: (ITEM_DRIED_KELP_BLOCK, 1), name: "dried_kelp_block", shaped: true, cells: &[(0, 0, ITEM_DRIED_KELP), (1, 0, ITEM_DRIED_KELP), (2, 0, ITEM_DRIED_KELP), (0, 1, ITEM_DRIED_KELP), (1, 1, ITEM_DRIED_KELP), (2, 1, ITEM_DRIED_KELP), (0, 2, ITEM_DRIED_KELP), (1, 2, ITEM_DRIED_KELP), (2, 2, ITEM_DRIED_KELP)] },
+    Recipe { needs: &[(ITEM_POINTED_DRIPSTONE, 4)], result: (ITEM_DRIPSTONE_BLOCK, 1), name: "dripstone_block", shaped: true, cells: &[(0, 0, ITEM_POINTED_DRIPSTONE), (1, 0, ITEM_POINTED_DRIPSTONE), (0, 1, ITEM_POINTED_DRIPSTONE), (1, 1, ITEM_POINTED_DRIPSTONE)] },
+    Recipe { needs: &[(COBBLESTONE, 7), (ITEM_REDSTONE, 1)], result: (ITEM_DROPPER, 1), name: "dropper", shaped: true, cells: &[(0, 0, COBBLESTONE), (1, 0, COBBLESTONE), (2, 0, COBBLESTONE), (0, 1, COBBLESTONE), (2, 1, COBBLESTONE), (0, 2, COBBLESTONE), (1, 2, ITEM_REDSTONE), (2, 2, COBBLESTONE)] },
+    Recipe { needs: &[(ITEM_DIAMOND, 7), (ITEM_DUNE_ARMOR_TRIM_SMITHING_TEMPLATE, 1), (ITEM_SANDSTONE, 1)], result: (ITEM_DUNE_ARMOR_TRIM_SMITHING_TEMPLATE, 2), name: "dune_armor_trim_smithing_template", shaped: true, cells: &[(0, 0, ITEM_DIAMOND), (1, 0, ITEM_DUNE_ARMOR_TRIM_SMITHING_TEMPLATE), (2, 0, ITEM_DIAMOND), (0, 1, ITEM_DIAMOND), (1, 1, ITEM_SANDSTONE), (2, 1, ITEM_DIAMOND), (0, 2, ITEM_DIAMOND), (1, 2, ITEM_DIAMOND), (2, 2, ITEM_DIAMOND)] },
+    Recipe { needs: &[(ITEM_BLACK_DYE, 1), (TAG_ALT_2, 1)], result: (ITEM_BLACK_BED, 1), name: "dye_black_bed", shaped: false, cells: &[] },
+    Recipe { needs: &[(ITEM_BLACK_DYE, 1), (TAG_ALT_3, 1)], result: (ITEM_BLACK_CARPET, 1), name: "dye_black_carpet", shaped: false, cells: &[] },
+    Recipe { needs: &[(ITEM_BLACK_DYE, 1), (TAG_ALT_4, 1)], result: (ITEM_BLACK_CUSHION, 1), name: "dye_black_cushion", shaped: false, cells: &[] },
+    Recipe { needs: &[(ITEM_BLACK_DYE, 1), (TAG_ALT_5, 1)], result: (ITEM_BLACK_HARNESS, 1), name: "dye_black_harness", shaped: false, cells: &[] },
+    Recipe { needs: &[(ITEM_BLACK_DYE, 1), (TAG_ALT_6, 1)], result: (ITEM_BLACK_WOOL, 1), name: "dye_black_wool", shaped: false, cells: &[] },
+    Recipe { needs: &[(ITEM_BLACK_DYE, 1), (TAG_ALT_7, 1)], result: (ITEM_BLACK_WOOL_SLAB, 1), name: "dye_black_wool_slab", shaped: false, cells: &[] },
+    Recipe { needs: &[(ITEM_BLACK_DYE, 1), (TAG_ALT_8, 1)], result: (ITEM_BLACK_WOOL_STAIRS, 1), name: "dye_black_wool_stairs", shaped: false, cells: &[] },
+    Recipe { needs: &[(ITEM_BLUE_DYE, 1), (TAG_ALT_9, 1)], result: (ITEM_BLUE_BED, 1), name: "dye_blue_bed", shaped: false, cells: &[] },
+    Recipe { needs: &[(ITEM_BLUE_DYE, 1), (TAG_ALT_10, 1)], result: (ITEM_BLUE_CARPET, 1), name: "dye_blue_carpet", shaped: false, cells: &[] },
+    Recipe { needs: &[(ITEM_BLUE_DYE, 1), (TAG_ALT_11, 1)], result: (ITEM_BLUE_CUSHION, 1), name: "dye_blue_cushion", shaped: false, cells: &[] },
+    Recipe { needs: &[(ITEM_BLUE_DYE, 1), (TAG_ALT_12, 1)], result: (ITEM_BLUE_HARNESS, 1), name: "dye_blue_harness", shaped: false, cells: &[] },
+    Recipe { needs: &[(ITEM_BLUE_DYE, 1), (TAG_ALT_13, 1)], result: (ITEM_BLUE_WOOL, 1), name: "dye_blue_wool", shaped: false, cells: &[] },
+    Recipe { needs: &[(ITEM_BLUE_DYE, 1), (TAG_ALT_14, 1)], result: (ITEM_BLUE_WOOL_SLAB, 1), name: "dye_blue_wool_slab", shaped: false, cells: &[] },
+    Recipe { needs: &[(ITEM_BLUE_DYE, 1), (TAG_ALT_15, 1)], result: (ITEM_BLUE_WOOL_STAIRS, 1), name: "dye_blue_wool_stairs", shaped: false, cells: &[] },
+    Recipe { needs: &[(ITEM_BROWN_DYE, 1), (TAG_ALT_16, 1)], result: (ITEM_BROWN_BED, 1), name: "dye_brown_bed", shaped: false, cells: &[] },
+    Recipe { needs: &[(ITEM_BROWN_DYE, 1), (TAG_ALT_17, 1)], result: (ITEM_BROWN_CARPET, 1), name: "dye_brown_carpet", shaped: false, cells: &[] },
+    Recipe { needs: &[(ITEM_BROWN_DYE, 1), (TAG_ALT_18, 1)], result: (ITEM_BROWN_CUSHION, 1), name: "dye_brown_cushion", shaped: false, cells: &[] },
+    Recipe { needs: &[(ITEM_BROWN_DYE, 1), (TAG_ALT_19, 1)], result: (ITEM_BROWN_HARNESS, 1), name: "dye_brown_harness", shaped: false, cells: &[] },
+    Recipe { needs: &[(ITEM_BROWN_DYE, 1), (TAG_ALT_20, 1)], result: (ITEM_BROWN_WOOL, 1), name: "dye_brown_wool", shaped: false, cells: &[] },
+    Recipe { needs: &[(ITEM_BROWN_DYE, 1), (TAG_ALT_21, 1)], result: (ITEM_BROWN_WOOL_SLAB, 1), name: "dye_brown_wool_slab", shaped: false, cells: &[] },
+    Recipe { needs: &[(ITEM_BROWN_DYE, 1), (TAG_ALT_22, 1)], result: (ITEM_BROWN_WOOL_STAIRS, 1), name: "dye_brown_wool_stairs", shaped: false, cells: &[] },
+    Recipe { needs: &[(ITEM_CYAN_DYE, 1), (TAG_ALT_23, 1)], result: (ITEM_CYAN_BED, 1), name: "dye_cyan_bed", shaped: false, cells: &[] },
+    Recipe { needs: &[(ITEM_CYAN_DYE, 1), (TAG_ALT_24, 1)], result: (ITEM_CYAN_CARPET, 1), name: "dye_cyan_carpet", shaped: false, cells: &[] },
+    Recipe { needs: &[(ITEM_CYAN_DYE, 1), (TAG_ALT_25, 1)], result: (ITEM_CYAN_CUSHION, 1), name: "dye_cyan_cushion", shaped: false, cells: &[] },
+    Recipe { needs: &[(ITEM_CYAN_DYE, 1), (TAG_ALT_26, 1)], result: (ITEM_CYAN_HARNESS, 1), name: "dye_cyan_harness", shaped: false, cells: &[] },
+    Recipe { needs: &[(ITEM_CYAN_DYE, 1), (TAG_ALT_27, 1)], result: (ITEM_CYAN_WOOL, 1), name: "dye_cyan_wool", shaped: false, cells: &[] },
+    Recipe { needs: &[(ITEM_CYAN_DYE, 1), (TAG_ALT_28, 1)], result: (ITEM_CYAN_WOOL_SLAB, 1), name: "dye_cyan_wool_slab", shaped: false, cells: &[] },
+    Recipe { needs: &[(ITEM_CYAN_DYE, 1), (TAG_ALT_29, 1)], result: (ITEM_CYAN_WOOL_STAIRS, 1), name: "dye_cyan_wool_stairs", shaped: false, cells: &[] },
+    Recipe { needs: &[(ITEM_GRAY_DYE, 1), (TAG_ALT_30, 1)], result: (ITEM_GRAY_BED, 1), name: "dye_gray_bed", shaped: false, cells: &[] },
+    Recipe { needs: &[(ITEM_GRAY_DYE, 1), (TAG_ALT_31, 1)], result: (ITEM_GRAY_CARPET, 1), name: "dye_gray_carpet", shaped: false, cells: &[] },
+    Recipe { needs: &[(ITEM_GRAY_DYE, 1), (TAG_ALT_32, 1)], result: (ITEM_GRAY_CUSHION, 1), name: "dye_gray_cushion", shaped: false, cells: &[] },
+    Recipe { needs: &[(ITEM_GRAY_DYE, 1), (TAG_ALT_33, 1)], result: (ITEM_GRAY_HARNESS, 1), name: "dye_gray_harness", shaped: false, cells: &[] },
+    Recipe { needs: &[(ITEM_GRAY_DYE, 1), (TAG_ALT_34, 1)], result: (ITEM_GRAY_WOOL, 1), name: "dye_gray_wool", shaped: false, cells: &[] },
+    Recipe { needs: &[(ITEM_GRAY_DYE, 1), (TAG_ALT_35, 1)], result: (ITEM_GRAY_WOOL_SLAB, 1), name: "dye_gray_wool_slab", shaped: false, cells: &[] },
+    Recipe { needs: &[(ITEM_GRAY_DYE, 1), (TAG_ALT_36, 1)], result: (ITEM_GRAY_WOOL_STAIRS, 1), name: "dye_gray_wool_stairs", shaped: false, cells: &[] },
+    Recipe { needs: &[(ITEM_GREEN_DYE, 1), (TAG_ALT_37, 1)], result: (ITEM_GREEN_BED, 1), name: "dye_green_bed", shaped: false, cells: &[] },
+    Recipe { needs: &[(ITEM_GREEN_DYE, 1), (TAG_ALT_38, 1)], result: (ITEM_GREEN_CARPET, 1), name: "dye_green_carpet", shaped: false, cells: &[] },
+    Recipe { needs: &[(ITEM_GREEN_DYE, 1), (TAG_ALT_39, 1)], result: (ITEM_GREEN_CUSHION, 1), name: "dye_green_cushion", shaped: false, cells: &[] },
+    Recipe { needs: &[(ITEM_GREEN_DYE, 1), (TAG_ALT_40, 1)], result: (ITEM_GREEN_HARNESS, 1), name: "dye_green_harness", shaped: false, cells: &[] },
+    Recipe { needs: &[(ITEM_GREEN_DYE, 1), (TAG_ALT_41, 1)], result: (ITEM_GREEN_WOOL, 1), name: "dye_green_wool", shaped: false, cells: &[] },
+    Recipe { needs: &[(ITEM_GREEN_DYE, 1), (TAG_ALT_42, 1)], result: (ITEM_GREEN_WOOL_SLAB, 1), name: "dye_green_wool_slab", shaped: false, cells: &[] },
+    Recipe { needs: &[(ITEM_GREEN_DYE, 1), (TAG_ALT_43, 1)], result: (ITEM_GREEN_WOOL_STAIRS, 1), name: "dye_green_wool_stairs", shaped: false, cells: &[] },
+    Recipe { needs: &[(ITEM_LIGHT_BLUE_DYE, 1), (TAG_ALT_44, 1)], result: (ITEM_LIGHT_BLUE_BED, 1), name: "dye_light_blue_bed", shaped: false, cells: &[] },
+    Recipe { needs: &[(ITEM_LIGHT_BLUE_DYE, 1), (TAG_ALT_45, 1)], result: (ITEM_LIGHT_BLUE_CARPET, 1), name: "dye_light_blue_carpet", shaped: false, cells: &[] },
+    Recipe { needs: &[(ITEM_LIGHT_BLUE_DYE, 1), (TAG_ALT_46, 1)], result: (ITEM_LIGHT_BLUE_CUSHION, 1), name: "dye_light_blue_cushion", shaped: false, cells: &[] },
+    Recipe { needs: &[(ITEM_LIGHT_BLUE_DYE, 1), (TAG_ALT_47, 1)], result: (ITEM_LIGHT_BLUE_HARNESS, 1), name: "dye_light_blue_harness", shaped: false, cells: &[] },
+    Recipe { needs: &[(ITEM_LIGHT_BLUE_DYE, 1), (TAG_ALT_48, 1)], result: (ITEM_LIGHT_BLUE_WOOL, 1), name: "dye_light_blue_wool", shaped: false, cells: &[] },
+    Recipe { needs: &[(ITEM_LIGHT_BLUE_DYE, 1), (TAG_ALT_49, 1)], result: (ITEM_LIGHT_BLUE_WOOL_SLAB, 1), name: "dye_light_blue_wool_slab", shaped: false, cells: &[] },
+    Recipe { needs: &[(ITEM_LIGHT_BLUE_DYE, 1), (TAG_ALT_50, 1)], result: (ITEM_LIGHT_BLUE_WOOL_STAIRS, 1), name: "dye_light_blue_wool_stairs", shaped: false, cells: &[] },
+    Recipe { needs: &[(ITEM_LIGHT_GRAY_DYE, 1), (TAG_ALT_51, 1)], result: (ITEM_LIGHT_GRAY_BED, 1), name: "dye_light_gray_bed", shaped: false, cells: &[] },
+    Recipe { needs: &[(ITEM_LIGHT_GRAY_DYE, 1), (TAG_ALT_52, 1)], result: (ITEM_LIGHT_GRAY_CARPET, 1), name: "dye_light_gray_carpet", shaped: false, cells: &[] },
+    Recipe { needs: &[(ITEM_LIGHT_GRAY_DYE, 1), (TAG_ALT_53, 1)], result: (ITEM_LIGHT_GRAY_CUSHION, 1), name: "dye_light_gray_cushion", shaped: false, cells: &[] },
+    Recipe { needs: &[(ITEM_LIGHT_GRAY_DYE, 1), (TAG_ALT_54, 1)], result: (ITEM_LIGHT_GRAY_HARNESS, 1), name: "dye_light_gray_harness", shaped: false, cells: &[] },
+    Recipe { needs: &[(ITEM_LIGHT_GRAY_DYE, 1), (TAG_ALT_55, 1)], result: (ITEM_LIGHT_GRAY_WOOL, 1), name: "dye_light_gray_wool", shaped: false, cells: &[] },
+    Recipe { needs: &[(ITEM_LIGHT_GRAY_DYE, 1), (TAG_ALT_56, 1)], result: (ITEM_LIGHT_GRAY_WOOL_SLAB, 1), name: "dye_light_gray_wool_slab", shaped: false, cells: &[] },
+    Recipe { needs: &[(ITEM_LIGHT_GRAY_DYE, 1), (TAG_ALT_57, 1)], result: (ITEM_LIGHT_GRAY_WOOL_STAIRS, 1), name: "dye_light_gray_wool_stairs", shaped: false, cells: &[] },
+    Recipe { needs: &[(ITEM_LIME_DYE, 1), (TAG_ALT_58, 1)], result: (ITEM_LIME_BED, 1), name: "dye_lime_bed", shaped: false, cells: &[] },
+    Recipe { needs: &[(ITEM_LIME_DYE, 1), (TAG_ALT_59, 1)], result: (ITEM_LIME_CARPET, 1), name: "dye_lime_carpet", shaped: false, cells: &[] },
+    Recipe { needs: &[(ITEM_LIME_DYE, 1), (TAG_ALT_60, 1)], result: (ITEM_LIME_CUSHION, 1), name: "dye_lime_cushion", shaped: false, cells: &[] },
+    Recipe { needs: &[(ITEM_LIME_DYE, 1), (TAG_ALT_61, 1)], result: (ITEM_LIME_HARNESS, 1), name: "dye_lime_harness", shaped: false, cells: &[] },
+    Recipe { needs: &[(ITEM_LIME_DYE, 1), (TAG_ALT_62, 1)], result: (ITEM_LIME_WOOL, 1), name: "dye_lime_wool", shaped: false, cells: &[] },
+    Recipe { needs: &[(ITEM_LIME_DYE, 1), (TAG_ALT_63, 1)], result: (ITEM_LIME_WOOL_SLAB, 1), name: "dye_lime_wool_slab", shaped: false, cells: &[] },
+    Recipe { needs: &[(ITEM_LIME_DYE, 1), (TAG_ALT_64, 1)], result: (ITEM_LIME_WOOL_STAIRS, 1), name: "dye_lime_wool_stairs", shaped: false, cells: &[] },
+    Recipe { needs: &[(ITEM_MAGENTA_DYE, 1), (TAG_ALT_65, 1)], result: (ITEM_MAGENTA_BED, 1), name: "dye_magenta_bed", shaped: false, cells: &[] },
+    Recipe { needs: &[(ITEM_MAGENTA_DYE, 1), (TAG_ALT_66, 1)], result: (ITEM_MAGENTA_CARPET, 1), name: "dye_magenta_carpet", shaped: false, cells: &[] },
+    Recipe { needs: &[(ITEM_MAGENTA_DYE, 1), (TAG_ALT_67, 1)], result: (ITEM_MAGENTA_CUSHION, 1), name: "dye_magenta_cushion", shaped: false, cells: &[] },
+    Recipe { needs: &[(ITEM_MAGENTA_DYE, 1), (TAG_ALT_68, 1)], result: (ITEM_MAGENTA_HARNESS, 1), name: "dye_magenta_harness", shaped: false, cells: &[] },
+    Recipe { needs: &[(ITEM_MAGENTA_DYE, 1), (TAG_ALT_69, 1)], result: (ITEM_MAGENTA_WOOL, 1), name: "dye_magenta_wool", shaped: false, cells: &[] },
+    Recipe { needs: &[(ITEM_MAGENTA_DYE, 1), (TAG_ALT_70, 1)], result: (ITEM_MAGENTA_WOOL_SLAB, 1), name: "dye_magenta_wool_slab", shaped: false, cells: &[] },
+    Recipe { needs: &[(ITEM_MAGENTA_DYE, 1), (TAG_ALT_71, 1)], result: (ITEM_MAGENTA_WOOL_STAIRS, 1), name: "dye_magenta_wool_stairs", shaped: false, cells: &[] },
+    Recipe { needs: &[(ITEM_ORANGE_DYE, 1), (TAG_ALT_72, 1)], result: (ITEM_ORANGE_BED, 1), name: "dye_orange_bed", shaped: false, cells: &[] },
+    Recipe { needs: &[(ITEM_ORANGE_DYE, 1), (TAG_ALT_73, 1)], result: (ITEM_ORANGE_CARPET, 1), name: "dye_orange_carpet", shaped: false, cells: &[] },
+    Recipe { needs: &[(ITEM_ORANGE_DYE, 1), (TAG_ALT_74, 1)], result: (ITEM_ORANGE_CUSHION, 1), name: "dye_orange_cushion", shaped: false, cells: &[] },
+    Recipe { needs: &[(ITEM_ORANGE_DYE, 1), (TAG_ALT_75, 1)], result: (ITEM_ORANGE_HARNESS, 1), name: "dye_orange_harness", shaped: false, cells: &[] },
+    Recipe { needs: &[(ITEM_ORANGE_DYE, 1), (TAG_ALT_76, 1)], result: (ITEM_ORANGE_WOOL, 1), name: "dye_orange_wool", shaped: false, cells: &[] },
+    Recipe { needs: &[(ITEM_ORANGE_DYE, 1), (TAG_ALT_77, 1)], result: (ITEM_ORANGE_WOOL_SLAB, 1), name: "dye_orange_wool_slab", shaped: false, cells: &[] },
+    Recipe { needs: &[(ITEM_ORANGE_DYE, 1), (TAG_ALT_78, 1)], result: (ITEM_ORANGE_WOOL_STAIRS, 1), name: "dye_orange_wool_stairs", shaped: false, cells: &[] },
+    Recipe { needs: &[(ITEM_PINK_DYE, 1), (TAG_ALT_79, 1)], result: (ITEM_PINK_BED, 1), name: "dye_pink_bed", shaped: false, cells: &[] },
+    Recipe { needs: &[(ITEM_PINK_DYE, 1), (TAG_ALT_80, 1)], result: (ITEM_PINK_CARPET, 1), name: "dye_pink_carpet", shaped: false, cells: &[] },
+    Recipe { needs: &[(ITEM_PINK_DYE, 1), (TAG_ALT_81, 1)], result: (ITEM_PINK_CUSHION, 1), name: "dye_pink_cushion", shaped: false, cells: &[] },
+    Recipe { needs: &[(ITEM_PINK_DYE, 1), (TAG_ALT_82, 1)], result: (ITEM_PINK_HARNESS, 1), name: "dye_pink_harness", shaped: false, cells: &[] },
+    Recipe { needs: &[(ITEM_PINK_DYE, 1), (TAG_ALT_83, 1)], result: (ITEM_PINK_WOOL, 1), name: "dye_pink_wool", shaped: false, cells: &[] },
+    Recipe { needs: &[(ITEM_PINK_DYE, 1), (TAG_ALT_84, 1)], result: (ITEM_PINK_WOOL_SLAB, 1), name: "dye_pink_wool_slab", shaped: false, cells: &[] },
+    Recipe { needs: &[(ITEM_PINK_DYE, 1), (TAG_ALT_85, 1)], result: (ITEM_PINK_WOOL_STAIRS, 1), name: "dye_pink_wool_stairs", shaped: false, cells: &[] },
+    Recipe { needs: &[(ITEM_PURPLE_DYE, 1), (TAG_ALT_86, 1)], result: (ITEM_PURPLE_BED, 1), name: "dye_purple_bed", shaped: false, cells: &[] },
+    Recipe { needs: &[(ITEM_PURPLE_DYE, 1), (TAG_ALT_87, 1)], result: (ITEM_PURPLE_CARPET, 1), name: "dye_purple_carpet", shaped: false, cells: &[] },
+    Recipe { needs: &[(ITEM_PURPLE_DYE, 1), (TAG_ALT_88, 1)], result: (ITEM_PURPLE_CUSHION, 1), name: "dye_purple_cushion", shaped: false, cells: &[] },
+    Recipe { needs: &[(ITEM_PURPLE_DYE, 1), (TAG_ALT_89, 1)], result: (ITEM_PURPLE_HARNESS, 1), name: "dye_purple_harness", shaped: false, cells: &[] },
+    Recipe { needs: &[(ITEM_PURPLE_DYE, 1), (TAG_ALT_90, 1)], result: (ITEM_PURPLE_WOOL, 1), name: "dye_purple_wool", shaped: false, cells: &[] },
+    Recipe { needs: &[(ITEM_PURPLE_DYE, 1), (TAG_ALT_91, 1)], result: (ITEM_PURPLE_WOOL_SLAB, 1), name: "dye_purple_wool_slab", shaped: false, cells: &[] },
+    Recipe { needs: &[(ITEM_PURPLE_DYE, 1), (TAG_ALT_92, 1)], result: (ITEM_PURPLE_WOOL_STAIRS, 1), name: "dye_purple_wool_stairs", shaped: false, cells: &[] },
+    Recipe { needs: &[(ITEM_RED_DYE, 1), (TAG_ALT_93, 1)], result: (ITEM_RED_BED, 1), name: "dye_red_bed", shaped: false, cells: &[] },
+    Recipe { needs: &[(ITEM_RED_DYE, 1), (TAG_ALT_94, 1)], result: (ITEM_RED_CARPET, 1), name: "dye_red_carpet", shaped: false, cells: &[] },
+    Recipe { needs: &[(ITEM_RED_DYE, 1), (TAG_ALT_95, 1)], result: (ITEM_RED_CUSHION, 1), name: "dye_red_cushion", shaped: false, cells: &[] },
+    Recipe { needs: &[(ITEM_RED_DYE, 1), (TAG_ALT_96, 1)], result: (ITEM_RED_HARNESS, 1), name: "dye_red_harness", shaped: false, cells: &[] },
+    Recipe { needs: &[(ITEM_RED_DYE, 1), (TAG_ALT_97, 1)], result: (ITEM_RED_WOOL, 1), name: "dye_red_wool", shaped: false, cells: &[] },
+    Recipe { needs: &[(ITEM_RED_DYE, 1), (TAG_ALT_98, 1)], result: (ITEM_RED_WOOL_SLAB, 1), name: "dye_red_wool_slab", shaped: false, cells: &[] },
+    Recipe { needs: &[(ITEM_RED_DYE, 1), (TAG_ALT_99, 1)], result: (ITEM_RED_WOOL_STAIRS, 1), name: "dye_red_wool_stairs", shaped: false, cells: &[] },
+    Recipe { needs: &[(ITEM_WHITE_DYE, 1), (TAG_ALT_100, 1)], result: (ITEM_WHITE_BED, 1), name: "dye_white_bed", shaped: false, cells: &[] },
+    Recipe { needs: &[(ITEM_WHITE_DYE, 1), (TAG_ALT_101, 1)], result: (ITEM_WHITE_CARPET, 1), name: "dye_white_carpet", shaped: false, cells: &[] },
+    Recipe { needs: &[(ITEM_WHITE_DYE, 1), (TAG_ALT_102, 1)], result: (ITEM_WHITE_CUSHION, 1), name: "dye_white_cushion", shaped: false, cells: &[] },
+    Recipe { needs: &[(ITEM_WHITE_DYE, 1), (TAG_ALT_103, 1)], result: (ITEM_WHITE_HARNESS, 1), name: "dye_white_harness", shaped: false, cells: &[] },
+    Recipe { needs: &[(ITEM_WHITE_DYE, 1), (TAG_ALT_104, 1)], result: (ITEM_WHITE_WOOL, 1), name: "dye_white_wool", shaped: false, cells: &[] },
+    Recipe { needs: &[(ITEM_WHITE_DYE, 1), (TAG_ALT_105, 1)], result: (ITEM_WHITE_WOOL_SLAB, 1), name: "dye_white_wool_slab", shaped: false, cells: &[] },
+    Recipe { needs: &[(ITEM_WHITE_DYE, 1), (TAG_ALT_106, 1)], result: (ITEM_WHITE_WOOL_STAIRS, 1), name: "dye_white_wool_stairs", shaped: false, cells: &[] },
+    Recipe { needs: &[(ITEM_YELLOW_DYE, 1), (TAG_ALT_107, 1)], result: (ITEM_YELLOW_BED, 1), name: "dye_yellow_bed", shaped: false, cells: &[] },
+    Recipe { needs: &[(ITEM_YELLOW_DYE, 1), (TAG_ALT_108, 1)], result: (ITEM_YELLOW_CARPET, 1), name: "dye_yellow_carpet", shaped: false, cells: &[] },
+    Recipe { needs: &[(ITEM_YELLOW_DYE, 1), (TAG_ALT_109, 1)], result: (ITEM_YELLOW_CUSHION, 1), name: "dye_yellow_cushion", shaped: false, cells: &[] },
+    Recipe { needs: &[(ITEM_YELLOW_DYE, 1), (TAG_ALT_110, 1)], result: (ITEM_YELLOW_HARNESS, 1), name: "dye_yellow_harness", shaped: false, cells: &[] },
+    Recipe { needs: &[(ITEM_YELLOW_DYE, 1), (TAG_ALT_111, 1)], result: (ITEM_YELLOW_WOOL, 1), name: "dye_yellow_wool", shaped: false, cells: &[] },
+    Recipe { needs: &[(ITEM_YELLOW_DYE, 1), (TAG_ALT_112, 1)], result: (ITEM_YELLOW_WOOL_SLAB, 1), name: "dye_yellow_wool_slab", shaped: false, cells: &[] },
+    Recipe { needs: &[(ITEM_YELLOW_DYE, 1), (TAG_ALT_113, 1)], result: (ITEM_YELLOW_WOOL_STAIRS, 1), name: "dye_yellow_wool_stairs", shaped: false, cells: &[] },
+    Recipe { needs: &[(ITEM_EMERALD_BLOCK, 1)], result: (ITEM_EMERALD, 9), name: "emerald", shaped: false, cells: &[] },
+    Recipe { needs: &[(ITEM_EMERALD, 9)], result: (ITEM_EMERALD_BLOCK, 1), name: "emerald_block", shaped: true, cells: &[(0, 0, ITEM_EMERALD), (1, 0, ITEM_EMERALD), (2, 0, ITEM_EMERALD), (0, 1, ITEM_EMERALD), (1, 1, ITEM_EMERALD), (2, 1, ITEM_EMERALD), (0, 2, ITEM_EMERALD), (1, 2, ITEM_EMERALD), (2, 2, ITEM_EMERALD)] },
+    Recipe { needs: &[(ITEM_BOOK, 1), (ITEM_DIAMOND, 2), (ITEM_OBSIDIAN, 4)], result: (ITEM_ENCHANTING_TABLE, 1), name: "enchanting_table", shaped: true, cells: &[(1, 0, ITEM_BOOK), (0, 1, ITEM_DIAMOND), (1, 1, ITEM_OBSIDIAN), (2, 1, ITEM_DIAMOND), (0, 2, ITEM_OBSIDIAN), (1, 2, ITEM_OBSIDIAN), (2, 2, ITEM_OBSIDIAN)] },
+    Recipe { needs: &[(ITEM_ENDER_EYE, 1), (ITEM_GHAST_TEAR, 1), (ITEM_GLASS, 7)], result: (ITEM_END_CRYSTAL, 1), name: "end_crystal", shaped: true, cells: &[(0, 0, ITEM_GLASS), (1, 0, ITEM_GLASS), (2, 0, ITEM_GLASS), (0, 1, ITEM_GLASS), (1, 1, ITEM_ENDER_EYE), (2, 1, ITEM_GLASS), (0, 2, ITEM_GLASS), (1, 2, ITEM_GHAST_TEAR), (2, 2, ITEM_GLASS)] },
+    Recipe { needs: &[(ITEM_BLAZE_ROD, 1), (ITEM_POPPED_CHORUS_FRUIT, 1)], result: (ITEM_END_ROD, 4), name: "end_rod", shaped: true, cells: &[(0, 0, ITEM_BLAZE_ROD), (0, 1, ITEM_POPPED_CHORUS_FRUIT)] },
+    Recipe { needs: &[(ITEM_END_STONE_BRICKS, 3)], result: (ITEM_END_STONE_BRICK_SLAB, 6), name: "end_stone_brick_slab", shaped: true, cells: &[(0, 0, ITEM_END_STONE_BRICKS), (1, 0, ITEM_END_STONE_BRICKS), (2, 0, ITEM_END_STONE_BRICKS)] },
+    Recipe { needs: &[(ITEM_END_STONE_BRICKS, 6)], result: (ITEM_END_STONE_BRICK_STAIRS, 4), name: "end_stone_brick_stairs", shaped: true, cells: &[(0, 0, ITEM_END_STONE_BRICKS), (0, 1, ITEM_END_STONE_BRICKS), (1, 1, ITEM_END_STONE_BRICKS), (0, 2, ITEM_END_STONE_BRICKS), (1, 2, ITEM_END_STONE_BRICKS), (2, 2, ITEM_END_STONE_BRICKS)] },
+    Recipe { needs: &[(ITEM_END_STONE_BRICKS, 6)], result: (ITEM_END_STONE_BRICK_WALL, 6), name: "end_stone_brick_wall", shaped: true, cells: &[(0, 0, ITEM_END_STONE_BRICKS), (1, 0, ITEM_END_STONE_BRICKS), (2, 0, ITEM_END_STONE_BRICKS), (0, 1, ITEM_END_STONE_BRICKS), (1, 1, ITEM_END_STONE_BRICKS), (2, 1, ITEM_END_STONE_BRICKS)] },
+    Recipe { needs: &[(ITEM_END_STONE, 4)], result: (ITEM_END_STONE_BRICKS, 4), name: "end_stone_bricks", shaped: true, cells: &[(0, 0, ITEM_END_STONE), (1, 0, ITEM_END_STONE), (0, 1, ITEM_END_STONE), (1, 1, ITEM_END_STONE)] },
+    Recipe { needs: &[(ITEM_ENDER_EYE, 1), (ITEM_OBSIDIAN, 8)], result: (ITEM_ENDER_CHEST, 1), name: "ender_chest", shaped: true, cells: &[(0, 0, ITEM_OBSIDIAN), (1, 0, ITEM_OBSIDIAN), (2, 0, ITEM_OBSIDIAN), (0, 1, ITEM_OBSIDIAN), (1, 1, ITEM_ENDER_EYE), (2, 1, ITEM_OBSIDIAN), (0, 2, ITEM_OBSIDIAN), (1, 2, ITEM_OBSIDIAN), (2, 2, ITEM_OBSIDIAN)] },
+    Recipe { needs: &[(ITEM_BLAZE_POWDER, 1), (ITEM_ENDER_PEARL, 1)], result: (ITEM_ENDER_EYE, 1), name: "ender_eye", shaped: false, cells: &[] },
+    Recipe { needs: &[(ITEM_EXPOSED_CUT_COPPER_SLAB, 2)], result: (ITEM_EXPOSED_CHISELED_COPPER, 1), name: "exposed_chiseled_copper", shaped: true, cells: &[(0, 0, ITEM_EXPOSED_CUT_COPPER_SLAB), (0, 1, ITEM_EXPOSED_CUT_COPPER_SLAB)] },
+    Recipe { needs: &[(ITEM_BLAZE_ROD, 1), (ITEM_EXPOSED_COPPER, 3), (ITEM_REDSTONE, 1)], result: (ITEM_EXPOSED_COPPER_BULB, 4), name: "exposed_copper_bulb", shaped: true, cells: &[(1, 0, ITEM_EXPOSED_COPPER), (0, 1, ITEM_EXPOSED_COPPER), (1, 1, ITEM_BLAZE_ROD), (2, 1, ITEM_EXPOSED_COPPER), (1, 2, ITEM_REDSTONE)] },
+    Recipe { needs: &[(ITEM_EXPOSED_COPPER, 4)], result: (ITEM_EXPOSED_COPPER_GRATE, 4), name: "exposed_copper_grate", shaped: true, cells: &[(1, 0, ITEM_EXPOSED_COPPER), (0, 1, ITEM_EXPOSED_COPPER), (2, 1, ITEM_EXPOSED_COPPER), (1, 2, ITEM_EXPOSED_COPPER)] },
+    Recipe { needs: &[(ITEM_EXPOSED_COPPER, 4)], result: (ITEM_EXPOSED_CUT_COPPER, 4), name: "exposed_cut_copper", shaped: true, cells: &[(0, 0, ITEM_EXPOSED_COPPER), (1, 0, ITEM_EXPOSED_COPPER), (0, 1, ITEM_EXPOSED_COPPER), (1, 1, ITEM_EXPOSED_COPPER)] },
+    Recipe { needs: &[(ITEM_EXPOSED_CUT_COPPER, 3)], result: (ITEM_EXPOSED_CUT_COPPER_SLAB, 6), name: "exposed_cut_copper_slab", shaped: true, cells: &[(0, 0, ITEM_EXPOSED_CUT_COPPER), (1, 0, ITEM_EXPOSED_CUT_COPPER), (2, 0, ITEM_EXPOSED_CUT_COPPER)] },
+    Recipe { needs: &[(ITEM_EXPOSED_CUT_COPPER, 6)], result: (ITEM_EXPOSED_CUT_COPPER_STAIRS, 4), name: "exposed_cut_copper_stairs", shaped: true, cells: &[(0, 0, ITEM_EXPOSED_CUT_COPPER), (0, 1, ITEM_EXPOSED_CUT_COPPER), (1, 1, ITEM_EXPOSED_CUT_COPPER), (0, 2, ITEM_EXPOSED_CUT_COPPER), (1, 2, ITEM_EXPOSED_CUT_COPPER), (2, 2, ITEM_EXPOSED_CUT_COPPER)] },
+    Recipe { needs: &[(ITEM_DIAMOND, 7), (ITEM_END_STONE, 1), (ITEM_EYE_ARMOR_TRIM_SMITHING_TEMPLATE, 1)], result: (ITEM_EYE_ARMOR_TRIM_SMITHING_TEMPLATE, 2), name: "eye_armor_trim_smithing_template", shaped: true, cells: &[(0, 0, ITEM_DIAMOND), (1, 0, ITEM_EYE_ARMOR_TRIM_SMITHING_TEMPLATE), (2, 0, ITEM_DIAMOND), (0, 1, ITEM_DIAMOND), (1, 1, ITEM_END_STONE), (2, 1, ITEM_DIAMOND), (0, 2, ITEM_DIAMOND), (1, 2, ITEM_DIAMOND), (2, 2, ITEM_DIAMOND)] },
+    Recipe { needs: &[(ITEM_BROWN_MUSHROOM, 1), (ITEM_SPIDER_EYE, 1), (ITEM_SUGAR, 1)], result: (ITEM_FERMENTED_SPIDER_EYE, 1), name: "fermented_spider_eye", shaped: false, cells: &[] },
+    Recipe { needs: &[(ITEM_BRICKS, 1), (ITEM_PAPER, 1)], result: (ITEM_FIELD_MASONED_BANNER_PATTERN, 1), name: "field_masoned_banner_pattern", shaped: false, cells: &[] },
+    Recipe { needs: &[(ITEM_BLAZE_POWDER, 1), (ITEM_GUNPOWDER, 1), (TAG_COALS, 1)], result: (ITEM_FIRE_CHARGE, 3), name: "fire_charge", shaped: false, cells: &[] },
+    Recipe { needs: &[(ITEM_GUNPOWDER, 1), (ITEM_PAPER, 1)], result: (ITEM_FIREWORK_ROCKET, 3), name: "firework_rocket_simple", shaped: false, cells: &[] },
+    Recipe { needs: &[(STICK, 3), (ITEM_STRING, 2)], result: (ITEM_FISHING_ROD, 1), name: "fishing_rod", shaped: true, cells: &[(2, 0, STICK), (1, 1, STICK), (2, 1, ITEM_STRING), (0, 2, STICK), (2, 2, ITEM_STRING)] },
+    Recipe { needs: &[(ITEM_FLINT, 2), (TAG_PLANKS, 4)], result: (ITEM_FLETCHING_TABLE, 1), name: "fletching_table", shaped: true, cells: &[(0, 0, ITEM_FLINT), (1, 0, ITEM_FLINT), (0, 1, TAG_PLANKS), (1, 1, TAG_PLANKS), (0, 2, TAG_PLANKS), (1, 2, TAG_PLANKS)] },
+    Recipe { needs: &[(ITEM_FLINT, 1), (ITEM_IRON_INGOT, 1)], result: (ITEM_FLINT_AND_STEEL, 1), name: "flint_and_steel", shaped: false, cells: &[] },
+    Recipe { needs: &[(ITEM_BREEZE_ROD, 1), (ITEM_DIAMOND, 7), (ITEM_FLOW_ARMOR_TRIM_SMITHING_TEMPLATE, 1)], result: (ITEM_FLOW_ARMOR_TRIM_SMITHING_TEMPLATE, 2), name: "flow_armor_trim_smithing_template", shaped: true, cells: &[(0, 0, ITEM_DIAMOND), (1, 0, ITEM_FLOW_ARMOR_TRIM_SMITHING_TEMPLATE), (2, 0, ITEM_DIAMOND), (0, 1, ITEM_DIAMOND), (1, 1, ITEM_BREEZE_ROD), (2, 1, ITEM_DIAMOND), (0, 2, ITEM_DIAMOND), (1, 2, ITEM_DIAMOND), (2, 2, ITEM_DIAMOND)] },
+    Recipe { needs: &[(ITEM_OXEYE_DAISY, 1), (ITEM_PAPER, 1)], result: (ITEM_FLOWER_BANNER_PATTERN, 1), name: "flower_banner_pattern", shaped: false, cells: &[] },
+    Recipe { needs: &[(ITEM_BRICK, 3)], result: (ITEM_FLOWER_POT, 1), name: "flower_pot", shaped: true, cells: &[(0, 0, ITEM_BRICK), (2, 0, ITEM_BRICK), (1, 1, ITEM_BRICK)] },
+    Recipe { needs: &[(TAG_STONE_CRAFTING_MATERIALS, 8)], result: (ITEM_FURNACE, 1), name: "furnace", shaped: true, cells: &[(0, 0, TAG_STONE_CRAFTING_MATERIALS), (1, 0, TAG_STONE_CRAFTING_MATERIALS), (2, 0, TAG_STONE_CRAFTING_MATERIALS), (0, 1, TAG_STONE_CRAFTING_MATERIALS), (2, 1, TAG_STONE_CRAFTING_MATERIALS), (0, 2, TAG_STONE_CRAFTING_MATERIALS), (1, 2, TAG_STONE_CRAFTING_MATERIALS), (2, 2, TAG_STONE_CRAFTING_MATERIALS)] },
+    Recipe { needs: &[(ITEM_FURNACE, 1), (ITEM_MINECART, 1)], result: (ITEM_FURNACE_MINECART, 1), name: "furnace_minecart", shaped: false, cells: &[] },
+    Recipe { needs: &[(ITEM_GLASS, 3)], result: (ITEM_GLASS_BOTTLE, 3), name: "glass_bottle", shaped: true, cells: &[(0, 0, ITEM_GLASS), (2, 0, ITEM_GLASS), (1, 1, ITEM_GLASS)] },
+    Recipe { needs: &[(ITEM_GLASS, 6)], result: (ITEM_GLASS_PANE, 16), name: "glass_pane", shaped: true, cells: &[(0, 0, ITEM_GLASS), (1, 0, ITEM_GLASS), (2, 0, ITEM_GLASS), (0, 1, ITEM_GLASS), (1, 1, ITEM_GLASS), (2, 1, ITEM_GLASS)] },
+    Recipe { needs: &[(ITEM_GOLD_NUGGET, 8), (ITEM_MELON_SLICE, 1)], result: (ITEM_GLISTERING_MELON_SLICE, 1), name: "glistering_melon_slice", shaped: true, cells: &[(0, 0, ITEM_GOLD_NUGGET), (1, 0, ITEM_GOLD_NUGGET), (2, 0, ITEM_GOLD_NUGGET), (0, 1, ITEM_GOLD_NUGGET), (1, 1, ITEM_MELON_SLICE), (2, 1, ITEM_GOLD_NUGGET), (0, 2, ITEM_GOLD_NUGGET), (1, 2, ITEM_GOLD_NUGGET), (2, 2, ITEM_GOLD_NUGGET)] },
+    Recipe { needs: &[(ITEM_GLOW_INK_SAC, 1), (ITEM_ITEM_FRAME, 1)], result: (ITEM_GLOW_ITEM_FRAME, 1), name: "glow_item_frame", shaped: false, cells: &[] },
+    Recipe { needs: &[(ITEM_GLOWSTONE_DUST, 4)], result: (ITEM_GLOWSTONE, 1), name: "glowstone", shaped: true, cells: &[(0, 0, ITEM_GLOWSTONE_DUST), (1, 0, ITEM_GLOWSTONE_DUST), (0, 1, ITEM_GLOWSTONE_DUST), (1, 1, ITEM_GLOWSTONE_DUST)] },
+    Recipe { needs: &[(ITEM_GOLD_INGOT, 9)], result: (ITEM_GOLD_BLOCK, 1), name: "gold_block", shaped: true, cells: &[(0, 0, ITEM_GOLD_INGOT), (1, 0, ITEM_GOLD_INGOT), (2, 0, ITEM_GOLD_INGOT), (0, 1, ITEM_GOLD_INGOT), (1, 1, ITEM_GOLD_INGOT), (2, 1, ITEM_GOLD_INGOT), (0, 2, ITEM_GOLD_INGOT), (1, 2, ITEM_GOLD_INGOT), (2, 2, ITEM_GOLD_INGOT)] },
+    Recipe { needs: &[(ITEM_GOLD_BLOCK, 1)], result: (ITEM_GOLD_INGOT, 9), name: "gold_ingot_from_gold_block", shaped: false, cells: &[] },
+    Recipe { needs: &[(ITEM_GOLD_NUGGET, 9)], result: (ITEM_GOLD_INGOT, 1), name: "gold_ingot_from_nuggets", shaped: true, cells: &[(0, 0, ITEM_GOLD_NUGGET), (1, 0, ITEM_GOLD_NUGGET), (2, 0, ITEM_GOLD_NUGGET), (0, 1, ITEM_GOLD_NUGGET), (1, 1, ITEM_GOLD_NUGGET), (2, 1, ITEM_GOLD_NUGGET), (0, 2, ITEM_GOLD_NUGGET), (1, 2, ITEM_GOLD_NUGGET), (2, 2, ITEM_GOLD_NUGGET)] },
+    Recipe { needs: &[(ITEM_GOLD_INGOT, 1)], result: (ITEM_GOLD_NUGGET, 9), name: "gold_nugget", shaped: false, cells: &[] },
+    Recipe { needs: &[(ITEM_APPLE, 1), (ITEM_GOLD_INGOT, 8)], result: (ITEM_GOLDEN_APPLE, 1), name: "golden_apple", shaped: true, cells: &[(0, 0, ITEM_GOLD_INGOT), (1, 0, ITEM_GOLD_INGOT), (2, 0, ITEM_GOLD_INGOT), (0, 1, ITEM_GOLD_INGOT), (1, 1, ITEM_APPLE), (2, 1, ITEM_GOLD_INGOT), (0, 2, ITEM_GOLD_INGOT), (1, 2, ITEM_GOLD_INGOT), (2, 2, ITEM_GOLD_INGOT)] },
+    Recipe { needs: &[(STICK, 2), (TAG_GOLD_TOOL_MATERIALS, 3)], result: (ITEM_GOLDEN_AXE, 1), name: "golden_axe", shaped: true, cells: &[(0, 0, TAG_GOLD_TOOL_MATERIALS), (1, 0, TAG_GOLD_TOOL_MATERIALS), (0, 1, TAG_GOLD_TOOL_MATERIALS), (1, 1, STICK), (1, 2, STICK)] },
+    Recipe { needs: &[(ITEM_GOLD_INGOT, 4)], result: (ITEM_GOLDEN_BOOTS, 1), name: "golden_boots", shaped: true, cells: &[(0, 0, ITEM_GOLD_INGOT), (2, 0, ITEM_GOLD_INGOT), (0, 1, ITEM_GOLD_INGOT), (2, 1, ITEM_GOLD_INGOT)] },
+    Recipe { needs: &[(ITEM_CARROT, 1), (ITEM_GOLD_NUGGET, 8)], result: (ITEM_GOLDEN_CARROT, 1), name: "golden_carrot", shaped: true, cells: &[(0, 0, ITEM_GOLD_NUGGET), (1, 0, ITEM_GOLD_NUGGET), (2, 0, ITEM_GOLD_NUGGET), (0, 1, ITEM_GOLD_NUGGET), (1, 1, ITEM_CARROT), (2, 1, ITEM_GOLD_NUGGET), (0, 2, ITEM_GOLD_NUGGET), (1, 2, ITEM_GOLD_NUGGET), (2, 2, ITEM_GOLD_NUGGET)] },
+    Recipe { needs: &[(ITEM_GOLD_INGOT, 8)], result: (ITEM_GOLDEN_CHESTPLATE, 1), name: "golden_chestplate", shaped: true, cells: &[(0, 0, ITEM_GOLD_INGOT), (2, 0, ITEM_GOLD_INGOT), (0, 1, ITEM_GOLD_INGOT), (1, 1, ITEM_GOLD_INGOT), (2, 1, ITEM_GOLD_INGOT), (0, 2, ITEM_GOLD_INGOT), (1, 2, ITEM_GOLD_INGOT), (2, 2, ITEM_GOLD_INGOT)] },
+    Recipe { needs: &[(ITEM_DANDELION, 1), (ITEM_GOLD_NUGGET, 8)], result: (ITEM_GOLDEN_DANDELION, 1), name: "golden_dandelion", shaped: true, cells: &[(0, 0, ITEM_GOLD_NUGGET), (1, 0, ITEM_GOLD_NUGGET), (2, 0, ITEM_GOLD_NUGGET), (0, 1, ITEM_GOLD_NUGGET), (1, 1, ITEM_DANDELION), (2, 1, ITEM_GOLD_NUGGET), (0, 2, ITEM_GOLD_NUGGET), (1, 2, ITEM_GOLD_NUGGET), (2, 2, ITEM_GOLD_NUGGET)] },
+    Recipe { needs: &[(ITEM_GOLD_INGOT, 5)], result: (ITEM_GOLDEN_HELMET, 1), name: "golden_helmet", shaped: true, cells: &[(0, 0, ITEM_GOLD_INGOT), (1, 0, ITEM_GOLD_INGOT), (2, 0, ITEM_GOLD_INGOT), (0, 1, ITEM_GOLD_INGOT), (2, 1, ITEM_GOLD_INGOT)] },
+    Recipe { needs: &[(STICK, 2), (TAG_GOLD_TOOL_MATERIALS, 2)], result: (ITEM_GOLDEN_HOE, 1), name: "golden_hoe", shaped: true, cells: &[(0, 0, TAG_GOLD_TOOL_MATERIALS), (1, 0, TAG_GOLD_TOOL_MATERIALS), (1, 1, STICK), (1, 2, STICK)] },
+    Recipe { needs: &[(ITEM_GOLD_INGOT, 7)], result: (ITEM_GOLDEN_LEGGINGS, 1), name: "golden_leggings", shaped: true, cells: &[(0, 0, ITEM_GOLD_INGOT), (1, 0, ITEM_GOLD_INGOT), (2, 0, ITEM_GOLD_INGOT), (0, 1, ITEM_GOLD_INGOT), (2, 1, ITEM_GOLD_INGOT), (0, 2, ITEM_GOLD_INGOT), (2, 2, ITEM_GOLD_INGOT)] },
+    Recipe { needs: &[(STICK, 2), (TAG_GOLD_TOOL_MATERIALS, 3)], result: (ITEM_GOLDEN_PICKAXE, 1), name: "golden_pickaxe", shaped: true, cells: &[(0, 0, TAG_GOLD_TOOL_MATERIALS), (1, 0, TAG_GOLD_TOOL_MATERIALS), (2, 0, TAG_GOLD_TOOL_MATERIALS), (1, 1, STICK), (1, 2, STICK)] },
+    Recipe { needs: &[(STICK, 2), (TAG_GOLD_TOOL_MATERIALS, 1)], result: (ITEM_GOLDEN_SHOVEL, 1), name: "golden_shovel", shaped: true, cells: &[(0, 0, TAG_GOLD_TOOL_MATERIALS), (0, 1, STICK), (0, 2, STICK)] },
+    Recipe { needs: &[(STICK, 2), (TAG_GOLD_TOOL_MATERIALS, 1)], result: (ITEM_GOLDEN_SPEAR, 1), name: "golden_spear", shaped: true, cells: &[(2, 0, TAG_GOLD_TOOL_MATERIALS), (1, 1, STICK), (0, 2, STICK)] },
+    Recipe { needs: &[(STICK, 1), (TAG_GOLD_TOOL_MATERIALS, 2)], result: (ITEM_GOLDEN_SWORD, 1), name: "golden_sword", shaped: true, cells: &[(0, 0, TAG_GOLD_TOOL_MATERIALS), (0, 1, TAG_GOLD_TOOL_MATERIALS), (0, 2, STICK)] },
+    Recipe { needs: &[(ITEM_DIORITE, 1), (ITEM_QUARTZ, 1)], result: (ITEM_GRANITE, 1), name: "granite", shaped: false, cells: &[] },
+    Recipe { needs: &[(ITEM_GRANITE, 3)], result: (ITEM_GRANITE_SLAB, 6), name: "granite_slab", shaped: true, cells: &[(0, 0, ITEM_GRANITE), (1, 0, ITEM_GRANITE), (2, 0, ITEM_GRANITE)] },
+    Recipe { needs: &[(ITEM_GRANITE, 6)], result: (ITEM_GRANITE_STAIRS, 4), name: "granite_stairs", shaped: true, cells: &[(0, 0, ITEM_GRANITE), (0, 1, ITEM_GRANITE), (1, 1, ITEM_GRANITE), (0, 2, ITEM_GRANITE), (1, 2, ITEM_GRANITE), (2, 2, ITEM_GRANITE)] },
+    Recipe { needs: &[(ITEM_GRANITE, 6)], result: (ITEM_GRANITE_WALL, 6), name: "granite_wall", shaped: true, cells: &[(0, 0, ITEM_GRANITE), (1, 0, ITEM_GRANITE), (2, 0, ITEM_GRANITE), (0, 1, ITEM_GRANITE), (1, 1, ITEM_GRANITE), (2, 1, ITEM_GRANITE)] },
+    Recipe { needs: &[(ITEM_GRAY_WOOL, 6), (STICK, 1)], result: (ITEM_GRAY_BANNER, 1), name: "gray_banner", shaped: true, cells: &[(0, 0, ITEM_GRAY_WOOL), (1, 0, ITEM_GRAY_WOOL), (2, 0, ITEM_GRAY_WOOL), (0, 1, ITEM_GRAY_WOOL), (1, 1, ITEM_GRAY_WOOL), (2, 1, ITEM_GRAY_WOOL), (1, 2, STICK)] },
+    Recipe { needs: &[(ITEM_GRAY_WOOL, 3), (TAG_PLANKS, 3)], result: (ITEM_GRAY_BED, 1), name: "gray_bed", shaped: true, cells: &[(0, 0, ITEM_GRAY_WOOL), (1, 0, ITEM_GRAY_WOOL), (2, 0, ITEM_GRAY_WOOL), (0, 1, TAG_PLANKS), (1, 1, TAG_PLANKS), (2, 1, TAG_PLANKS)] },
+    Recipe { needs: &[(ITEM_CANDLE, 1), (ITEM_GRAY_DYE, 1)], result: (ITEM_GRAY_CANDLE, 1), name: "gray_candle", shaped: false, cells: &[] },
+    Recipe { needs: &[(ITEM_GRAY_WOOL, 2)], result: (ITEM_GRAY_CARPET, 3), name: "gray_carpet", shaped: true, cells: &[(0, 0, ITEM_GRAY_WOOL), (1, 0, ITEM_GRAY_WOOL)] },
+    Recipe { needs: &[(ITEM_GRAVEL, 1), (ITEM_GRAVEL, 1), (ITEM_GRAVEL, 1), (ITEM_GRAVEL, 1), (ITEM_GRAY_DYE, 1), (ITEM_SAND, 1), (ITEM_SAND, 1), (ITEM_SAND, 1), (ITEM_SAND, 1)], result: (ITEM_GRAY_CONCRETE_POWDER, 8), name: "gray_concrete_powder", shaped: false, cells: &[] },
+    Recipe { needs: &[(ITEM_GRAY_CONCRETE, 3)], result: (ITEM_GRAY_CONCRETE_SLAB, 6), name: "gray_concrete_slab", shaped: true, cells: &[(0, 0, ITEM_GRAY_CONCRETE), (1, 0, ITEM_GRAY_CONCRETE), (2, 0, ITEM_GRAY_CONCRETE)] },
+    Recipe { needs: &[(ITEM_GRAY_CONCRETE, 6)], result: (ITEM_GRAY_CONCRETE_STAIRS, 4), name: "gray_concrete_stairs", shaped: true, cells: &[(0, 0, ITEM_GRAY_CONCRETE), (0, 1, ITEM_GRAY_CONCRETE), (1, 1, ITEM_GRAY_CONCRETE), (0, 2, ITEM_GRAY_CONCRETE), (1, 2, ITEM_GRAY_CONCRETE), (2, 2, ITEM_GRAY_CONCRETE)] },
+    Recipe { needs: &[(ITEM_GRAY_WOOL_SLAB, 3)], result: (ITEM_GRAY_CUSHION, 1), name: "gray_cushion", shaped: true, cells: &[(0, 0, ITEM_GRAY_WOOL_SLAB), (1, 0, ITEM_GRAY_WOOL_SLAB), (2, 0, ITEM_GRAY_WOOL_SLAB)] },
+    Recipe { needs: &[(ITEM_BLACK_DYE, 1), (ITEM_WHITE_DYE, 1)], result: (ITEM_GRAY_DYE, 2), name: "gray_dye", shaped: false, cells: &[] },
+    Recipe { needs: &[(ITEM_CLOSED_EYEBLOSSOM, 1)], result: (ITEM_GRAY_DYE, 1), name: "gray_dye_from_closed_eyeblossom", shaped: false, cells: &[] },
+    Recipe { needs: &[(ITEM_GLASS, 2), (ITEM_GRAY_WOOL, 1), (ITEM_LEATHER, 3)], result: (ITEM_GRAY_HARNESS, 1), name: "gray_harness", shaped: true, cells: &[(0, 0, ITEM_LEATHER), (1, 0, ITEM_LEATHER), (2, 0, ITEM_LEATHER), (0, 1, ITEM_GLASS), (1, 1, ITEM_GRAY_WOOL), (2, 1, ITEM_GLASS)] },
+    Recipe { needs: &[(ITEM_GLASS, 8), (ITEM_GRAY_DYE, 1)], result: (ITEM_GRAY_STAINED_GLASS, 8), name: "gray_stained_glass", shaped: true, cells: &[(0, 0, ITEM_GLASS), (1, 0, ITEM_GLASS), (2, 0, ITEM_GLASS), (0, 1, ITEM_GLASS), (1, 1, ITEM_GRAY_DYE), (2, 1, ITEM_GLASS), (0, 2, ITEM_GLASS), (1, 2, ITEM_GLASS), (2, 2, ITEM_GLASS)] },
+    Recipe { needs: &[(ITEM_GRAY_STAINED_GLASS, 6)], result: (ITEM_GRAY_STAINED_GLASS_PANE, 16), name: "gray_stained_glass_pane", shaped: true, cells: &[(0, 0, ITEM_GRAY_STAINED_GLASS), (1, 0, ITEM_GRAY_STAINED_GLASS), (2, 0, ITEM_GRAY_STAINED_GLASS), (0, 1, ITEM_GRAY_STAINED_GLASS), (1, 1, ITEM_GRAY_STAINED_GLASS), (2, 1, ITEM_GRAY_STAINED_GLASS)] },
+    Recipe { needs: &[(ITEM_GLASS_PANE, 8), (ITEM_GRAY_DYE, 1)], result: (ITEM_GRAY_STAINED_GLASS_PANE, 8), name: "gray_stained_glass_pane_from_glass_pane", shaped: true, cells: &[(0, 0, ITEM_GLASS_PANE), (1, 0, ITEM_GLASS_PANE), (2, 0, ITEM_GLASS_PANE), (0, 1, ITEM_GLASS_PANE), (1, 1, ITEM_GRAY_DYE), (2, 1, ITEM_GLASS_PANE), (0, 2, ITEM_GLASS_PANE), (1, 2, ITEM_GLASS_PANE), (2, 2, ITEM_GLASS_PANE)] },
+    Recipe { needs: &[(ITEM_GRAY_DYE, 1), (ITEM_TERRACOTTA, 8)], result: (ITEM_GRAY_TERRACOTTA, 8), name: "gray_terracotta", shaped: true, cells: &[(0, 0, ITEM_TERRACOTTA), (1, 0, ITEM_TERRACOTTA), (2, 0, ITEM_TERRACOTTA), (0, 1, ITEM_TERRACOTTA), (1, 1, ITEM_GRAY_DYE), (2, 1, ITEM_TERRACOTTA), (0, 2, ITEM_TERRACOTTA), (1, 2, ITEM_TERRACOTTA), (2, 2, ITEM_TERRACOTTA)] },
+    Recipe { needs: &[(ITEM_GRAY_WOOL, 3)], result: (ITEM_GRAY_WOOL_SLAB, 6), name: "gray_wool_slab", shaped: true, cells: &[(0, 0, ITEM_GRAY_WOOL), (1, 0, ITEM_GRAY_WOOL), (2, 0, ITEM_GRAY_WOOL)] },
+    Recipe { needs: &[(ITEM_GRAY_WOOL, 6)], result: (ITEM_GRAY_WOOL_STAIRS, 4), name: "gray_wool_stairs", shaped: true, cells: &[(0, 0, ITEM_GRAY_WOOL), (0, 1, ITEM_GRAY_WOOL), (1, 1, ITEM_GRAY_WOOL), (0, 2, ITEM_GRAY_WOOL), (1, 2, ITEM_GRAY_WOOL), (2, 2, ITEM_GRAY_WOOL)] },
+    Recipe { needs: &[(ITEM_GREEN_WOOL, 6), (STICK, 1)], result: (ITEM_GREEN_BANNER, 1), name: "green_banner", shaped: true, cells: &[(0, 0, ITEM_GREEN_WOOL), (1, 0, ITEM_GREEN_WOOL), (2, 0, ITEM_GREEN_WOOL), (0, 1, ITEM_GREEN_WOOL), (1, 1, ITEM_GREEN_WOOL), (2, 1, ITEM_GREEN_WOOL), (1, 2, STICK)] },
+    Recipe { needs: &[(ITEM_GREEN_WOOL, 3), (TAG_PLANKS, 3)], result: (ITEM_GREEN_BED, 1), name: "green_bed", shaped: true, cells: &[(0, 0, ITEM_GREEN_WOOL), (1, 0, ITEM_GREEN_WOOL), (2, 0, ITEM_GREEN_WOOL), (0, 1, TAG_PLANKS), (1, 1, TAG_PLANKS), (2, 1, TAG_PLANKS)] },
+    Recipe { needs: &[(ITEM_CANDLE, 1), (ITEM_GREEN_DYE, 1)], result: (ITEM_GREEN_CANDLE, 1), name: "green_candle", shaped: false, cells: &[] },
+    Recipe { needs: &[(ITEM_GREEN_WOOL, 2)], result: (ITEM_GREEN_CARPET, 3), name: "green_carpet", shaped: true, cells: &[(0, 0, ITEM_GREEN_WOOL), (1, 0, ITEM_GREEN_WOOL)] },
+    Recipe { needs: &[(ITEM_GRAVEL, 1), (ITEM_GRAVEL, 1), (ITEM_GRAVEL, 1), (ITEM_GRAVEL, 1), (ITEM_GREEN_DYE, 1), (ITEM_SAND, 1), (ITEM_SAND, 1), (ITEM_SAND, 1), (ITEM_SAND, 1)], result: (ITEM_GREEN_CONCRETE_POWDER, 8), name: "green_concrete_powder", shaped: false, cells: &[] },
+    Recipe { needs: &[(ITEM_GREEN_CONCRETE, 3)], result: (ITEM_GREEN_CONCRETE_SLAB, 6), name: "green_concrete_slab", shaped: true, cells: &[(0, 0, ITEM_GREEN_CONCRETE), (1, 0, ITEM_GREEN_CONCRETE), (2, 0, ITEM_GREEN_CONCRETE)] },
+    Recipe { needs: &[(ITEM_GREEN_CONCRETE, 6)], result: (ITEM_GREEN_CONCRETE_STAIRS, 4), name: "green_concrete_stairs", shaped: true, cells: &[(0, 0, ITEM_GREEN_CONCRETE), (0, 1, ITEM_GREEN_CONCRETE), (1, 1, ITEM_GREEN_CONCRETE), (0, 2, ITEM_GREEN_CONCRETE), (1, 2, ITEM_GREEN_CONCRETE), (2, 2, ITEM_GREEN_CONCRETE)] },
+    Recipe { needs: &[(ITEM_GREEN_WOOL_SLAB, 3)], result: (ITEM_GREEN_CUSHION, 1), name: "green_cushion", shaped: true, cells: &[(0, 0, ITEM_GREEN_WOOL_SLAB), (1, 0, ITEM_GREEN_WOOL_SLAB), (2, 0, ITEM_GREEN_WOOL_SLAB)] },
+    Recipe { needs: &[(ITEM_GLASS, 2), (ITEM_GREEN_WOOL, 1), (ITEM_LEATHER, 3)], result: (ITEM_GREEN_HARNESS, 1), name: "green_harness", shaped: true, cells: &[(0, 0, ITEM_LEATHER), (1, 0, ITEM_LEATHER), (2, 0, ITEM_LEATHER), (0, 1, ITEM_GLASS), (1, 1, ITEM_GREEN_WOOL), (2, 1, ITEM_GLASS)] },
+    Recipe { needs: &[(ITEM_GLASS, 8), (ITEM_GREEN_DYE, 1)], result: (ITEM_GREEN_STAINED_GLASS, 8), name: "green_stained_glass", shaped: true, cells: &[(0, 0, ITEM_GLASS), (1, 0, ITEM_GLASS), (2, 0, ITEM_GLASS), (0, 1, ITEM_GLASS), (1, 1, ITEM_GREEN_DYE), (2, 1, ITEM_GLASS), (0, 2, ITEM_GLASS), (1, 2, ITEM_GLASS), (2, 2, ITEM_GLASS)] },
+    Recipe { needs: &[(ITEM_GREEN_STAINED_GLASS, 6)], result: (ITEM_GREEN_STAINED_GLASS_PANE, 16), name: "green_stained_glass_pane", shaped: true, cells: &[(0, 0, ITEM_GREEN_STAINED_GLASS), (1, 0, ITEM_GREEN_STAINED_GLASS), (2, 0, ITEM_GREEN_STAINED_GLASS), (0, 1, ITEM_GREEN_STAINED_GLASS), (1, 1, ITEM_GREEN_STAINED_GLASS), (2, 1, ITEM_GREEN_STAINED_GLASS)] },
+    Recipe { needs: &[(ITEM_GLASS_PANE, 8), (ITEM_GREEN_DYE, 1)], result: (ITEM_GREEN_STAINED_GLASS_PANE, 8), name: "green_stained_glass_pane_from_glass_pane", shaped: true, cells: &[(0, 0, ITEM_GLASS_PANE), (1, 0, ITEM_GLASS_PANE), (2, 0, ITEM_GLASS_PANE), (0, 1, ITEM_GLASS_PANE), (1, 1, ITEM_GREEN_DYE), (2, 1, ITEM_GLASS_PANE), (0, 2, ITEM_GLASS_PANE), (1, 2, ITEM_GLASS_PANE), (2, 2, ITEM_GLASS_PANE)] },
+    Recipe { needs: &[(ITEM_GREEN_DYE, 1), (ITEM_TERRACOTTA, 8)], result: (ITEM_GREEN_TERRACOTTA, 8), name: "green_terracotta", shaped: true, cells: &[(0, 0, ITEM_TERRACOTTA), (1, 0, ITEM_TERRACOTTA), (2, 0, ITEM_TERRACOTTA), (0, 1, ITEM_TERRACOTTA), (1, 1, ITEM_GREEN_DYE), (2, 1, ITEM_TERRACOTTA), (0, 2, ITEM_TERRACOTTA), (1, 2, ITEM_TERRACOTTA), (2, 2, ITEM_TERRACOTTA)] },
+    Recipe { needs: &[(ITEM_GREEN_WOOL, 3)], result: (ITEM_GREEN_WOOL_SLAB, 6), name: "green_wool_slab", shaped: true, cells: &[(0, 0, ITEM_GREEN_WOOL), (1, 0, ITEM_GREEN_WOOL), (2, 0, ITEM_GREEN_WOOL)] },
+    Recipe { needs: &[(ITEM_GREEN_WOOL, 6)], result: (ITEM_GREEN_WOOL_STAIRS, 4), name: "green_wool_stairs", shaped: true, cells: &[(0, 0, ITEM_GREEN_WOOL), (0, 1, ITEM_GREEN_WOOL), (1, 1, ITEM_GREEN_WOOL), (0, 2, ITEM_GREEN_WOOL), (1, 2, ITEM_GREEN_WOOL), (2, 2, ITEM_GREEN_WOOL)] },
+    Recipe { needs: &[(STICK, 2), (ITEM_STONE_SLAB, 1), (TAG_PLANKS, 2)], result: (ITEM_GRINDSTONE, 1), name: "grindstone", shaped: true, cells: &[(0, 0, STICK), (1, 0, ITEM_STONE_SLAB), (2, 0, STICK), (0, 1, TAG_PLANKS), (2, 1, TAG_PLANKS)] },
+    Recipe { needs: &[(WHEAT, 1), (WHEAT, 1), (WHEAT, 1), (WHEAT, 1), (WHEAT, 1), (WHEAT, 1), (WHEAT, 1), (WHEAT, 1), (WHEAT, 1)], result: (ITEM_HAY_BLOCK, 1), name: "hay_block", shaped: false, cells: &[] },
+    Recipe { needs: &[(ITEM_IRON_INGOT, 2)], result: (ITEM_HEAVY_WEIGHTED_PRESSURE_PLATE, 1), name: "heavy_weighted_pressure_plate", shaped: true, cells: &[(0, 0, ITEM_IRON_INGOT), (1, 0, ITEM_IRON_INGOT)] },
+    Recipe { needs: &[(ITEM_HONEY_BOTTLE, 4)], result: (ITEM_HONEY_BLOCK, 1), name: "honey_block", shaped: true, cells: &[(0, 0, ITEM_HONEY_BOTTLE), (1, 0, ITEM_HONEY_BOTTLE), (0, 1, ITEM_HONEY_BOTTLE), (1, 1, ITEM_HONEY_BOTTLE)] },
+    Recipe { needs: &[(ITEM_GLASS_BOTTLE, 1), (ITEM_GLASS_BOTTLE, 1), (ITEM_GLASS_BOTTLE, 1), (ITEM_GLASS_BOTTLE, 1), (ITEM_HONEY_BLOCK, 1)], result: (ITEM_HONEY_BOTTLE, 4), name: "honey_bottle", shaped: false, cells: &[] },
+    Recipe { needs: &[(ITEM_HONEYCOMB, 4)], result: (ITEM_HONEYCOMB_BLOCK, 1), name: "honeycomb_block", shaped: true, cells: &[(0, 0, ITEM_HONEYCOMB), (1, 0, ITEM_HONEYCOMB), (0, 1, ITEM_HONEYCOMB), (1, 1, ITEM_HONEYCOMB)] },
+    Recipe { needs: &[(ITEM_CHEST, 1), (ITEM_IRON_INGOT, 5)], result: (ITEM_HOPPER, 1), name: "hopper", shaped: true, cells: &[(0, 0, ITEM_IRON_INGOT), (2, 0, ITEM_IRON_INGOT), (0, 1, ITEM_IRON_INGOT), (1, 1, ITEM_CHEST), (2, 1, ITEM_IRON_INGOT), (1, 2, ITEM_IRON_INGOT)] },
+    Recipe { needs: &[(ITEM_HOPPER, 1), (ITEM_MINECART, 1)], result: (ITEM_HOPPER_MINECART, 1), name: "hopper_minecart", shaped: false, cells: &[] },
+    Recipe { needs: &[(ITEM_DIAMOND, 7), (ITEM_HOST_ARMOR_TRIM_SMITHING_TEMPLATE, 1), (ITEM_TERRACOTTA, 1)], result: (ITEM_HOST_ARMOR_TRIM_SMITHING_TEMPLATE, 2), name: "host_armor_trim_smithing_template", shaped: true, cells: &[(0, 0, ITEM_DIAMOND), (1, 0, ITEM_HOST_ARMOR_TRIM_SMITHING_TEMPLATE), (2, 0, ITEM_DIAMOND), (0, 1, ITEM_DIAMOND), (1, 1, ITEM_TERRACOTTA), (2, 1, ITEM_DIAMOND), (0, 2, ITEM_DIAMOND), (1, 2, ITEM_DIAMOND), (2, 2, ITEM_DIAMOND)] },
+    Recipe { needs: &[(STICK, 2), (TAG_IRON_TOOL_MATERIALS, 3)], result: (ITEM_IRON_AXE, 1), name: "iron_axe", shaped: true, cells: &[(0, 0, TAG_IRON_TOOL_MATERIALS), (1, 0, TAG_IRON_TOOL_MATERIALS), (0, 1, TAG_IRON_TOOL_MATERIALS), (1, 1, STICK), (1, 2, STICK)] },
+    Recipe { needs: &[(ITEM_IRON_INGOT, 6)], result: (ITEM_IRON_BARS, 16), name: "iron_bars", shaped: true, cells: &[(0, 0, ITEM_IRON_INGOT), (1, 0, ITEM_IRON_INGOT), (2, 0, ITEM_IRON_INGOT), (0, 1, ITEM_IRON_INGOT), (1, 1, ITEM_IRON_INGOT), (2, 1, ITEM_IRON_INGOT)] },
+    Recipe { needs: &[(ITEM_IRON_INGOT, 9)], result: (ITEM_IRON_BLOCK, 1), name: "iron_block", shaped: true, cells: &[(0, 0, ITEM_IRON_INGOT), (1, 0, ITEM_IRON_INGOT), (2, 0, ITEM_IRON_INGOT), (0, 1, ITEM_IRON_INGOT), (1, 1, ITEM_IRON_INGOT), (2, 1, ITEM_IRON_INGOT), (0, 2, ITEM_IRON_INGOT), (1, 2, ITEM_IRON_INGOT), (2, 2, ITEM_IRON_INGOT)] },
+    Recipe { needs: &[(ITEM_IRON_INGOT, 4)], result: (ITEM_IRON_BOOTS, 1), name: "iron_boots", shaped: true, cells: &[(0, 0, ITEM_IRON_INGOT), (2, 0, ITEM_IRON_INGOT), (0, 1, ITEM_IRON_INGOT), (2, 1, ITEM_IRON_INGOT)] },
+    Recipe { needs: &[(ITEM_IRON_INGOT, 1), (ITEM_IRON_NUGGET, 2)], result: (ITEM_IRON_CHAIN, 1), name: "iron_chain", shaped: true, cells: &[(0, 0, ITEM_IRON_NUGGET), (0, 1, ITEM_IRON_INGOT), (0, 2, ITEM_IRON_NUGGET)] },
+    Recipe { needs: &[(ITEM_IRON_INGOT, 8)], result: (ITEM_IRON_CHESTPLATE, 1), name: "iron_chestplate", shaped: true, cells: &[(0, 0, ITEM_IRON_INGOT), (2, 0, ITEM_IRON_INGOT), (0, 1, ITEM_IRON_INGOT), (1, 1, ITEM_IRON_INGOT), (2, 1, ITEM_IRON_INGOT), (0, 2, ITEM_IRON_INGOT), (1, 2, ITEM_IRON_INGOT), (2, 2, ITEM_IRON_INGOT)] },
+    Recipe { needs: &[(ITEM_IRON_INGOT, 6)], result: (ITEM_IRON_DOOR, 3), name: "iron_door", shaped: true, cells: &[(0, 0, ITEM_IRON_INGOT), (1, 0, ITEM_IRON_INGOT), (0, 1, ITEM_IRON_INGOT), (1, 1, ITEM_IRON_INGOT), (0, 2, ITEM_IRON_INGOT), (1, 2, ITEM_IRON_INGOT)] },
+    Recipe { needs: &[(ITEM_IRON_INGOT, 5)], result: (ITEM_IRON_HELMET, 1), name: "iron_helmet", shaped: true, cells: &[(0, 0, ITEM_IRON_INGOT), (1, 0, ITEM_IRON_INGOT), (2, 0, ITEM_IRON_INGOT), (0, 1, ITEM_IRON_INGOT), (2, 1, ITEM_IRON_INGOT)] },
+    Recipe { needs: &[(STICK, 2), (TAG_IRON_TOOL_MATERIALS, 2)], result: (ITEM_IRON_HOE, 1), name: "iron_hoe", shaped: true, cells: &[(0, 0, TAG_IRON_TOOL_MATERIALS), (1, 0, TAG_IRON_TOOL_MATERIALS), (1, 1, STICK), (1, 2, STICK)] },
+    Recipe { needs: &[(ITEM_IRON_BLOCK, 1)], result: (ITEM_IRON_INGOT, 9), name: "iron_ingot_from_iron_block", shaped: false, cells: &[] },
+    Recipe { needs: &[(ITEM_IRON_NUGGET, 9)], result: (ITEM_IRON_INGOT, 1), name: "iron_ingot_from_nuggets", shaped: true, cells: &[(0, 0, ITEM_IRON_NUGGET), (1, 0, ITEM_IRON_NUGGET), (2, 0, ITEM_IRON_NUGGET), (0, 1, ITEM_IRON_NUGGET), (1, 1, ITEM_IRON_NUGGET), (2, 1, ITEM_IRON_NUGGET), (0, 2, ITEM_IRON_NUGGET), (1, 2, ITEM_IRON_NUGGET), (2, 2, ITEM_IRON_NUGGET)] },
+    Recipe { needs: &[(ITEM_IRON_INGOT, 7)], result: (ITEM_IRON_LEGGINGS, 1), name: "iron_leggings", shaped: true, cells: &[(0, 0, ITEM_IRON_INGOT), (1, 0, ITEM_IRON_INGOT), (2, 0, ITEM_IRON_INGOT), (0, 1, ITEM_IRON_INGOT), (2, 1, ITEM_IRON_INGOT), (0, 2, ITEM_IRON_INGOT), (2, 2, ITEM_IRON_INGOT)] },
+    Recipe { needs: &[(ITEM_IRON_INGOT, 1)], result: (ITEM_IRON_NUGGET, 9), name: "iron_nugget", shaped: false, cells: &[] },
+    Recipe { needs: &[(STICK, 2), (TAG_IRON_TOOL_MATERIALS, 3)], result: (ITEM_IRON_PICKAXE, 1), name: "iron_pickaxe", shaped: true, cells: &[(0, 0, TAG_IRON_TOOL_MATERIALS), (1, 0, TAG_IRON_TOOL_MATERIALS), (2, 0, TAG_IRON_TOOL_MATERIALS), (1, 1, STICK), (1, 2, STICK)] },
+    Recipe { needs: &[(STICK, 2), (TAG_IRON_TOOL_MATERIALS, 1)], result: (ITEM_IRON_SHOVEL, 1), name: "iron_shovel", shaped: true, cells: &[(0, 0, TAG_IRON_TOOL_MATERIALS), (0, 1, STICK), (0, 2, STICK)] },
+    Recipe { needs: &[(STICK, 2), (TAG_IRON_TOOL_MATERIALS, 1)], result: (ITEM_IRON_SPEAR, 1), name: "iron_spear", shaped: true, cells: &[(2, 0, TAG_IRON_TOOL_MATERIALS), (1, 1, STICK), (0, 2, STICK)] },
+    Recipe { needs: &[(STICK, 1), (TAG_IRON_TOOL_MATERIALS, 2)], result: (ITEM_IRON_SWORD, 1), name: "iron_sword", shaped: true, cells: &[(0, 0, TAG_IRON_TOOL_MATERIALS), (0, 1, TAG_IRON_TOOL_MATERIALS), (0, 2, STICK)] },
+    Recipe { needs: &[(ITEM_IRON_INGOT, 4)], result: (ITEM_IRON_TRAPDOOR, 1), name: "iron_trapdoor", shaped: true, cells: &[(0, 0, ITEM_IRON_INGOT), (1, 0, ITEM_IRON_INGOT), (0, 1, ITEM_IRON_INGOT), (1, 1, ITEM_IRON_INGOT)] },
+    Recipe { needs: &[(ITEM_LEATHER, 1), (STICK, 8)], result: (ITEM_ITEM_FRAME, 1), name: "item_frame", shaped: true, cells: &[(0, 0, STICK), (1, 0, STICK), (2, 0, STICK), (0, 1, STICK), (1, 1, ITEM_LEATHER), (2, 1, STICK), (0, 2, STICK), (1, 2, STICK), (2, 2, STICK)] },
+    Recipe { needs: &[(ITEM_CARVED_PUMPKIN, 1), (TORCH, 1)], result: (ITEM_JACK_O_LANTERN, 1), name: "jack_o_lantern", shaped: true, cells: &[(0, 0, ITEM_CARVED_PUMPKIN), (0, 1, TORCH)] },
+    Recipe { needs: &[(ITEM_DIAMOND, 1), (TAG_PLANKS, 8)], result: (ITEM_JUKEBOX, 1), name: "jukebox", shaped: true, cells: &[(0, 0, TAG_PLANKS), (1, 0, TAG_PLANKS), (2, 0, TAG_PLANKS), (0, 1, TAG_PLANKS), (1, 1, ITEM_DIAMOND), (2, 1, TAG_PLANKS), (0, 2, TAG_PLANKS), (1, 2, TAG_PLANKS), (2, 2, TAG_PLANKS)] },
+    Recipe { needs: &[(ITEM_JUNGLE_PLANKS, 5)], result: (ITEM_JUNGLE_BOAT, 1), name: "jungle_boat", shaped: true, cells: &[(0, 0, ITEM_JUNGLE_PLANKS), (2, 0, ITEM_JUNGLE_PLANKS), (0, 1, ITEM_JUNGLE_PLANKS), (1, 1, ITEM_JUNGLE_PLANKS), (2, 1, ITEM_JUNGLE_PLANKS)] },
+    Recipe { needs: &[(ITEM_JUNGLE_PLANKS, 1)], result: (ITEM_JUNGLE_BUTTON, 1), name: "jungle_button", shaped: false, cells: &[] },
+    Recipe { needs: &[(ITEM_CHEST, 1), (ITEM_JUNGLE_BOAT, 1)], result: (ITEM_JUNGLE_CHEST_BOAT, 1), name: "jungle_chest_boat", shaped: false, cells: &[] },
+    Recipe { needs: &[(ITEM_JUNGLE_PLANKS, 6)], result: (ITEM_JUNGLE_DOOR, 3), name: "jungle_door", shaped: true, cells: &[(0, 0, ITEM_JUNGLE_PLANKS), (1, 0, ITEM_JUNGLE_PLANKS), (0, 1, ITEM_JUNGLE_PLANKS), (1, 1, ITEM_JUNGLE_PLANKS), (0, 2, ITEM_JUNGLE_PLANKS), (1, 2, ITEM_JUNGLE_PLANKS)] },
+    Recipe { needs: &[(ITEM_JUNGLE_PLANKS, 4), (STICK, 2)], result: (ITEM_JUNGLE_FENCE, 3), name: "jungle_fence", shaped: true, cells: &[(0, 0, ITEM_JUNGLE_PLANKS), (1, 0, STICK), (2, 0, ITEM_JUNGLE_PLANKS), (0, 1, ITEM_JUNGLE_PLANKS), (1, 1, STICK), (2, 1, ITEM_JUNGLE_PLANKS)] },
+    Recipe { needs: &[(ITEM_JUNGLE_PLANKS, 2), (STICK, 4)], result: (ITEM_JUNGLE_FENCE_GATE, 1), name: "jungle_fence_gate", shaped: true, cells: &[(0, 0, STICK), (1, 0, ITEM_JUNGLE_PLANKS), (2, 0, STICK), (0, 1, STICK), (1, 1, ITEM_JUNGLE_PLANKS), (2, 1, STICK)] },
+    Recipe { needs: &[(ITEM_IRON_CHAIN, 2), (ITEM_STRIPPED_JUNGLE_LOG, 6)], result: (ITEM_JUNGLE_HANGING_SIGN, 6), name: "jungle_hanging_sign", shaped: true, cells: &[(0, 0, ITEM_IRON_CHAIN), (2, 0, ITEM_IRON_CHAIN), (0, 1, ITEM_STRIPPED_JUNGLE_LOG), (1, 1, ITEM_STRIPPED_JUNGLE_LOG), (2, 1, ITEM_STRIPPED_JUNGLE_LOG), (0, 2, ITEM_STRIPPED_JUNGLE_LOG), (1, 2, ITEM_STRIPPED_JUNGLE_LOG), (2, 2, ITEM_STRIPPED_JUNGLE_LOG)] },
+    Recipe { needs: &[(TAG_JUNGLE_LOGS, 1)], result: (ITEM_JUNGLE_PLANKS, 4), name: "jungle_planks", shaped: false, cells: &[] },
+    Recipe { needs: &[(ITEM_JUNGLE_PLANKS, 2)], result: (ITEM_JUNGLE_PRESSURE_PLATE, 1), name: "jungle_pressure_plate", shaped: true, cells: &[(0, 0, ITEM_JUNGLE_PLANKS), (1, 0, ITEM_JUNGLE_PLANKS)] },
+    Recipe { needs: &[(ITEM_STRIPPED_JUNGLE_LOG, 6)], result: (ITEM_JUNGLE_SHELF, 6), name: "jungle_shelf", shaped: true, cells: &[(0, 0, ITEM_STRIPPED_JUNGLE_LOG), (1, 0, ITEM_STRIPPED_JUNGLE_LOG), (2, 0, ITEM_STRIPPED_JUNGLE_LOG), (0, 2, ITEM_STRIPPED_JUNGLE_LOG), (1, 2, ITEM_STRIPPED_JUNGLE_LOG), (2, 2, ITEM_STRIPPED_JUNGLE_LOG)] },
+    Recipe { needs: &[(ITEM_JUNGLE_PLANKS, 6), (STICK, 1)], result: (ITEM_JUNGLE_SIGN, 3), name: "jungle_sign", shaped: true, cells: &[(0, 0, ITEM_JUNGLE_PLANKS), (1, 0, ITEM_JUNGLE_PLANKS), (2, 0, ITEM_JUNGLE_PLANKS), (0, 1, ITEM_JUNGLE_PLANKS), (1, 1, ITEM_JUNGLE_PLANKS), (2, 1, ITEM_JUNGLE_PLANKS), (1, 2, STICK)] },
+    Recipe { needs: &[(ITEM_JUNGLE_PLANKS, 3)], result: (ITEM_JUNGLE_SLAB, 6), name: "jungle_slab", shaped: true, cells: &[(0, 0, ITEM_JUNGLE_PLANKS), (1, 0, ITEM_JUNGLE_PLANKS), (2, 0, ITEM_JUNGLE_PLANKS)] },
+    Recipe { needs: &[(ITEM_JUNGLE_PLANKS, 6)], result: (ITEM_JUNGLE_STAIRS, 4), name: "jungle_stairs", shaped: true, cells: &[(0, 0, ITEM_JUNGLE_PLANKS), (0, 1, ITEM_JUNGLE_PLANKS), (1, 1, ITEM_JUNGLE_PLANKS), (0, 2, ITEM_JUNGLE_PLANKS), (1, 2, ITEM_JUNGLE_PLANKS), (2, 2, ITEM_JUNGLE_PLANKS)] },
+    Recipe { needs: &[(ITEM_JUNGLE_PLANKS, 6)], result: (ITEM_JUNGLE_TRAPDOOR, 2), name: "jungle_trapdoor", shaped: true, cells: &[(0, 0, ITEM_JUNGLE_PLANKS), (1, 0, ITEM_JUNGLE_PLANKS), (2, 0, ITEM_JUNGLE_PLANKS), (0, 1, ITEM_JUNGLE_PLANKS), (1, 1, ITEM_JUNGLE_PLANKS), (2, 1, ITEM_JUNGLE_PLANKS)] },
+    Recipe { needs: &[(ITEM_JUNGLE_LOG, 4)], result: (ITEM_JUNGLE_WOOD, 3), name: "jungle_wood", shaped: true, cells: &[(0, 0, ITEM_JUNGLE_LOG), (1, 0, ITEM_JUNGLE_LOG), (0, 1, ITEM_JUNGLE_LOG), (1, 1, ITEM_JUNGLE_LOG)] },
+    Recipe { needs: &[(STICK, 7)], result: (ITEM_LADDER, 3), name: "ladder", shaped: true, cells: &[(0, 0, STICK), (2, 0, STICK), (0, 1, STICK), (1, 1, STICK), (2, 1, STICK), (0, 2, STICK), (2, 2, STICK)] },
+    Recipe { needs: &[(ITEM_IRON_NUGGET, 8), (TORCH, 1)], result: (ITEM_LANTERN, 1), name: "lantern", shaped: true, cells: &[(0, 0, ITEM_IRON_NUGGET), (1, 0, ITEM_IRON_NUGGET), (2, 0, ITEM_IRON_NUGGET), (0, 1, ITEM_IRON_NUGGET), (1, 1, TORCH), (2, 1, ITEM_IRON_NUGGET), (0, 2, ITEM_IRON_NUGGET), (1, 2, ITEM_IRON_NUGGET), (2, 2, ITEM_IRON_NUGGET)] },
+    Recipe { needs: &[(ITEM_LAPIS_LAZULI, 9)], result: (ITEM_LAPIS_BLOCK, 1), name: "lapis_block", shaped: true, cells: &[(0, 0, ITEM_LAPIS_LAZULI), (1, 0, ITEM_LAPIS_LAZULI), (2, 0, ITEM_LAPIS_LAZULI), (0, 1, ITEM_LAPIS_LAZULI), (1, 1, ITEM_LAPIS_LAZULI), (2, 1, ITEM_LAPIS_LAZULI), (0, 2, ITEM_LAPIS_LAZULI), (1, 2, ITEM_LAPIS_LAZULI), (2, 2, ITEM_LAPIS_LAZULI)] },
+    Recipe { needs: &[(ITEM_LAPIS_BLOCK, 1)], result: (ITEM_LAPIS_LAZULI, 9), name: "lapis_lazuli", shaped: false, cells: &[] },
+    Recipe { needs: &[(ITEM_STRING, 5)], result: (ITEM_LEAD, 2), name: "lead", shaped: true, cells: &[(0, 0, ITEM_STRING), (1, 0, ITEM_STRING), (0, 1, ITEM_STRING), (1, 1, ITEM_STRING), (2, 2, ITEM_STRING)] },
+    Recipe { needs: &[(ITEM_RABBIT_HIDE, 4)], result: (ITEM_LEATHER, 1), name: "leather", shaped: true, cells: &[(0, 0, ITEM_RABBIT_HIDE), (1, 0, ITEM_RABBIT_HIDE), (0, 1, ITEM_RABBIT_HIDE), (1, 1, ITEM_RABBIT_HIDE)] },
+    Recipe { needs: &[(ITEM_LEATHER, 4)], result: (ITEM_LEATHER_BOOTS, 1), name: "leather_boots", shaped: true, cells: &[(0, 0, ITEM_LEATHER), (2, 0, ITEM_LEATHER), (0, 1, ITEM_LEATHER), (2, 1, ITEM_LEATHER)] },
+    Recipe { needs: &[(ITEM_LEATHER, 8)], result: (ITEM_LEATHER_CHESTPLATE, 1), name: "leather_chestplate", shaped: true, cells: &[(0, 0, ITEM_LEATHER), (2, 0, ITEM_LEATHER), (0, 1, ITEM_LEATHER), (1, 1, ITEM_LEATHER), (2, 1, ITEM_LEATHER), (0, 2, ITEM_LEATHER), (1, 2, ITEM_LEATHER), (2, 2, ITEM_LEATHER)] },
+    Recipe { needs: &[(ITEM_LEATHER, 5)], result: (ITEM_LEATHER_HELMET, 1), name: "leather_helmet", shaped: true, cells: &[(0, 0, ITEM_LEATHER), (1, 0, ITEM_LEATHER), (2, 0, ITEM_LEATHER), (0, 1, ITEM_LEATHER), (2, 1, ITEM_LEATHER)] },
+    Recipe { needs: &[(ITEM_LEATHER, 7)], result: (ITEM_LEATHER_HORSE_ARMOR, 1), name: "leather_horse_armor", shaped: true, cells: &[(0, 0, ITEM_LEATHER), (2, 0, ITEM_LEATHER), (0, 1, ITEM_LEATHER), (1, 1, ITEM_LEATHER), (2, 1, ITEM_LEATHER), (0, 2, ITEM_LEATHER), (2, 2, ITEM_LEATHER)] },
+    Recipe { needs: &[(ITEM_LEATHER, 7)], result: (ITEM_LEATHER_LEGGINGS, 1), name: "leather_leggings", shaped: true, cells: &[(0, 0, ITEM_LEATHER), (1, 0, ITEM_LEATHER), (2, 0, ITEM_LEATHER), (0, 1, ITEM_LEATHER), (2, 1, ITEM_LEATHER), (0, 2, ITEM_LEATHER), (2, 2, ITEM_LEATHER)] },
+    Recipe { needs: &[(ITEM_BOOKSHELF, 1), (TAG_WOODEN_SLABS, 4)], result: (ITEM_LECTERN, 1), name: "lectern", shaped: true, cells: &[(0, 0, TAG_WOODEN_SLABS), (1, 0, TAG_WOODEN_SLABS), (2, 0, TAG_WOODEN_SLABS), (1, 1, ITEM_BOOKSHELF), (1, 2, TAG_WOODEN_SLABS)] },
+    Recipe { needs: &[(COBBLESTONE, 1), (STICK, 1)], result: (ITEM_LEVER, 1), name: "lever", shaped: true, cells: &[(0, 0, STICK), (0, 1, COBBLESTONE)] },
+    Recipe { needs: &[(ITEM_LIGHT_BLUE_WOOL, 6), (STICK, 1)], result: (ITEM_LIGHT_BLUE_BANNER, 1), name: "light_blue_banner", shaped: true, cells: &[(0, 0, ITEM_LIGHT_BLUE_WOOL), (1, 0, ITEM_LIGHT_BLUE_WOOL), (2, 0, ITEM_LIGHT_BLUE_WOOL), (0, 1, ITEM_LIGHT_BLUE_WOOL), (1, 1, ITEM_LIGHT_BLUE_WOOL), (2, 1, ITEM_LIGHT_BLUE_WOOL), (1, 2, STICK)] },
+    Recipe { needs: &[(ITEM_LIGHT_BLUE_WOOL, 3), (TAG_PLANKS, 3)], result: (ITEM_LIGHT_BLUE_BED, 1), name: "light_blue_bed", shaped: true, cells: &[(0, 0, ITEM_LIGHT_BLUE_WOOL), (1, 0, ITEM_LIGHT_BLUE_WOOL), (2, 0, ITEM_LIGHT_BLUE_WOOL), (0, 1, TAG_PLANKS), (1, 1, TAG_PLANKS), (2, 1, TAG_PLANKS)] },
+    Recipe { needs: &[(ITEM_CANDLE, 1), (ITEM_LIGHT_BLUE_DYE, 1)], result: (ITEM_LIGHT_BLUE_CANDLE, 1), name: "light_blue_candle", shaped: false, cells: &[] },
+    Recipe { needs: &[(ITEM_LIGHT_BLUE_WOOL, 2)], result: (ITEM_LIGHT_BLUE_CARPET, 3), name: "light_blue_carpet", shaped: true, cells: &[(0, 0, ITEM_LIGHT_BLUE_WOOL), (1, 0, ITEM_LIGHT_BLUE_WOOL)] },
+    Recipe { needs: &[(ITEM_GRAVEL, 1), (ITEM_GRAVEL, 1), (ITEM_GRAVEL, 1), (ITEM_GRAVEL, 1), (ITEM_LIGHT_BLUE_DYE, 1), (ITEM_SAND, 1), (ITEM_SAND, 1), (ITEM_SAND, 1), (ITEM_SAND, 1)], result: (ITEM_LIGHT_BLUE_CONCRETE_POWDER, 8), name: "light_blue_concrete_powder", shaped: false, cells: &[] },
+    Recipe { needs: &[(ITEM_LIGHT_BLUE_CONCRETE, 3)], result: (ITEM_LIGHT_BLUE_CONCRETE_SLAB, 6), name: "light_blue_concrete_slab", shaped: true, cells: &[(0, 0, ITEM_LIGHT_BLUE_CONCRETE), (1, 0, ITEM_LIGHT_BLUE_CONCRETE), (2, 0, ITEM_LIGHT_BLUE_CONCRETE)] },
+    Recipe { needs: &[(ITEM_LIGHT_BLUE_CONCRETE, 6)], result: (ITEM_LIGHT_BLUE_CONCRETE_STAIRS, 4), name: "light_blue_concrete_stairs", shaped: true, cells: &[(0, 0, ITEM_LIGHT_BLUE_CONCRETE), (0, 1, ITEM_LIGHT_BLUE_CONCRETE), (1, 1, ITEM_LIGHT_BLUE_CONCRETE), (0, 2, ITEM_LIGHT_BLUE_CONCRETE), (1, 2, ITEM_LIGHT_BLUE_CONCRETE), (2, 2, ITEM_LIGHT_BLUE_CONCRETE)] },
+    Recipe { needs: &[(ITEM_LIGHT_BLUE_WOOL_SLAB, 3)], result: (ITEM_LIGHT_BLUE_CUSHION, 1), name: "light_blue_cushion", shaped: true, cells: &[(0, 0, ITEM_LIGHT_BLUE_WOOL_SLAB), (1, 0, ITEM_LIGHT_BLUE_WOOL_SLAB), (2, 0, ITEM_LIGHT_BLUE_WOOL_SLAB)] },
+    Recipe { needs: &[(ITEM_BLUE_ORCHID, 1)], result: (ITEM_LIGHT_BLUE_DYE, 1), name: "light_blue_dye_from_blue_orchid", shaped: false, cells: &[] },
+    Recipe { needs: &[(ITEM_BLUE_DYE, 1), (ITEM_WHITE_DYE, 1)], result: (ITEM_LIGHT_BLUE_DYE, 2), name: "light_blue_dye_from_blue_white_dye", shaped: false, cells: &[] },
+    Recipe { needs: &[(ITEM_GLASS, 2), (ITEM_LEATHER, 3), (ITEM_LIGHT_BLUE_WOOL, 1)], result: (ITEM_LIGHT_BLUE_HARNESS, 1), name: "light_blue_harness", shaped: true, cells: &[(0, 0, ITEM_LEATHER), (1, 0, ITEM_LEATHER), (2, 0, ITEM_LEATHER), (0, 1, ITEM_GLASS), (1, 1, ITEM_LIGHT_BLUE_WOOL), (2, 1, ITEM_GLASS)] },
+    Recipe { needs: &[(ITEM_GLASS, 8), (ITEM_LIGHT_BLUE_DYE, 1)], result: (ITEM_LIGHT_BLUE_STAINED_GLASS, 8), name: "light_blue_stained_glass", shaped: true, cells: &[(0, 0, ITEM_GLASS), (1, 0, ITEM_GLASS), (2, 0, ITEM_GLASS), (0, 1, ITEM_GLASS), (1, 1, ITEM_LIGHT_BLUE_DYE), (2, 1, ITEM_GLASS), (0, 2, ITEM_GLASS), (1, 2, ITEM_GLASS), (2, 2, ITEM_GLASS)] },
+    Recipe { needs: &[(ITEM_LIGHT_BLUE_STAINED_GLASS, 6)], result: (ITEM_LIGHT_BLUE_STAINED_GLASS_PANE, 16), name: "light_blue_stained_glass_pane", shaped: true, cells: &[(0, 0, ITEM_LIGHT_BLUE_STAINED_GLASS), (1, 0, ITEM_LIGHT_BLUE_STAINED_GLASS), (2, 0, ITEM_LIGHT_BLUE_STAINED_GLASS), (0, 1, ITEM_LIGHT_BLUE_STAINED_GLASS), (1, 1, ITEM_LIGHT_BLUE_STAINED_GLASS), (2, 1, ITEM_LIGHT_BLUE_STAINED_GLASS)] },
+    Recipe { needs: &[(ITEM_GLASS_PANE, 8), (ITEM_LIGHT_BLUE_DYE, 1)], result: (ITEM_LIGHT_BLUE_STAINED_GLASS_PANE, 8), name: "light_blue_stained_glass_pane_from_glass_pane", shaped: true, cells: &[(0, 0, ITEM_GLASS_PANE), (1, 0, ITEM_GLASS_PANE), (2, 0, ITEM_GLASS_PANE), (0, 1, ITEM_GLASS_PANE), (1, 1, ITEM_LIGHT_BLUE_DYE), (2, 1, ITEM_GLASS_PANE), (0, 2, ITEM_GLASS_PANE), (1, 2, ITEM_GLASS_PANE), (2, 2, ITEM_GLASS_PANE)] },
+    Recipe { needs: &[(ITEM_LIGHT_BLUE_DYE, 1), (ITEM_TERRACOTTA, 8)], result: (ITEM_LIGHT_BLUE_TERRACOTTA, 8), name: "light_blue_terracotta", shaped: true, cells: &[(0, 0, ITEM_TERRACOTTA), (1, 0, ITEM_TERRACOTTA), (2, 0, ITEM_TERRACOTTA), (0, 1, ITEM_TERRACOTTA), (1, 1, ITEM_LIGHT_BLUE_DYE), (2, 1, ITEM_TERRACOTTA), (0, 2, ITEM_TERRACOTTA), (1, 2, ITEM_TERRACOTTA), (2, 2, ITEM_TERRACOTTA)] },
+    Recipe { needs: &[(ITEM_LIGHT_BLUE_WOOL, 3)], result: (ITEM_LIGHT_BLUE_WOOL_SLAB, 6), name: "light_blue_wool_slab", shaped: true, cells: &[(0, 0, ITEM_LIGHT_BLUE_WOOL), (1, 0, ITEM_LIGHT_BLUE_WOOL), (2, 0, ITEM_LIGHT_BLUE_WOOL)] },
+    Recipe { needs: &[(ITEM_LIGHT_BLUE_WOOL, 6)], result: (ITEM_LIGHT_BLUE_WOOL_STAIRS, 4), name: "light_blue_wool_stairs", shaped: true, cells: &[(0, 0, ITEM_LIGHT_BLUE_WOOL), (0, 1, ITEM_LIGHT_BLUE_WOOL), (1, 1, ITEM_LIGHT_BLUE_WOOL), (0, 2, ITEM_LIGHT_BLUE_WOOL), (1, 2, ITEM_LIGHT_BLUE_WOOL), (2, 2, ITEM_LIGHT_BLUE_WOOL)] },
+    Recipe { needs: &[(ITEM_LIGHT_GRAY_WOOL, 6), (STICK, 1)], result: (ITEM_LIGHT_GRAY_BANNER, 1), name: "light_gray_banner", shaped: true, cells: &[(0, 0, ITEM_LIGHT_GRAY_WOOL), (1, 0, ITEM_LIGHT_GRAY_WOOL), (2, 0, ITEM_LIGHT_GRAY_WOOL), (0, 1, ITEM_LIGHT_GRAY_WOOL), (1, 1, ITEM_LIGHT_GRAY_WOOL), (2, 1, ITEM_LIGHT_GRAY_WOOL), (1, 2, STICK)] },
+    Recipe { needs: &[(ITEM_LIGHT_GRAY_WOOL, 3), (TAG_PLANKS, 3)], result: (ITEM_LIGHT_GRAY_BED, 1), name: "light_gray_bed", shaped: true, cells: &[(0, 0, ITEM_LIGHT_GRAY_WOOL), (1, 0, ITEM_LIGHT_GRAY_WOOL), (2, 0, ITEM_LIGHT_GRAY_WOOL), (0, 1, TAG_PLANKS), (1, 1, TAG_PLANKS), (2, 1, TAG_PLANKS)] },
+    Recipe { needs: &[(ITEM_CANDLE, 1), (ITEM_LIGHT_GRAY_DYE, 1)], result: (ITEM_LIGHT_GRAY_CANDLE, 1), name: "light_gray_candle", shaped: false, cells: &[] },
+    Recipe { needs: &[(ITEM_LIGHT_GRAY_WOOL, 2)], result: (ITEM_LIGHT_GRAY_CARPET, 3), name: "light_gray_carpet", shaped: true, cells: &[(0, 0, ITEM_LIGHT_GRAY_WOOL), (1, 0, ITEM_LIGHT_GRAY_WOOL)] },
+    Recipe { needs: &[(ITEM_GRAVEL, 1), (ITEM_GRAVEL, 1), (ITEM_GRAVEL, 1), (ITEM_GRAVEL, 1), (ITEM_LIGHT_GRAY_DYE, 1), (ITEM_SAND, 1), (ITEM_SAND, 1), (ITEM_SAND, 1), (ITEM_SAND, 1)], result: (ITEM_LIGHT_GRAY_CONCRETE_POWDER, 8), name: "light_gray_concrete_powder", shaped: false, cells: &[] },
+    Recipe { needs: &[(ITEM_LIGHT_GRAY_CONCRETE, 3)], result: (ITEM_LIGHT_GRAY_CONCRETE_SLAB, 6), name: "light_gray_concrete_slab", shaped: true, cells: &[(0, 0, ITEM_LIGHT_GRAY_CONCRETE), (1, 0, ITEM_LIGHT_GRAY_CONCRETE), (2, 0, ITEM_LIGHT_GRAY_CONCRETE)] },
+    Recipe { needs: &[(ITEM_LIGHT_GRAY_CONCRETE, 6)], result: (ITEM_LIGHT_GRAY_CONCRETE_STAIRS, 4), name: "light_gray_concrete_stairs", shaped: true, cells: &[(0, 0, ITEM_LIGHT_GRAY_CONCRETE), (0, 1, ITEM_LIGHT_GRAY_CONCRETE), (1, 1, ITEM_LIGHT_GRAY_CONCRETE), (0, 2, ITEM_LIGHT_GRAY_CONCRETE), (1, 2, ITEM_LIGHT_GRAY_CONCRETE), (2, 2, ITEM_LIGHT_GRAY_CONCRETE)] },
+    Recipe { needs: &[(ITEM_LIGHT_GRAY_WOOL_SLAB, 3)], result: (ITEM_LIGHT_GRAY_CUSHION, 1), name: "light_gray_cushion", shaped: true, cells: &[(0, 0, ITEM_LIGHT_GRAY_WOOL_SLAB), (1, 0, ITEM_LIGHT_GRAY_WOOL_SLAB), (2, 0, ITEM_LIGHT_GRAY_WOOL_SLAB)] },
+    Recipe { needs: &[(ITEM_AZURE_BLUET, 1)], result: (ITEM_LIGHT_GRAY_DYE, 1), name: "light_gray_dye_from_azure_bluet", shaped: false, cells: &[] },
+    Recipe { needs: &[(ITEM_BLACK_DYE, 1), (ITEM_WHITE_DYE, 1), (ITEM_WHITE_DYE, 1)], result: (ITEM_LIGHT_GRAY_DYE, 3), name: "light_gray_dye_from_black_white_dye", shaped: false, cells: &[] },
+    Recipe { needs: &[(ITEM_GRAY_DYE, 1), (ITEM_WHITE_DYE, 1)], result: (ITEM_LIGHT_GRAY_DYE, 2), name: "light_gray_dye_from_gray_white_dye", shaped: false, cells: &[] },
+    Recipe { needs: &[(ITEM_OXEYE_DAISY, 1)], result: (ITEM_LIGHT_GRAY_DYE, 1), name: "light_gray_dye_from_oxeye_daisy", shaped: false, cells: &[] },
+    Recipe { needs: &[(ITEM_WHITE_TULIP, 1)], result: (ITEM_LIGHT_GRAY_DYE, 1), name: "light_gray_dye_from_white_tulip", shaped: false, cells: &[] },
+    Recipe { needs: &[(ITEM_GLASS, 2), (ITEM_LEATHER, 3), (ITEM_LIGHT_GRAY_WOOL, 1)], result: (ITEM_LIGHT_GRAY_HARNESS, 1), name: "light_gray_harness", shaped: true, cells: &[(0, 0, ITEM_LEATHER), (1, 0, ITEM_LEATHER), (2, 0, ITEM_LEATHER), (0, 1, ITEM_GLASS), (1, 1, ITEM_LIGHT_GRAY_WOOL), (2, 1, ITEM_GLASS)] },
+    Recipe { needs: &[(ITEM_GLASS, 8), (ITEM_LIGHT_GRAY_DYE, 1)], result: (ITEM_LIGHT_GRAY_STAINED_GLASS, 8), name: "light_gray_stained_glass", shaped: true, cells: &[(0, 0, ITEM_GLASS), (1, 0, ITEM_GLASS), (2, 0, ITEM_GLASS), (0, 1, ITEM_GLASS), (1, 1, ITEM_LIGHT_GRAY_DYE), (2, 1, ITEM_GLASS), (0, 2, ITEM_GLASS), (1, 2, ITEM_GLASS), (2, 2, ITEM_GLASS)] },
+    Recipe { needs: &[(ITEM_LIGHT_GRAY_STAINED_GLASS, 6)], result: (ITEM_LIGHT_GRAY_STAINED_GLASS_PANE, 16), name: "light_gray_stained_glass_pane", shaped: true, cells: &[(0, 0, ITEM_LIGHT_GRAY_STAINED_GLASS), (1, 0, ITEM_LIGHT_GRAY_STAINED_GLASS), (2, 0, ITEM_LIGHT_GRAY_STAINED_GLASS), (0, 1, ITEM_LIGHT_GRAY_STAINED_GLASS), (1, 1, ITEM_LIGHT_GRAY_STAINED_GLASS), (2, 1, ITEM_LIGHT_GRAY_STAINED_GLASS)] },
+    Recipe { needs: &[(ITEM_GLASS_PANE, 8), (ITEM_LIGHT_GRAY_DYE, 1)], result: (ITEM_LIGHT_GRAY_STAINED_GLASS_PANE, 8), name: "light_gray_stained_glass_pane_from_glass_pane", shaped: true, cells: &[(0, 0, ITEM_GLASS_PANE), (1, 0, ITEM_GLASS_PANE), (2, 0, ITEM_GLASS_PANE), (0, 1, ITEM_GLASS_PANE), (1, 1, ITEM_LIGHT_GRAY_DYE), (2, 1, ITEM_GLASS_PANE), (0, 2, ITEM_GLASS_PANE), (1, 2, ITEM_GLASS_PANE), (2, 2, ITEM_GLASS_PANE)] },
+    Recipe { needs: &[(ITEM_LIGHT_GRAY_DYE, 1), (ITEM_TERRACOTTA, 8)], result: (ITEM_LIGHT_GRAY_TERRACOTTA, 8), name: "light_gray_terracotta", shaped: true, cells: &[(0, 0, ITEM_TERRACOTTA), (1, 0, ITEM_TERRACOTTA), (2, 0, ITEM_TERRACOTTA), (0, 1, ITEM_TERRACOTTA), (1, 1, ITEM_LIGHT_GRAY_DYE), (2, 1, ITEM_TERRACOTTA), (0, 2, ITEM_TERRACOTTA), (1, 2, ITEM_TERRACOTTA), (2, 2, ITEM_TERRACOTTA)] },
+    Recipe { needs: &[(ITEM_LIGHT_GRAY_WOOL, 3)], result: (ITEM_LIGHT_GRAY_WOOL_SLAB, 6), name: "light_gray_wool_slab", shaped: true, cells: &[(0, 0, ITEM_LIGHT_GRAY_WOOL), (1, 0, ITEM_LIGHT_GRAY_WOOL), (2, 0, ITEM_LIGHT_GRAY_WOOL)] },
+    Recipe { needs: &[(ITEM_LIGHT_GRAY_WOOL, 6)], result: (ITEM_LIGHT_GRAY_WOOL_STAIRS, 4), name: "light_gray_wool_stairs", shaped: true, cells: &[(0, 0, ITEM_LIGHT_GRAY_WOOL), (0, 1, ITEM_LIGHT_GRAY_WOOL), (1, 1, ITEM_LIGHT_GRAY_WOOL), (0, 2, ITEM_LIGHT_GRAY_WOOL), (1, 2, ITEM_LIGHT_GRAY_WOOL), (2, 2, ITEM_LIGHT_GRAY_WOOL)] },
+    Recipe { needs: &[(ITEM_GOLD_INGOT, 2)], result: (ITEM_LIGHT_WEIGHTED_PRESSURE_PLATE, 1), name: "light_weighted_pressure_plate", shaped: true, cells: &[(0, 0, ITEM_GOLD_INGOT), (1, 0, ITEM_GOLD_INGOT)] },
+    Recipe { needs: &[(ITEM_COPPER_INGOT, 3)], result: (ITEM_LIGHTNING_ROD, 1), name: "lightning_rod", shaped: true, cells: &[(0, 0, ITEM_COPPER_INGOT), (0, 1, ITEM_COPPER_INGOT), (0, 2, ITEM_COPPER_INGOT)] },
+    Recipe { needs: &[(ITEM_LIME_WOOL, 6), (STICK, 1)], result: (ITEM_LIME_BANNER, 1), name: "lime_banner", shaped: true, cells: &[(0, 0, ITEM_LIME_WOOL), (1, 0, ITEM_LIME_WOOL), (2, 0, ITEM_LIME_WOOL), (0, 1, ITEM_LIME_WOOL), (1, 1, ITEM_LIME_WOOL), (2, 1, ITEM_LIME_WOOL), (1, 2, STICK)] },
+    Recipe { needs: &[(ITEM_LIME_WOOL, 3), (TAG_PLANKS, 3)], result: (ITEM_LIME_BED, 1), name: "lime_bed", shaped: true, cells: &[(0, 0, ITEM_LIME_WOOL), (1, 0, ITEM_LIME_WOOL), (2, 0, ITEM_LIME_WOOL), (0, 1, TAG_PLANKS), (1, 1, TAG_PLANKS), (2, 1, TAG_PLANKS)] },
+    Recipe { needs: &[(ITEM_CANDLE, 1), (ITEM_LIME_DYE, 1)], result: (ITEM_LIME_CANDLE, 1), name: "lime_candle", shaped: false, cells: &[] },
+    Recipe { needs: &[(ITEM_LIME_WOOL, 2)], result: (ITEM_LIME_CARPET, 3), name: "lime_carpet", shaped: true, cells: &[(0, 0, ITEM_LIME_WOOL), (1, 0, ITEM_LIME_WOOL)] },
+    Recipe { needs: &[(ITEM_GRAVEL, 1), (ITEM_GRAVEL, 1), (ITEM_GRAVEL, 1), (ITEM_GRAVEL, 1), (ITEM_LIME_DYE, 1), (ITEM_SAND, 1), (ITEM_SAND, 1), (ITEM_SAND, 1), (ITEM_SAND, 1)], result: (ITEM_LIME_CONCRETE_POWDER, 8), name: "lime_concrete_powder", shaped: false, cells: &[] },
+    Recipe { needs: &[(ITEM_LIME_CONCRETE, 3)], result: (ITEM_LIME_CONCRETE_SLAB, 6), name: "lime_concrete_slab", shaped: true, cells: &[(0, 0, ITEM_LIME_CONCRETE), (1, 0, ITEM_LIME_CONCRETE), (2, 0, ITEM_LIME_CONCRETE)] },
+    Recipe { needs: &[(ITEM_LIME_CONCRETE, 6)], result: (ITEM_LIME_CONCRETE_STAIRS, 4), name: "lime_concrete_stairs", shaped: true, cells: &[(0, 0, ITEM_LIME_CONCRETE), (0, 1, ITEM_LIME_CONCRETE), (1, 1, ITEM_LIME_CONCRETE), (0, 2, ITEM_LIME_CONCRETE), (1, 2, ITEM_LIME_CONCRETE), (2, 2, ITEM_LIME_CONCRETE)] },
+    Recipe { needs: &[(ITEM_LIME_WOOL_SLAB, 3)], result: (ITEM_LIME_CUSHION, 1), name: "lime_cushion", shaped: true, cells: &[(0, 0, ITEM_LIME_WOOL_SLAB), (1, 0, ITEM_LIME_WOOL_SLAB), (2, 0, ITEM_LIME_WOOL_SLAB)] },
+    Recipe { needs: &[(ITEM_GREEN_DYE, 1), (ITEM_WHITE_DYE, 1)], result: (ITEM_LIME_DYE, 2), name: "lime_dye", shaped: false, cells: &[] },
+    Recipe { needs: &[(ITEM_GLASS, 2), (ITEM_LEATHER, 3), (ITEM_LIME_WOOL, 1)], result: (ITEM_LIME_HARNESS, 1), name: "lime_harness", shaped: true, cells: &[(0, 0, ITEM_LEATHER), (1, 0, ITEM_LEATHER), (2, 0, ITEM_LEATHER), (0, 1, ITEM_GLASS), (1, 1, ITEM_LIME_WOOL), (2, 1, ITEM_GLASS)] },
+    Recipe { needs: &[(ITEM_GLASS, 8), (ITEM_LIME_DYE, 1)], result: (ITEM_LIME_STAINED_GLASS, 8), name: "lime_stained_glass", shaped: true, cells: &[(0, 0, ITEM_GLASS), (1, 0, ITEM_GLASS), (2, 0, ITEM_GLASS), (0, 1, ITEM_GLASS), (1, 1, ITEM_LIME_DYE), (2, 1, ITEM_GLASS), (0, 2, ITEM_GLASS), (1, 2, ITEM_GLASS), (2, 2, ITEM_GLASS)] },
+    Recipe { needs: &[(ITEM_LIME_STAINED_GLASS, 6)], result: (ITEM_LIME_STAINED_GLASS_PANE, 16), name: "lime_stained_glass_pane", shaped: true, cells: &[(0, 0, ITEM_LIME_STAINED_GLASS), (1, 0, ITEM_LIME_STAINED_GLASS), (2, 0, ITEM_LIME_STAINED_GLASS), (0, 1, ITEM_LIME_STAINED_GLASS), (1, 1, ITEM_LIME_STAINED_GLASS), (2, 1, ITEM_LIME_STAINED_GLASS)] },
+    Recipe { needs: &[(ITEM_GLASS_PANE, 8), (ITEM_LIME_DYE, 1)], result: (ITEM_LIME_STAINED_GLASS_PANE, 8), name: "lime_stained_glass_pane_from_glass_pane", shaped: true, cells: &[(0, 0, ITEM_GLASS_PANE), (1, 0, ITEM_GLASS_PANE), (2, 0, ITEM_GLASS_PANE), (0, 1, ITEM_GLASS_PANE), (1, 1, ITEM_LIME_DYE), (2, 1, ITEM_GLASS_PANE), (0, 2, ITEM_GLASS_PANE), (1, 2, ITEM_GLASS_PANE), (2, 2, ITEM_GLASS_PANE)] },
+    Recipe { needs: &[(ITEM_LIME_DYE, 1), (ITEM_TERRACOTTA, 8)], result: (ITEM_LIME_TERRACOTTA, 8), name: "lime_terracotta", shaped: true, cells: &[(0, 0, ITEM_TERRACOTTA), (1, 0, ITEM_TERRACOTTA), (2, 0, ITEM_TERRACOTTA), (0, 1, ITEM_TERRACOTTA), (1, 1, ITEM_LIME_DYE), (2, 1, ITEM_TERRACOTTA), (0, 2, ITEM_TERRACOTTA), (1, 2, ITEM_TERRACOTTA), (2, 2, ITEM_TERRACOTTA)] },
+    Recipe { needs: &[(ITEM_LIME_WOOL, 3)], result: (ITEM_LIME_WOOL_SLAB, 6), name: "lime_wool_slab", shaped: true, cells: &[(0, 0, ITEM_LIME_WOOL), (1, 0, ITEM_LIME_WOOL), (2, 0, ITEM_LIME_WOOL)] },
+    Recipe { needs: &[(ITEM_LIME_WOOL, 6)], result: (ITEM_LIME_WOOL_STAIRS, 4), name: "lime_wool_stairs", shaped: true, cells: &[(0, 0, ITEM_LIME_WOOL), (0, 1, ITEM_LIME_WOOL), (1, 1, ITEM_LIME_WOOL), (0, 2, ITEM_LIME_WOOL), (1, 2, ITEM_LIME_WOOL), (2, 2, ITEM_LIME_WOOL)] },
+    Recipe { needs: &[(ITEM_CHISELED_STONE_BRICKS, 8), (ITEM_IRON_INGOT, 1)], result: (ITEM_LODESTONE, 1), name: "lodestone", shaped: true, cells: &[(0, 0, ITEM_CHISELED_STONE_BRICKS), (1, 0, ITEM_CHISELED_STONE_BRICKS), (2, 0, ITEM_CHISELED_STONE_BRICKS), (0, 1, ITEM_CHISELED_STONE_BRICKS), (1, 1, ITEM_IRON_INGOT), (2, 1, ITEM_CHISELED_STONE_BRICKS), (0, 2, ITEM_CHISELED_STONE_BRICKS), (1, 2, ITEM_CHISELED_STONE_BRICKS), (2, 2, ITEM_CHISELED_STONE_BRICKS)] },
+    Recipe { needs: &[(ITEM_STRING, 2), (TAG_PLANKS, 2)], result: (ITEM_LOOM, 1), name: "loom", shaped: true, cells: &[(0, 0, ITEM_STRING), (1, 0, ITEM_STRING), (0, 1, TAG_PLANKS), (1, 1, TAG_PLANKS)] },
+    Recipe { needs: &[(ITEM_BREEZE_ROD, 1), (ITEM_HEAVY_CORE, 1)], result: (ITEM_MACE, 1), name: "mace", shaped: true, cells: &[(0, 0, ITEM_HEAVY_CORE), (0, 1, ITEM_BREEZE_ROD)] },
+    Recipe { needs: &[(ITEM_MAGENTA_WOOL, 6), (STICK, 1)], result: (ITEM_MAGENTA_BANNER, 1), name: "magenta_banner", shaped: true, cells: &[(0, 0, ITEM_MAGENTA_WOOL), (1, 0, ITEM_MAGENTA_WOOL), (2, 0, ITEM_MAGENTA_WOOL), (0, 1, ITEM_MAGENTA_WOOL), (1, 1, ITEM_MAGENTA_WOOL), (2, 1, ITEM_MAGENTA_WOOL), (1, 2, STICK)] },
+    Recipe { needs: &[(ITEM_MAGENTA_WOOL, 3), (TAG_PLANKS, 3)], result: (ITEM_MAGENTA_BED, 1), name: "magenta_bed", shaped: true, cells: &[(0, 0, ITEM_MAGENTA_WOOL), (1, 0, ITEM_MAGENTA_WOOL), (2, 0, ITEM_MAGENTA_WOOL), (0, 1, TAG_PLANKS), (1, 1, TAG_PLANKS), (2, 1, TAG_PLANKS)] },
+    Recipe { needs: &[(ITEM_CANDLE, 1), (ITEM_MAGENTA_DYE, 1)], result: (ITEM_MAGENTA_CANDLE, 1), name: "magenta_candle", shaped: false, cells: &[] },
+    Recipe { needs: &[(ITEM_MAGENTA_WOOL, 2)], result: (ITEM_MAGENTA_CARPET, 3), name: "magenta_carpet", shaped: true, cells: &[(0, 0, ITEM_MAGENTA_WOOL), (1, 0, ITEM_MAGENTA_WOOL)] },
+    Recipe { needs: &[(ITEM_GRAVEL, 1), (ITEM_GRAVEL, 1), (ITEM_GRAVEL, 1), (ITEM_GRAVEL, 1), (ITEM_MAGENTA_DYE, 1), (ITEM_SAND, 1), (ITEM_SAND, 1), (ITEM_SAND, 1), (ITEM_SAND, 1)], result: (ITEM_MAGENTA_CONCRETE_POWDER, 8), name: "magenta_concrete_powder", shaped: false, cells: &[] },
+    Recipe { needs: &[(ITEM_MAGENTA_CONCRETE, 3)], result: (ITEM_MAGENTA_CONCRETE_SLAB, 6), name: "magenta_concrete_slab", shaped: true, cells: &[(0, 0, ITEM_MAGENTA_CONCRETE), (1, 0, ITEM_MAGENTA_CONCRETE), (2, 0, ITEM_MAGENTA_CONCRETE)] },
+    Recipe { needs: &[(ITEM_MAGENTA_CONCRETE, 6)], result: (ITEM_MAGENTA_CONCRETE_STAIRS, 4), name: "magenta_concrete_stairs", shaped: true, cells: &[(0, 0, ITEM_MAGENTA_CONCRETE), (0, 1, ITEM_MAGENTA_CONCRETE), (1, 1, ITEM_MAGENTA_CONCRETE), (0, 2, ITEM_MAGENTA_CONCRETE), (1, 2, ITEM_MAGENTA_CONCRETE), (2, 2, ITEM_MAGENTA_CONCRETE)] },
+    Recipe { needs: &[(ITEM_MAGENTA_WOOL_SLAB, 3)], result: (ITEM_MAGENTA_CUSHION, 1), name: "magenta_cushion", shaped: true, cells: &[(0, 0, ITEM_MAGENTA_WOOL_SLAB), (1, 0, ITEM_MAGENTA_WOOL_SLAB), (2, 0, ITEM_MAGENTA_WOOL_SLAB)] },
+    Recipe { needs: &[(ITEM_ALLIUM, 1)], result: (ITEM_MAGENTA_DYE, 1), name: "magenta_dye_from_allium", shaped: false, cells: &[] },
+    Recipe { needs: &[(ITEM_BLUE_DYE, 1), (ITEM_PINK_DYE, 1), (ITEM_RED_DYE, 1)], result: (ITEM_MAGENTA_DYE, 3), name: "magenta_dye_from_blue_red_pink", shaped: false, cells: &[] },
+    Recipe { needs: &[(ITEM_BLUE_DYE, 1), (ITEM_RED_DYE, 1), (ITEM_RED_DYE, 1), (ITEM_WHITE_DYE, 1)], result: (ITEM_MAGENTA_DYE, 4), name: "magenta_dye_from_blue_red_white_dye", shaped: false, cells: &[] },
+    Recipe { needs: &[(ITEM_LILAC, 1)], result: (ITEM_MAGENTA_DYE, 2), name: "magenta_dye_from_lilac", shaped: false, cells: &[] },
+    Recipe { needs: &[(ITEM_PINK_DYE, 1), (ITEM_PURPLE_DYE, 1)], result: (ITEM_MAGENTA_DYE, 2), name: "magenta_dye_from_purple_and_pink", shaped: false, cells: &[] },
+    Recipe { needs: &[(ITEM_GLASS, 2), (ITEM_LEATHER, 3), (ITEM_MAGENTA_WOOL, 1)], result: (ITEM_MAGENTA_HARNESS, 1), name: "magenta_harness", shaped: true, cells: &[(0, 0, ITEM_LEATHER), (1, 0, ITEM_LEATHER), (2, 0, ITEM_LEATHER), (0, 1, ITEM_GLASS), (1, 1, ITEM_MAGENTA_WOOL), (2, 1, ITEM_GLASS)] },
+    Recipe { needs: &[(ITEM_GLASS, 8), (ITEM_MAGENTA_DYE, 1)], result: (ITEM_MAGENTA_STAINED_GLASS, 8), name: "magenta_stained_glass", shaped: true, cells: &[(0, 0, ITEM_GLASS), (1, 0, ITEM_GLASS), (2, 0, ITEM_GLASS), (0, 1, ITEM_GLASS), (1, 1, ITEM_MAGENTA_DYE), (2, 1, ITEM_GLASS), (0, 2, ITEM_GLASS), (1, 2, ITEM_GLASS), (2, 2, ITEM_GLASS)] },
+    Recipe { needs: &[(ITEM_MAGENTA_STAINED_GLASS, 6)], result: (ITEM_MAGENTA_STAINED_GLASS_PANE, 16), name: "magenta_stained_glass_pane", shaped: true, cells: &[(0, 0, ITEM_MAGENTA_STAINED_GLASS), (1, 0, ITEM_MAGENTA_STAINED_GLASS), (2, 0, ITEM_MAGENTA_STAINED_GLASS), (0, 1, ITEM_MAGENTA_STAINED_GLASS), (1, 1, ITEM_MAGENTA_STAINED_GLASS), (2, 1, ITEM_MAGENTA_STAINED_GLASS)] },
+    Recipe { needs: &[(ITEM_GLASS_PANE, 8), (ITEM_MAGENTA_DYE, 1)], result: (ITEM_MAGENTA_STAINED_GLASS_PANE, 8), name: "magenta_stained_glass_pane_from_glass_pane", shaped: true, cells: &[(0, 0, ITEM_GLASS_PANE), (1, 0, ITEM_GLASS_PANE), (2, 0, ITEM_GLASS_PANE), (0, 1, ITEM_GLASS_PANE), (1, 1, ITEM_MAGENTA_DYE), (2, 1, ITEM_GLASS_PANE), (0, 2, ITEM_GLASS_PANE), (1, 2, ITEM_GLASS_PANE), (2, 2, ITEM_GLASS_PANE)] },
+    Recipe { needs: &[(ITEM_MAGENTA_DYE, 1), (ITEM_TERRACOTTA, 8)], result: (ITEM_MAGENTA_TERRACOTTA, 8), name: "magenta_terracotta", shaped: true, cells: &[(0, 0, ITEM_TERRACOTTA), (1, 0, ITEM_TERRACOTTA), (2, 0, ITEM_TERRACOTTA), (0, 1, ITEM_TERRACOTTA), (1, 1, ITEM_MAGENTA_DYE), (2, 1, ITEM_TERRACOTTA), (0, 2, ITEM_TERRACOTTA), (1, 2, ITEM_TERRACOTTA), (2, 2, ITEM_TERRACOTTA)] },
+    Recipe { needs: &[(ITEM_MAGENTA_WOOL, 3)], result: (ITEM_MAGENTA_WOOL_SLAB, 6), name: "magenta_wool_slab", shaped: true, cells: &[(0, 0, ITEM_MAGENTA_WOOL), (1, 0, ITEM_MAGENTA_WOOL), (2, 0, ITEM_MAGENTA_WOOL)] },
+    Recipe { needs: &[(ITEM_MAGENTA_WOOL, 6)], result: (ITEM_MAGENTA_WOOL_STAIRS, 4), name: "magenta_wool_stairs", shaped: true, cells: &[(0, 0, ITEM_MAGENTA_WOOL), (0, 1, ITEM_MAGENTA_WOOL), (1, 1, ITEM_MAGENTA_WOOL), (0, 2, ITEM_MAGENTA_WOOL), (1, 2, ITEM_MAGENTA_WOOL), (2, 2, ITEM_MAGENTA_WOOL)] },
+    Recipe { needs: &[(ITEM_MAGMA_CREAM, 4)], result: (ITEM_MAGMA_BLOCK, 1), name: "magma_block", shaped: true, cells: &[(0, 0, ITEM_MAGMA_CREAM), (1, 0, ITEM_MAGMA_CREAM), (0, 1, ITEM_MAGMA_CREAM), (1, 1, ITEM_MAGMA_CREAM)] },
+    Recipe { needs: &[(ITEM_BLAZE_POWDER, 1), (ITEM_SLIME_BALL, 1)], result: (ITEM_MAGMA_CREAM, 1), name: "magma_cream", shaped: false, cells: &[] },
+    Recipe { needs: &[(ITEM_MANGROVE_PLANKS, 5)], result: (ITEM_MANGROVE_BOAT, 1), name: "mangrove_boat", shaped: true, cells: &[(0, 0, ITEM_MANGROVE_PLANKS), (2, 0, ITEM_MANGROVE_PLANKS), (0, 1, ITEM_MANGROVE_PLANKS), (1, 1, ITEM_MANGROVE_PLANKS), (2, 1, ITEM_MANGROVE_PLANKS)] },
+    Recipe { needs: &[(ITEM_MANGROVE_PLANKS, 1)], result: (ITEM_MANGROVE_BUTTON, 1), name: "mangrove_button", shaped: false, cells: &[] },
+    Recipe { needs: &[(ITEM_CHEST, 1), (ITEM_MANGROVE_BOAT, 1)], result: (ITEM_MANGROVE_CHEST_BOAT, 1), name: "mangrove_chest_boat", shaped: false, cells: &[] },
+    Recipe { needs: &[(ITEM_MANGROVE_PLANKS, 6)], result: (ITEM_MANGROVE_DOOR, 3), name: "mangrove_door", shaped: true, cells: &[(0, 0, ITEM_MANGROVE_PLANKS), (1, 0, ITEM_MANGROVE_PLANKS), (0, 1, ITEM_MANGROVE_PLANKS), (1, 1, ITEM_MANGROVE_PLANKS), (0, 2, ITEM_MANGROVE_PLANKS), (1, 2, ITEM_MANGROVE_PLANKS)] },
+    Recipe { needs: &[(ITEM_MANGROVE_PLANKS, 4), (STICK, 2)], result: (ITEM_MANGROVE_FENCE, 3), name: "mangrove_fence", shaped: true, cells: &[(0, 0, ITEM_MANGROVE_PLANKS), (1, 0, STICK), (2, 0, ITEM_MANGROVE_PLANKS), (0, 1, ITEM_MANGROVE_PLANKS), (1, 1, STICK), (2, 1, ITEM_MANGROVE_PLANKS)] },
+    Recipe { needs: &[(ITEM_MANGROVE_PLANKS, 2), (STICK, 4)], result: (ITEM_MANGROVE_FENCE_GATE, 1), name: "mangrove_fence_gate", shaped: true, cells: &[(0, 0, STICK), (1, 0, ITEM_MANGROVE_PLANKS), (2, 0, STICK), (0, 1, STICK), (1, 1, ITEM_MANGROVE_PLANKS), (2, 1, STICK)] },
+    Recipe { needs: &[(ITEM_IRON_CHAIN, 2), (ITEM_STRIPPED_MANGROVE_LOG, 6)], result: (ITEM_MANGROVE_HANGING_SIGN, 6), name: "mangrove_hanging_sign", shaped: true, cells: &[(0, 0, ITEM_IRON_CHAIN), (2, 0, ITEM_IRON_CHAIN), (0, 1, ITEM_STRIPPED_MANGROVE_LOG), (1, 1, ITEM_STRIPPED_MANGROVE_LOG), (2, 1, ITEM_STRIPPED_MANGROVE_LOG), (0, 2, ITEM_STRIPPED_MANGROVE_LOG), (1, 2, ITEM_STRIPPED_MANGROVE_LOG), (2, 2, ITEM_STRIPPED_MANGROVE_LOG)] },
+    Recipe { needs: &[(TAG_MANGROVE_LOGS, 1)], result: (ITEM_MANGROVE_PLANKS, 4), name: "mangrove_planks", shaped: false, cells: &[] },
+    Recipe { needs: &[(ITEM_MANGROVE_PLANKS, 2)], result: (ITEM_MANGROVE_PRESSURE_PLATE, 1), name: "mangrove_pressure_plate", shaped: true, cells: &[(0, 0, ITEM_MANGROVE_PLANKS), (1, 0, ITEM_MANGROVE_PLANKS)] },
+    Recipe { needs: &[(ITEM_STRIPPED_MANGROVE_LOG, 6)], result: (ITEM_MANGROVE_SHELF, 6), name: "mangrove_shelf", shaped: true, cells: &[(0, 0, ITEM_STRIPPED_MANGROVE_LOG), (1, 0, ITEM_STRIPPED_MANGROVE_LOG), (2, 0, ITEM_STRIPPED_MANGROVE_LOG), (0, 2, ITEM_STRIPPED_MANGROVE_LOG), (1, 2, ITEM_STRIPPED_MANGROVE_LOG), (2, 2, ITEM_STRIPPED_MANGROVE_LOG)] },
+    Recipe { needs: &[(ITEM_MANGROVE_PLANKS, 6), (STICK, 1)], result: (ITEM_MANGROVE_SIGN, 3), name: "mangrove_sign", shaped: true, cells: &[(0, 0, ITEM_MANGROVE_PLANKS), (1, 0, ITEM_MANGROVE_PLANKS), (2, 0, ITEM_MANGROVE_PLANKS), (0, 1, ITEM_MANGROVE_PLANKS), (1, 1, ITEM_MANGROVE_PLANKS), (2, 1, ITEM_MANGROVE_PLANKS), (1, 2, STICK)] },
+    Recipe { needs: &[(ITEM_MANGROVE_PLANKS, 3)], result: (ITEM_MANGROVE_SLAB, 6), name: "mangrove_slab", shaped: true, cells: &[(0, 0, ITEM_MANGROVE_PLANKS), (1, 0, ITEM_MANGROVE_PLANKS), (2, 0, ITEM_MANGROVE_PLANKS)] },
+    Recipe { needs: &[(ITEM_MANGROVE_PLANKS, 6)], result: (ITEM_MANGROVE_STAIRS, 4), name: "mangrove_stairs", shaped: true, cells: &[(0, 0, ITEM_MANGROVE_PLANKS), (0, 1, ITEM_MANGROVE_PLANKS), (1, 1, ITEM_MANGROVE_PLANKS), (0, 2, ITEM_MANGROVE_PLANKS), (1, 2, ITEM_MANGROVE_PLANKS), (2, 2, ITEM_MANGROVE_PLANKS)] },
+    Recipe { needs: &[(ITEM_MANGROVE_PLANKS, 6)], result: (ITEM_MANGROVE_TRAPDOOR, 2), name: "mangrove_trapdoor", shaped: true, cells: &[(0, 0, ITEM_MANGROVE_PLANKS), (1, 0, ITEM_MANGROVE_PLANKS), (2, 0, ITEM_MANGROVE_PLANKS), (0, 1, ITEM_MANGROVE_PLANKS), (1, 1, ITEM_MANGROVE_PLANKS), (2, 1, ITEM_MANGROVE_PLANKS)] },
+    Recipe { needs: &[(ITEM_MANGROVE_LOG, 4)], result: (ITEM_MANGROVE_WOOD, 3), name: "mangrove_wood", shaped: true, cells: &[(0, 0, ITEM_MANGROVE_LOG), (1, 0, ITEM_MANGROVE_LOG), (0, 1, ITEM_MANGROVE_LOG), (1, 1, ITEM_MANGROVE_LOG)] },
+    Recipe { needs: &[(ITEM_COMPASS, 1), (ITEM_PAPER, 8)], result: (ITEM_MAP, 1), name: "map", shaped: true, cells: &[(0, 0, ITEM_PAPER), (1, 0, ITEM_PAPER), (2, 0, ITEM_PAPER), (0, 1, ITEM_PAPER), (1, 1, ITEM_COMPASS), (2, 1, ITEM_PAPER), (0, 2, ITEM_PAPER), (1, 2, ITEM_PAPER), (2, 2, ITEM_PAPER)] },
+    Recipe { needs: &[(ITEM_MELON_SLICE, 1), (ITEM_MELON_SLICE, 1), (ITEM_MELON_SLICE, 1), (ITEM_MELON_SLICE, 1), (ITEM_MELON_SLICE, 1), (ITEM_MELON_SLICE, 1), (ITEM_MELON_SLICE, 1), (ITEM_MELON_SLICE, 1), (ITEM_MELON_SLICE, 1)], result: (ITEM_MELON, 1), name: "melon", shaped: false, cells: &[] },
+    Recipe { needs: &[(ITEM_MELON_SLICE, 1)], result: (ITEM_MELON_SEEDS, 1), name: "melon_seeds", shaped: false, cells: &[] },
+    Recipe { needs: &[(ITEM_IRON_INGOT, 5)], result: (ITEM_MINECART, 1), name: "minecart", shaped: true, cells: &[(0, 0, ITEM_IRON_INGOT), (2, 0, ITEM_IRON_INGOT), (0, 1, ITEM_IRON_INGOT), (1, 1, ITEM_IRON_INGOT), (2, 1, ITEM_IRON_INGOT)] },
+    Recipe { needs: &[(ITEM_ENCHANTED_GOLDEN_APPLE, 1), (ITEM_PAPER, 1)], result: (ITEM_MOJANG_BANNER_PATTERN, 1), name: "mojang_banner_pattern", shaped: false, cells: &[] },
+    Recipe { needs: &[(ITEM_MOSS_BLOCK, 2)], result: (ITEM_MOSS_CARPET, 3), name: "moss_carpet", shaped: true, cells: &[(0, 0, ITEM_MOSS_BLOCK), (1, 0, ITEM_MOSS_BLOCK)] },
+    Recipe { needs: &[(COBBLESTONE, 1), (ITEM_MOSS_BLOCK, 1)], result: (ITEM_MOSSY_COBBLESTONE, 1), name: "mossy_cobblestone_from_moss_block", shaped: false, cells: &[] },
+    Recipe { needs: &[(COBBLESTONE, 1), (ITEM_VINE, 1)], result: (ITEM_MOSSY_COBBLESTONE, 1), name: "mossy_cobblestone_from_vine", shaped: false, cells: &[] },
+    Recipe { needs: &[(ITEM_MOSSY_COBBLESTONE, 3)], result: (ITEM_MOSSY_COBBLESTONE_SLAB, 6), name: "mossy_cobblestone_slab", shaped: true, cells: &[(0, 0, ITEM_MOSSY_COBBLESTONE), (1, 0, ITEM_MOSSY_COBBLESTONE), (2, 0, ITEM_MOSSY_COBBLESTONE)] },
+    Recipe { needs: &[(ITEM_MOSSY_COBBLESTONE, 6)], result: (ITEM_MOSSY_COBBLESTONE_STAIRS, 4), name: "mossy_cobblestone_stairs", shaped: true, cells: &[(0, 0, ITEM_MOSSY_COBBLESTONE), (0, 1, ITEM_MOSSY_COBBLESTONE), (1, 1, ITEM_MOSSY_COBBLESTONE), (0, 2, ITEM_MOSSY_COBBLESTONE), (1, 2, ITEM_MOSSY_COBBLESTONE), (2, 2, ITEM_MOSSY_COBBLESTONE)] },
+    Recipe { needs: &[(ITEM_MOSSY_COBBLESTONE, 6)], result: (ITEM_MOSSY_COBBLESTONE_WALL, 6), name: "mossy_cobblestone_wall", shaped: true, cells: &[(0, 0, ITEM_MOSSY_COBBLESTONE), (1, 0, ITEM_MOSSY_COBBLESTONE), (2, 0, ITEM_MOSSY_COBBLESTONE), (0, 1, ITEM_MOSSY_COBBLESTONE), (1, 1, ITEM_MOSSY_COBBLESTONE), (2, 1, ITEM_MOSSY_COBBLESTONE)] },
+    Recipe { needs: &[(ITEM_MOSSY_STONE_BRICKS, 3)], result: (ITEM_MOSSY_STONE_BRICK_SLAB, 6), name: "mossy_stone_brick_slab", shaped: true, cells: &[(0, 0, ITEM_MOSSY_STONE_BRICKS), (1, 0, ITEM_MOSSY_STONE_BRICKS), (2, 0, ITEM_MOSSY_STONE_BRICKS)] },
+    Recipe { needs: &[(ITEM_MOSSY_STONE_BRICKS, 6)], result: (ITEM_MOSSY_STONE_BRICK_STAIRS, 4), name: "mossy_stone_brick_stairs", shaped: true, cells: &[(0, 0, ITEM_MOSSY_STONE_BRICKS), (0, 1, ITEM_MOSSY_STONE_BRICKS), (1, 1, ITEM_MOSSY_STONE_BRICKS), (0, 2, ITEM_MOSSY_STONE_BRICKS), (1, 2, ITEM_MOSSY_STONE_BRICKS), (2, 2, ITEM_MOSSY_STONE_BRICKS)] },
+    Recipe { needs: &[(ITEM_MOSSY_STONE_BRICKS, 6)], result: (ITEM_MOSSY_STONE_BRICK_WALL, 6), name: "mossy_stone_brick_wall", shaped: true, cells: &[(0, 0, ITEM_MOSSY_STONE_BRICKS), (1, 0, ITEM_MOSSY_STONE_BRICKS), (2, 0, ITEM_MOSSY_STONE_BRICKS), (0, 1, ITEM_MOSSY_STONE_BRICKS), (1, 1, ITEM_MOSSY_STONE_BRICKS), (2, 1, ITEM_MOSSY_STONE_BRICKS)] },
+    Recipe { needs: &[(ITEM_MOSS_BLOCK, 1), (ITEM_STONE_BRICKS, 1)], result: (ITEM_MOSSY_STONE_BRICKS, 1), name: "mossy_stone_bricks_from_moss_block", shaped: false, cells: &[] },
+    Recipe { needs: &[(ITEM_STONE_BRICKS, 1), (ITEM_VINE, 1)], result: (ITEM_MOSSY_STONE_BRICKS, 1), name: "mossy_stone_bricks_from_vine", shaped: false, cells: &[] },
+    Recipe { needs: &[(ITEM_MUD_BRICKS, 3)], result: (ITEM_MUD_BRICK_SLAB, 6), name: "mud_brick_slab", shaped: true, cells: &[(0, 0, ITEM_MUD_BRICKS), (1, 0, ITEM_MUD_BRICKS), (2, 0, ITEM_MUD_BRICKS)] },
+    Recipe { needs: &[(ITEM_MUD_BRICKS, 6)], result: (ITEM_MUD_BRICK_STAIRS, 4), name: "mud_brick_stairs", shaped: true, cells: &[(0, 0, ITEM_MUD_BRICKS), (0, 1, ITEM_MUD_BRICKS), (1, 1, ITEM_MUD_BRICKS), (0, 2, ITEM_MUD_BRICKS), (1, 2, ITEM_MUD_BRICKS), (2, 2, ITEM_MUD_BRICKS)] },
+    Recipe { needs: &[(ITEM_MUD_BRICKS, 6)], result: (ITEM_MUD_BRICK_WALL, 6), name: "mud_brick_wall", shaped: true, cells: &[(0, 0, ITEM_MUD_BRICKS), (1, 0, ITEM_MUD_BRICKS), (2, 0, ITEM_MUD_BRICKS), (0, 1, ITEM_MUD_BRICKS), (1, 1, ITEM_MUD_BRICKS), (2, 1, ITEM_MUD_BRICKS)] },
+    Recipe { needs: &[(ITEM_PACKED_MUD, 4)], result: (ITEM_MUD_BRICKS, 4), name: "mud_bricks", shaped: true, cells: &[(0, 0, ITEM_PACKED_MUD), (1, 0, ITEM_PACKED_MUD), (0, 1, ITEM_PACKED_MUD), (1, 1, ITEM_PACKED_MUD)] },
+    Recipe { needs: &[(ITEM_MANGROVE_ROOTS, 1), (ITEM_MUD, 1)], result: (ITEM_MUDDY_MANGROVE_ROOTS, 1), name: "muddy_mangrove_roots", shaped: false, cells: &[] },
+    Recipe { needs: &[(ITEM_BOWL, 1), (TAG_MUSHROOMS, 1), (TAG_MUSHROOMS, 1)], result: (ITEM_MUSHROOM_STEW, 1), name: "mushroom_stew", shaped: false, cells: &[] },
+    Recipe { needs: &[(ITEM_DISC_FRAGMENT_5, 1), (ITEM_DISC_FRAGMENT_5, 1), (ITEM_DISC_FRAGMENT_5, 1), (ITEM_DISC_FRAGMENT_5, 1), (ITEM_DISC_FRAGMENT_5, 1), (ITEM_DISC_FRAGMENT_5, 1), (ITEM_DISC_FRAGMENT_5, 1), (ITEM_DISC_FRAGMENT_5, 1), (ITEM_DISC_FRAGMENT_5, 1)], result: (ITEM_MUSIC_DISC_5, 1), name: "music_disc_5", shaped: false, cells: &[] },
+    Recipe { needs: &[(ITEM_PAPER, 1), (TAG_METAL_NUGGETS, 1)], result: (ITEM_NAME_TAG, 1), name: "name_tag", shaped: true, cells: &[(1, 0, TAG_METAL_NUGGETS), (0, 1, ITEM_PAPER)] },
+    Recipe { needs: &[(ITEM_NETHER_BRICK, 2), (ITEM_NETHER_BRICKS, 4)], result: (ITEM_NETHER_BRICK_FENCE, 6), name: "nether_brick_fence", shaped: true, cells: &[(0, 0, ITEM_NETHER_BRICKS), (1, 0, ITEM_NETHER_BRICK), (2, 0, ITEM_NETHER_BRICKS), (0, 1, ITEM_NETHER_BRICKS), (1, 1, ITEM_NETHER_BRICK), (2, 1, ITEM_NETHER_BRICKS)] },
+    Recipe { needs: &[(ITEM_NETHER_BRICKS, 3)], result: (ITEM_NETHER_BRICK_SLAB, 6), name: "nether_brick_slab", shaped: true, cells: &[(0, 0, ITEM_NETHER_BRICKS), (1, 0, ITEM_NETHER_BRICKS), (2, 0, ITEM_NETHER_BRICKS)] },
+    Recipe { needs: &[(ITEM_NETHER_BRICKS, 6)], result: (ITEM_NETHER_BRICK_STAIRS, 4), name: "nether_brick_stairs", shaped: true, cells: &[(0, 0, ITEM_NETHER_BRICKS), (0, 1, ITEM_NETHER_BRICKS), (1, 1, ITEM_NETHER_BRICKS), (0, 2, ITEM_NETHER_BRICKS), (1, 2, ITEM_NETHER_BRICKS), (2, 2, ITEM_NETHER_BRICKS)] },
+    Recipe { needs: &[(ITEM_NETHER_BRICKS, 6)], result: (ITEM_NETHER_BRICK_WALL, 6), name: "nether_brick_wall", shaped: true, cells: &[(0, 0, ITEM_NETHER_BRICKS), (1, 0, ITEM_NETHER_BRICKS), (2, 0, ITEM_NETHER_BRICKS), (0, 1, ITEM_NETHER_BRICKS), (1, 1, ITEM_NETHER_BRICKS), (2, 1, ITEM_NETHER_BRICKS)] },
+    Recipe { needs: &[(ITEM_NETHER_BRICK, 4)], result: (ITEM_NETHER_BRICKS, 1), name: "nether_bricks", shaped: true, cells: &[(0, 0, ITEM_NETHER_BRICK), (1, 0, ITEM_NETHER_BRICK), (0, 1, ITEM_NETHER_BRICK), (1, 1, ITEM_NETHER_BRICK)] },
+    Recipe { needs: &[(ITEM_NETHER_WART, 1), (ITEM_NETHER_WART, 1), (ITEM_NETHER_WART, 1), (ITEM_NETHER_WART, 1), (ITEM_NETHER_WART, 1), (ITEM_NETHER_WART, 1), (ITEM_NETHER_WART, 1), (ITEM_NETHER_WART, 1), (ITEM_NETHER_WART, 1)], result: (ITEM_NETHER_WART_BLOCK, 1), name: "nether_wart_block", shaped: false, cells: &[] },
+    Recipe { needs: &[(ITEM_NETHERITE_INGOT, 9)], result: (ITEM_NETHERITE_BLOCK, 1), name: "netherite_block", shaped: true, cells: &[(0, 0, ITEM_NETHERITE_INGOT), (1, 0, ITEM_NETHERITE_INGOT), (2, 0, ITEM_NETHERITE_INGOT), (0, 1, ITEM_NETHERITE_INGOT), (1, 1, ITEM_NETHERITE_INGOT), (2, 1, ITEM_NETHERITE_INGOT), (0, 2, ITEM_NETHERITE_INGOT), (1, 2, ITEM_NETHERITE_INGOT), (2, 2, ITEM_NETHERITE_INGOT)] },
+    Recipe { needs: &[(ITEM_GOLD_INGOT, 1), (ITEM_GOLD_INGOT, 1), (ITEM_GOLD_INGOT, 1), (ITEM_GOLD_INGOT, 1), (ITEM_NETHERITE_SCRAP, 1), (ITEM_NETHERITE_SCRAP, 1), (ITEM_NETHERITE_SCRAP, 1), (ITEM_NETHERITE_SCRAP, 1)], result: (ITEM_NETHERITE_INGOT, 1), name: "netherite_ingot", shaped: false, cells: &[] },
+    Recipe { needs: &[(ITEM_NETHERITE_BLOCK, 1)], result: (ITEM_NETHERITE_INGOT, 9), name: "netherite_ingot_from_netherite_block", shaped: false, cells: &[] },
+    Recipe { needs: &[(ITEM_DIAMOND, 7), (ITEM_NETHERITE_UPGRADE_SMITHING_TEMPLATE, 1), (ITEM_NETHERRACK, 1)], result: (ITEM_NETHERITE_UPGRADE_SMITHING_TEMPLATE, 2), name: "netherite_upgrade_smithing_template", shaped: true, cells: &[(0, 0, ITEM_DIAMOND), (1, 0, ITEM_NETHERITE_UPGRADE_SMITHING_TEMPLATE), (2, 0, ITEM_DIAMOND), (0, 1, ITEM_DIAMOND), (1, 1, ITEM_NETHERRACK), (2, 1, ITEM_DIAMOND), (0, 2, ITEM_DIAMOND), (1, 2, ITEM_DIAMOND), (2, 2, ITEM_DIAMOND)] },
+    Recipe { needs: &[(ITEM_REDSTONE, 1), (TAG_PLANKS, 8)], result: (ITEM_NOTE_BLOCK, 1), name: "note_block", shaped: true, cells: &[(0, 0, TAG_PLANKS), (1, 0, TAG_PLANKS), (2, 0, TAG_PLANKS), (0, 1, TAG_PLANKS), (1, 1, ITEM_REDSTONE), (2, 1, TAG_PLANKS), (0, 2, TAG_PLANKS), (1, 2, TAG_PLANKS), (2, 2, TAG_PLANKS)] },
+    Recipe { needs: &[(OAK_PLANKS, 5)], result: (ITEM_OAK_BOAT, 1), name: "oak_boat", shaped: true, cells: &[(0, 0, OAK_PLANKS), (2, 0, OAK_PLANKS), (0, 1, OAK_PLANKS), (1, 1, OAK_PLANKS), (2, 1, OAK_PLANKS)] },
+    Recipe { needs: &[(OAK_PLANKS, 1)], result: (ITEM_OAK_BUTTON, 1), name: "oak_button", shaped: false, cells: &[] },
+    Recipe { needs: &[(ITEM_CHEST, 1), (ITEM_OAK_BOAT, 1)], result: (ITEM_OAK_CHEST_BOAT, 1), name: "oak_chest_boat", shaped: false, cells: &[] },
+    Recipe { needs: &[(OAK_PLANKS, 6)], result: (ITEM_OAK_DOOR, 3), name: "oak_door", shaped: true, cells: &[(0, 0, OAK_PLANKS), (1, 0, OAK_PLANKS), (0, 1, OAK_PLANKS), (1, 1, OAK_PLANKS), (0, 2, OAK_PLANKS), (1, 2, OAK_PLANKS)] },
+    Recipe { needs: &[(OAK_PLANKS, 4), (STICK, 2)], result: (ITEM_OAK_FENCE, 3), name: "oak_fence", shaped: true, cells: &[(0, 0, OAK_PLANKS), (1, 0, STICK), (2, 0, OAK_PLANKS), (0, 1, OAK_PLANKS), (1, 1, STICK), (2, 1, OAK_PLANKS)] },
+    Recipe { needs: &[(OAK_PLANKS, 2), (STICK, 4)], result: (ITEM_OAK_FENCE_GATE, 1), name: "oak_fence_gate", shaped: true, cells: &[(0, 0, STICK), (1, 0, OAK_PLANKS), (2, 0, STICK), (0, 1, STICK), (1, 1, OAK_PLANKS), (2, 1, STICK)] },
+    Recipe { needs: &[(ITEM_IRON_CHAIN, 2), (ITEM_STRIPPED_OAK_LOG, 6)], result: (ITEM_OAK_HANGING_SIGN, 6), name: "oak_hanging_sign", shaped: true, cells: &[(0, 0, ITEM_IRON_CHAIN), (2, 0, ITEM_IRON_CHAIN), (0, 1, ITEM_STRIPPED_OAK_LOG), (1, 1, ITEM_STRIPPED_OAK_LOG), (2, 1, ITEM_STRIPPED_OAK_LOG), (0, 2, ITEM_STRIPPED_OAK_LOG), (1, 2, ITEM_STRIPPED_OAK_LOG), (2, 2, ITEM_STRIPPED_OAK_LOG)] },
+    Recipe { needs: &[(TAG_OAK_LOGS, 1)], result: (OAK_PLANKS, 4), name: "oak_planks", shaped: false, cells: &[] },
+    Recipe { needs: &[(OAK_PLANKS, 2)], result: (ITEM_OAK_PRESSURE_PLATE, 1), name: "oak_pressure_plate", shaped: true, cells: &[(0, 0, OAK_PLANKS), (1, 0, OAK_PLANKS)] },
+    Recipe { needs: &[(ITEM_STRIPPED_OAK_LOG, 6)], result: (ITEM_OAK_SHELF, 6), name: "oak_shelf", shaped: true, cells: &[(0, 0, ITEM_STRIPPED_OAK_LOG), (1, 0, ITEM_STRIPPED_OAK_LOG), (2, 0, ITEM_STRIPPED_OAK_LOG), (0, 2, ITEM_STRIPPED_OAK_LOG), (1, 2, ITEM_STRIPPED_OAK_LOG), (2, 2, ITEM_STRIPPED_OAK_LOG)] },
+    Recipe { needs: &[(OAK_PLANKS, 6), (STICK, 1)], result: (ITEM_OAK_SIGN, 3), name: "oak_sign", shaped: true, cells: &[(0, 0, OAK_PLANKS), (1, 0, OAK_PLANKS), (2, 0, OAK_PLANKS), (0, 1, OAK_PLANKS), (1, 1, OAK_PLANKS), (2, 1, OAK_PLANKS), (1, 2, STICK)] },
+    Recipe { needs: &[(OAK_PLANKS, 3)], result: (ITEM_OAK_SLAB, 6), name: "oak_slab", shaped: true, cells: &[(0, 0, OAK_PLANKS), (1, 0, OAK_PLANKS), (2, 0, OAK_PLANKS)] },
+    Recipe { needs: &[(OAK_PLANKS, 6)], result: (ITEM_OAK_STAIRS, 4), name: "oak_stairs", shaped: true, cells: &[(0, 0, OAK_PLANKS), (0, 1, OAK_PLANKS), (1, 1, OAK_PLANKS), (0, 2, OAK_PLANKS), (1, 2, OAK_PLANKS), (2, 2, OAK_PLANKS)] },
+    Recipe { needs: &[(OAK_PLANKS, 6)], result: (ITEM_OAK_TRAPDOOR, 2), name: "oak_trapdoor", shaped: true, cells: &[(0, 0, OAK_PLANKS), (1, 0, OAK_PLANKS), (2, 0, OAK_PLANKS), (0, 1, OAK_PLANKS), (1, 1, OAK_PLANKS), (2, 1, OAK_PLANKS)] },
+    Recipe { needs: &[(OAK_LOG, 4)], result: (ITEM_OAK_WOOD, 3), name: "oak_wood", shaped: true, cells: &[(0, 0, OAK_LOG), (1, 0, OAK_LOG), (0, 1, OAK_LOG), (1, 1, OAK_LOG)] },
+    Recipe { needs: &[(COBBLESTONE, 6), (ITEM_QUARTZ, 1), (ITEM_REDSTONE, 2)], result: (ITEM_OBSERVER, 1), name: "observer", shaped: true, cells: &[(0, 0, COBBLESTONE), (1, 0, COBBLESTONE), (2, 0, COBBLESTONE), (0, 1, ITEM_REDSTONE), (1, 1, ITEM_REDSTONE), (2, 1, ITEM_QUARTZ), (0, 2, COBBLESTONE), (1, 2, COBBLESTONE), (2, 2, COBBLESTONE)] },
+    Recipe { needs: &[(ITEM_ORANGE_WOOL, 6), (STICK, 1)], result: (ITEM_ORANGE_BANNER, 1), name: "orange_banner", shaped: true, cells: &[(0, 0, ITEM_ORANGE_WOOL), (1, 0, ITEM_ORANGE_WOOL), (2, 0, ITEM_ORANGE_WOOL), (0, 1, ITEM_ORANGE_WOOL), (1, 1, ITEM_ORANGE_WOOL), (2, 1, ITEM_ORANGE_WOOL), (1, 2, STICK)] },
+    Recipe { needs: &[(ITEM_ORANGE_WOOL, 3), (TAG_PLANKS, 3)], result: (ITEM_ORANGE_BED, 1), name: "orange_bed", shaped: true, cells: &[(0, 0, ITEM_ORANGE_WOOL), (1, 0, ITEM_ORANGE_WOOL), (2, 0, ITEM_ORANGE_WOOL), (0, 1, TAG_PLANKS), (1, 1, TAG_PLANKS), (2, 1, TAG_PLANKS)] },
+    Recipe { needs: &[(ITEM_CANDLE, 1), (ITEM_ORANGE_DYE, 1)], result: (ITEM_ORANGE_CANDLE, 1), name: "orange_candle", shaped: false, cells: &[] },
+    Recipe { needs: &[(ITEM_ORANGE_WOOL, 2)], result: (ITEM_ORANGE_CARPET, 3), name: "orange_carpet", shaped: true, cells: &[(0, 0, ITEM_ORANGE_WOOL), (1, 0, ITEM_ORANGE_WOOL)] },
+    Recipe { needs: &[(ITEM_GRAVEL, 1), (ITEM_GRAVEL, 1), (ITEM_GRAVEL, 1), (ITEM_GRAVEL, 1), (ITEM_ORANGE_DYE, 1), (ITEM_SAND, 1), (ITEM_SAND, 1), (ITEM_SAND, 1), (ITEM_SAND, 1)], result: (ITEM_ORANGE_CONCRETE_POWDER, 8), name: "orange_concrete_powder", shaped: false, cells: &[] },
+    Recipe { needs: &[(ITEM_ORANGE_CONCRETE, 3)], result: (ITEM_ORANGE_CONCRETE_SLAB, 6), name: "orange_concrete_slab", shaped: true, cells: &[(0, 0, ITEM_ORANGE_CONCRETE), (1, 0, ITEM_ORANGE_CONCRETE), (2, 0, ITEM_ORANGE_CONCRETE)] },
+    Recipe { needs: &[(ITEM_ORANGE_CONCRETE, 6)], result: (ITEM_ORANGE_CONCRETE_STAIRS, 4), name: "orange_concrete_stairs", shaped: true, cells: &[(0, 0, ITEM_ORANGE_CONCRETE), (0, 1, ITEM_ORANGE_CONCRETE), (1, 1, ITEM_ORANGE_CONCRETE), (0, 2, ITEM_ORANGE_CONCRETE), (1, 2, ITEM_ORANGE_CONCRETE), (2, 2, ITEM_ORANGE_CONCRETE)] },
+    Recipe { needs: &[(ITEM_ORANGE_WOOL_SLAB, 3)], result: (ITEM_ORANGE_CUSHION, 1), name: "orange_cushion", shaped: true, cells: &[(0, 0, ITEM_ORANGE_WOOL_SLAB), (1, 0, ITEM_ORANGE_WOOL_SLAB), (2, 0, ITEM_ORANGE_WOOL_SLAB)] },
+    Recipe { needs: &[(ITEM_OPEN_EYEBLOSSOM, 1)], result: (ITEM_ORANGE_DYE, 1), name: "orange_dye_from_open_eyeblossom", shaped: false, cells: &[] },
+    Recipe { needs: &[(ITEM_ORANGE_TULIP, 1)], result: (ITEM_ORANGE_DYE, 1), name: "orange_dye_from_orange_tulip", shaped: false, cells: &[] },
+    Recipe { needs: &[(ITEM_RED_DYE, 1), (ITEM_YELLOW_DYE, 1)], result: (ITEM_ORANGE_DYE, 2), name: "orange_dye_from_red_yellow", shaped: false, cells: &[] },
+    Recipe { needs: &[(ITEM_TORCHFLOWER, 1)], result: (ITEM_ORANGE_DYE, 1), name: "orange_dye_from_torchflower", shaped: false, cells: &[] },
+    Recipe { needs: &[(ITEM_GLASS, 2), (ITEM_LEATHER, 3), (ITEM_ORANGE_WOOL, 1)], result: (ITEM_ORANGE_HARNESS, 1), name: "orange_harness", shaped: true, cells: &[(0, 0, ITEM_LEATHER), (1, 0, ITEM_LEATHER), (2, 0, ITEM_LEATHER), (0, 1, ITEM_GLASS), (1, 1, ITEM_ORANGE_WOOL), (2, 1, ITEM_GLASS)] },
+    Recipe { needs: &[(ITEM_GLASS, 8), (ITEM_ORANGE_DYE, 1)], result: (ITEM_ORANGE_STAINED_GLASS, 8), name: "orange_stained_glass", shaped: true, cells: &[(0, 0, ITEM_GLASS), (1, 0, ITEM_GLASS), (2, 0, ITEM_GLASS), (0, 1, ITEM_GLASS), (1, 1, ITEM_ORANGE_DYE), (2, 1, ITEM_GLASS), (0, 2, ITEM_GLASS), (1, 2, ITEM_GLASS), (2, 2, ITEM_GLASS)] },
+    Recipe { needs: &[(ITEM_ORANGE_STAINED_GLASS, 6)], result: (ITEM_ORANGE_STAINED_GLASS_PANE, 16), name: "orange_stained_glass_pane", shaped: true, cells: &[(0, 0, ITEM_ORANGE_STAINED_GLASS), (1, 0, ITEM_ORANGE_STAINED_GLASS), (2, 0, ITEM_ORANGE_STAINED_GLASS), (0, 1, ITEM_ORANGE_STAINED_GLASS), (1, 1, ITEM_ORANGE_STAINED_GLASS), (2, 1, ITEM_ORANGE_STAINED_GLASS)] },
+    Recipe { needs: &[(ITEM_GLASS_PANE, 8), (ITEM_ORANGE_DYE, 1)], result: (ITEM_ORANGE_STAINED_GLASS_PANE, 8), name: "orange_stained_glass_pane_from_glass_pane", shaped: true, cells: &[(0, 0, ITEM_GLASS_PANE), (1, 0, ITEM_GLASS_PANE), (2, 0, ITEM_GLASS_PANE), (0, 1, ITEM_GLASS_PANE), (1, 1, ITEM_ORANGE_DYE), (2, 1, ITEM_GLASS_PANE), (0, 2, ITEM_GLASS_PANE), (1, 2, ITEM_GLASS_PANE), (2, 2, ITEM_GLASS_PANE)] },
+    Recipe { needs: &[(ITEM_ORANGE_DYE, 1), (ITEM_TERRACOTTA, 8)], result: (ITEM_ORANGE_TERRACOTTA, 8), name: "orange_terracotta", shaped: true, cells: &[(0, 0, ITEM_TERRACOTTA), (1, 0, ITEM_TERRACOTTA), (2, 0, ITEM_TERRACOTTA), (0, 1, ITEM_TERRACOTTA), (1, 1, ITEM_ORANGE_DYE), (2, 1, ITEM_TERRACOTTA), (0, 2, ITEM_TERRACOTTA), (1, 2, ITEM_TERRACOTTA), (2, 2, ITEM_TERRACOTTA)] },
+    Recipe { needs: &[(ITEM_ORANGE_WOOL, 3)], result: (ITEM_ORANGE_WOOL_SLAB, 6), name: "orange_wool_slab", shaped: true, cells: &[(0, 0, ITEM_ORANGE_WOOL), (1, 0, ITEM_ORANGE_WOOL), (2, 0, ITEM_ORANGE_WOOL)] },
+    Recipe { needs: &[(ITEM_ORANGE_WOOL, 6)], result: (ITEM_ORANGE_WOOL_STAIRS, 4), name: "orange_wool_stairs", shaped: true, cells: &[(0, 0, ITEM_ORANGE_WOOL), (0, 1, ITEM_ORANGE_WOOL), (1, 1, ITEM_ORANGE_WOOL), (0, 2, ITEM_ORANGE_WOOL), (1, 2, ITEM_ORANGE_WOOL), (2, 2, ITEM_ORANGE_WOOL)] },
+    Recipe { needs: &[(ITEM_OXIDIZED_CUT_COPPER_SLAB, 2)], result: (ITEM_OXIDIZED_CHISELED_COPPER, 1), name: "oxidized_chiseled_copper", shaped: true, cells: &[(0, 0, ITEM_OXIDIZED_CUT_COPPER_SLAB), (0, 1, ITEM_OXIDIZED_CUT_COPPER_SLAB)] },
+    Recipe { needs: &[(ITEM_BLAZE_ROD, 1), (ITEM_OXIDIZED_COPPER, 3), (ITEM_REDSTONE, 1)], result: (ITEM_OXIDIZED_COPPER_BULB, 4), name: "oxidized_copper_bulb", shaped: true, cells: &[(1, 0, ITEM_OXIDIZED_COPPER), (0, 1, ITEM_OXIDIZED_COPPER), (1, 1, ITEM_BLAZE_ROD), (2, 1, ITEM_OXIDIZED_COPPER), (1, 2, ITEM_REDSTONE)] },
+    Recipe { needs: &[(ITEM_OXIDIZED_COPPER, 4)], result: (ITEM_OXIDIZED_COPPER_GRATE, 4), name: "oxidized_copper_grate", shaped: true, cells: &[(1, 0, ITEM_OXIDIZED_COPPER), (0, 1, ITEM_OXIDIZED_COPPER), (2, 1, ITEM_OXIDIZED_COPPER), (1, 2, ITEM_OXIDIZED_COPPER)] },
+    Recipe { needs: &[(ITEM_OXIDIZED_COPPER, 4)], result: (ITEM_OXIDIZED_CUT_COPPER, 4), name: "oxidized_cut_copper", shaped: true, cells: &[(0, 0, ITEM_OXIDIZED_COPPER), (1, 0, ITEM_OXIDIZED_COPPER), (0, 1, ITEM_OXIDIZED_COPPER), (1, 1, ITEM_OXIDIZED_COPPER)] },
+    Recipe { needs: &[(ITEM_OXIDIZED_CUT_COPPER, 3)], result: (ITEM_OXIDIZED_CUT_COPPER_SLAB, 6), name: "oxidized_cut_copper_slab", shaped: true, cells: &[(0, 0, ITEM_OXIDIZED_CUT_COPPER), (1, 0, ITEM_OXIDIZED_CUT_COPPER), (2, 0, ITEM_OXIDIZED_CUT_COPPER)] },
+    Recipe { needs: &[(ITEM_OXIDIZED_CUT_COPPER, 6)], result: (ITEM_OXIDIZED_CUT_COPPER_STAIRS, 4), name: "oxidized_cut_copper_stairs", shaped: true, cells: &[(0, 0, ITEM_OXIDIZED_CUT_COPPER), (0, 1, ITEM_OXIDIZED_CUT_COPPER), (1, 1, ITEM_OXIDIZED_CUT_COPPER), (0, 2, ITEM_OXIDIZED_CUT_COPPER), (1, 2, ITEM_OXIDIZED_CUT_COPPER), (2, 2, ITEM_OXIDIZED_CUT_COPPER)] },
+    Recipe { needs: &[(ITEM_ICE, 1), (ITEM_ICE, 1), (ITEM_ICE, 1), (ITEM_ICE, 1), (ITEM_ICE, 1), (ITEM_ICE, 1), (ITEM_ICE, 1), (ITEM_ICE, 1), (ITEM_ICE, 1)], result: (ITEM_PACKED_ICE, 1), name: "packed_ice", shaped: false, cells: &[] },
+    Recipe { needs: &[(ITEM_MUD, 1), (WHEAT, 1)], result: (ITEM_PACKED_MUD, 1), name: "packed_mud", shaped: false, cells: &[] },
+    Recipe { needs: &[(STICK, 8), (TAG_SULFUR_CUBE_ARCHETYPE_LIGHT, 1)], result: (ITEM_PAINTING, 1), name: "painting", shaped: true, cells: &[(0, 0, STICK), (1, 0, STICK), (2, 0, STICK), (0, 1, STICK), (1, 1, TAG_SULFUR_CUBE_ARCHETYPE_LIGHT), (2, 1, STICK), (0, 2, STICK), (1, 2, STICK), (2, 2, STICK)] },
+    Recipe { needs: &[(ITEM_PALE_MOSS_BLOCK, 2)], result: (ITEM_PALE_MOSS_CARPET, 3), name: "pale_moss_carpet", shaped: true, cells: &[(0, 0, ITEM_PALE_MOSS_BLOCK), (1, 0, ITEM_PALE_MOSS_BLOCK)] },
+    Recipe { needs: &[(ITEM_PALE_OAK_PLANKS, 5)], result: (ITEM_PALE_OAK_BOAT, 1), name: "pale_oak_boat", shaped: true, cells: &[(0, 0, ITEM_PALE_OAK_PLANKS), (2, 0, ITEM_PALE_OAK_PLANKS), (0, 1, ITEM_PALE_OAK_PLANKS), (1, 1, ITEM_PALE_OAK_PLANKS), (2, 1, ITEM_PALE_OAK_PLANKS)] },
+    Recipe { needs: &[(ITEM_PALE_OAK_PLANKS, 1)], result: (ITEM_PALE_OAK_BUTTON, 1), name: "pale_oak_button", shaped: false, cells: &[] },
+    Recipe { needs: &[(ITEM_CHEST, 1), (ITEM_PALE_OAK_BOAT, 1)], result: (ITEM_PALE_OAK_CHEST_BOAT, 1), name: "pale_oak_chest_boat", shaped: false, cells: &[] },
+    Recipe { needs: &[(ITEM_PALE_OAK_PLANKS, 6)], result: (ITEM_PALE_OAK_DOOR, 3), name: "pale_oak_door", shaped: true, cells: &[(0, 0, ITEM_PALE_OAK_PLANKS), (1, 0, ITEM_PALE_OAK_PLANKS), (0, 1, ITEM_PALE_OAK_PLANKS), (1, 1, ITEM_PALE_OAK_PLANKS), (0, 2, ITEM_PALE_OAK_PLANKS), (1, 2, ITEM_PALE_OAK_PLANKS)] },
+    Recipe { needs: &[(ITEM_PALE_OAK_PLANKS, 4), (STICK, 2)], result: (ITEM_PALE_OAK_FENCE, 3), name: "pale_oak_fence", shaped: true, cells: &[(0, 0, ITEM_PALE_OAK_PLANKS), (1, 0, STICK), (2, 0, ITEM_PALE_OAK_PLANKS), (0, 1, ITEM_PALE_OAK_PLANKS), (1, 1, STICK), (2, 1, ITEM_PALE_OAK_PLANKS)] },
+    Recipe { needs: &[(ITEM_PALE_OAK_PLANKS, 2), (STICK, 4)], result: (ITEM_PALE_OAK_FENCE_GATE, 1), name: "pale_oak_fence_gate", shaped: true, cells: &[(0, 0, STICK), (1, 0, ITEM_PALE_OAK_PLANKS), (2, 0, STICK), (0, 1, STICK), (1, 1, ITEM_PALE_OAK_PLANKS), (2, 1, STICK)] },
+    Recipe { needs: &[(ITEM_IRON_CHAIN, 2), (ITEM_STRIPPED_PALE_OAK_LOG, 6)], result: (ITEM_PALE_OAK_HANGING_SIGN, 6), name: "pale_oak_hanging_sign", shaped: true, cells: &[(0, 0, ITEM_IRON_CHAIN), (2, 0, ITEM_IRON_CHAIN), (0, 1, ITEM_STRIPPED_PALE_OAK_LOG), (1, 1, ITEM_STRIPPED_PALE_OAK_LOG), (2, 1, ITEM_STRIPPED_PALE_OAK_LOG), (0, 2, ITEM_STRIPPED_PALE_OAK_LOG), (1, 2, ITEM_STRIPPED_PALE_OAK_LOG), (2, 2, ITEM_STRIPPED_PALE_OAK_LOG)] },
+    Recipe { needs: &[(TAG_PALE_OAK_LOGS, 1)], result: (ITEM_PALE_OAK_PLANKS, 4), name: "pale_oak_planks", shaped: false, cells: &[] },
+    Recipe { needs: &[(ITEM_PALE_OAK_PLANKS, 2)], result: (ITEM_PALE_OAK_PRESSURE_PLATE, 1), name: "pale_oak_pressure_plate", shaped: true, cells: &[(0, 0, ITEM_PALE_OAK_PLANKS), (1, 0, ITEM_PALE_OAK_PLANKS)] },
+    Recipe { needs: &[(ITEM_STRIPPED_PALE_OAK_LOG, 6)], result: (ITEM_PALE_OAK_SHELF, 6), name: "pale_oak_shelf", shaped: true, cells: &[(0, 0, ITEM_STRIPPED_PALE_OAK_LOG), (1, 0, ITEM_STRIPPED_PALE_OAK_LOG), (2, 0, ITEM_STRIPPED_PALE_OAK_LOG), (0, 2, ITEM_STRIPPED_PALE_OAK_LOG), (1, 2, ITEM_STRIPPED_PALE_OAK_LOG), (2, 2, ITEM_STRIPPED_PALE_OAK_LOG)] },
+    Recipe { needs: &[(ITEM_PALE_OAK_PLANKS, 6), (STICK, 1)], result: (ITEM_PALE_OAK_SIGN, 3), name: "pale_oak_sign", shaped: true, cells: &[(0, 0, ITEM_PALE_OAK_PLANKS), (1, 0, ITEM_PALE_OAK_PLANKS), (2, 0, ITEM_PALE_OAK_PLANKS), (0, 1, ITEM_PALE_OAK_PLANKS), (1, 1, ITEM_PALE_OAK_PLANKS), (2, 1, ITEM_PALE_OAK_PLANKS), (1, 2, STICK)] },
+    Recipe { needs: &[(ITEM_PALE_OAK_PLANKS, 3)], result: (ITEM_PALE_OAK_SLAB, 6), name: "pale_oak_slab", shaped: true, cells: &[(0, 0, ITEM_PALE_OAK_PLANKS), (1, 0, ITEM_PALE_OAK_PLANKS), (2, 0, ITEM_PALE_OAK_PLANKS)] },
+    Recipe { needs: &[(ITEM_PALE_OAK_PLANKS, 6)], result: (ITEM_PALE_OAK_STAIRS, 4), name: "pale_oak_stairs", shaped: true, cells: &[(0, 0, ITEM_PALE_OAK_PLANKS), (0, 1, ITEM_PALE_OAK_PLANKS), (1, 1, ITEM_PALE_OAK_PLANKS), (0, 2, ITEM_PALE_OAK_PLANKS), (1, 2, ITEM_PALE_OAK_PLANKS), (2, 2, ITEM_PALE_OAK_PLANKS)] },
+    Recipe { needs: &[(ITEM_PALE_OAK_PLANKS, 6)], result: (ITEM_PALE_OAK_TRAPDOOR, 2), name: "pale_oak_trapdoor", shaped: true, cells: &[(0, 0, ITEM_PALE_OAK_PLANKS), (1, 0, ITEM_PALE_OAK_PLANKS), (2, 0, ITEM_PALE_OAK_PLANKS), (0, 1, ITEM_PALE_OAK_PLANKS), (1, 1, ITEM_PALE_OAK_PLANKS), (2, 1, ITEM_PALE_OAK_PLANKS)] },
+    Recipe { needs: &[(ITEM_PALE_OAK_LOG, 4)], result: (ITEM_PALE_OAK_WOOD, 3), name: "pale_oak_wood", shaped: true, cells: &[(0, 0, ITEM_PALE_OAK_LOG), (1, 0, ITEM_PALE_OAK_LOG), (0, 1, ITEM_PALE_OAK_LOG), (1, 1, ITEM_PALE_OAK_LOG)] },
+    Recipe { needs: &[(ITEM_SUGAR_CANE, 3)], result: (ITEM_PAPER, 3), name: "paper", shaped: true, cells: &[(0, 0, ITEM_SUGAR_CANE), (1, 0, ITEM_SUGAR_CANE), (2, 0, ITEM_SUGAR_CANE)] },
+    Recipe { needs: &[(ITEM_PINK_WOOL, 6), (STICK, 1)], result: (ITEM_PINK_BANNER, 1), name: "pink_banner", shaped: true, cells: &[(0, 0, ITEM_PINK_WOOL), (1, 0, ITEM_PINK_WOOL), (2, 0, ITEM_PINK_WOOL), (0, 1, ITEM_PINK_WOOL), (1, 1, ITEM_PINK_WOOL), (2, 1, ITEM_PINK_WOOL), (1, 2, STICK)] },
+    Recipe { needs: &[(ITEM_PINK_WOOL, 3), (TAG_PLANKS, 3)], result: (ITEM_PINK_BED, 1), name: "pink_bed", shaped: true, cells: &[(0, 0, ITEM_PINK_WOOL), (1, 0, ITEM_PINK_WOOL), (2, 0, ITEM_PINK_WOOL), (0, 1, TAG_PLANKS), (1, 1, TAG_PLANKS), (2, 1, TAG_PLANKS)] },
+    Recipe { needs: &[(ITEM_CANDLE, 1), (ITEM_PINK_DYE, 1)], result: (ITEM_PINK_CANDLE, 1), name: "pink_candle", shaped: false, cells: &[] },
+    Recipe { needs: &[(ITEM_PINK_WOOL, 2)], result: (ITEM_PINK_CARPET, 3), name: "pink_carpet", shaped: true, cells: &[(0, 0, ITEM_PINK_WOOL), (1, 0, ITEM_PINK_WOOL)] },
+    Recipe { needs: &[(ITEM_GRAVEL, 1), (ITEM_GRAVEL, 1), (ITEM_GRAVEL, 1), (ITEM_GRAVEL, 1), (ITEM_PINK_DYE, 1), (ITEM_SAND, 1), (ITEM_SAND, 1), (ITEM_SAND, 1), (ITEM_SAND, 1)], result: (ITEM_PINK_CONCRETE_POWDER, 8), name: "pink_concrete_powder", shaped: false, cells: &[] },
+    Recipe { needs: &[(ITEM_PINK_CONCRETE, 3)], result: (ITEM_PINK_CONCRETE_SLAB, 6), name: "pink_concrete_slab", shaped: true, cells: &[(0, 0, ITEM_PINK_CONCRETE), (1, 0, ITEM_PINK_CONCRETE), (2, 0, ITEM_PINK_CONCRETE)] },
+    Recipe { needs: &[(ITEM_PINK_CONCRETE, 6)], result: (ITEM_PINK_CONCRETE_STAIRS, 4), name: "pink_concrete_stairs", shaped: true, cells: &[(0, 0, ITEM_PINK_CONCRETE), (0, 1, ITEM_PINK_CONCRETE), (1, 1, ITEM_PINK_CONCRETE), (0, 2, ITEM_PINK_CONCRETE), (1, 2, ITEM_PINK_CONCRETE), (2, 2, ITEM_PINK_CONCRETE)] },
+    Recipe { needs: &[(ITEM_PINK_WOOL_SLAB, 3)], result: (ITEM_PINK_CUSHION, 1), name: "pink_cushion", shaped: true, cells: &[(0, 0, ITEM_PINK_WOOL_SLAB), (1, 0, ITEM_PINK_WOOL_SLAB), (2, 0, ITEM_PINK_WOOL_SLAB)] },
+    Recipe { needs: &[(ITEM_CACTUS_FLOWER, 1)], result: (ITEM_PINK_DYE, 1), name: "pink_dye_from_cactus_flower", shaped: false, cells: &[] },
+    Recipe { needs: &[(ITEM_PEONY, 1)], result: (ITEM_PINK_DYE, 2), name: "pink_dye_from_peony", shaped: false, cells: &[] },
+    Recipe { needs: &[(ITEM_PINK_PETALS, 1)], result: (ITEM_PINK_DYE, 1), name: "pink_dye_from_pink_petals", shaped: false, cells: &[] },
+    Recipe { needs: &[(ITEM_PINK_TULIP, 1)], result: (ITEM_PINK_DYE, 1), name: "pink_dye_from_pink_tulip", shaped: false, cells: &[] },
+    Recipe { needs: &[(ITEM_RED_DYE, 1), (ITEM_WHITE_DYE, 1)], result: (ITEM_PINK_DYE, 2), name: "pink_dye_from_red_white_dye", shaped: false, cells: &[] },
+    Recipe { needs: &[(ITEM_GLASS, 2), (ITEM_LEATHER, 3), (ITEM_PINK_WOOL, 1)], result: (ITEM_PINK_HARNESS, 1), name: "pink_harness", shaped: true, cells: &[(0, 0, ITEM_LEATHER), (1, 0, ITEM_LEATHER), (2, 0, ITEM_LEATHER), (0, 1, ITEM_GLASS), (1, 1, ITEM_PINK_WOOL), (2, 1, ITEM_GLASS)] },
+    Recipe { needs: &[(ITEM_GLASS, 8), (ITEM_PINK_DYE, 1)], result: (ITEM_PINK_STAINED_GLASS, 8), name: "pink_stained_glass", shaped: true, cells: &[(0, 0, ITEM_GLASS), (1, 0, ITEM_GLASS), (2, 0, ITEM_GLASS), (0, 1, ITEM_GLASS), (1, 1, ITEM_PINK_DYE), (2, 1, ITEM_GLASS), (0, 2, ITEM_GLASS), (1, 2, ITEM_GLASS), (2, 2, ITEM_GLASS)] },
+    Recipe { needs: &[(ITEM_PINK_STAINED_GLASS, 6)], result: (ITEM_PINK_STAINED_GLASS_PANE, 16), name: "pink_stained_glass_pane", shaped: true, cells: &[(0, 0, ITEM_PINK_STAINED_GLASS), (1, 0, ITEM_PINK_STAINED_GLASS), (2, 0, ITEM_PINK_STAINED_GLASS), (0, 1, ITEM_PINK_STAINED_GLASS), (1, 1, ITEM_PINK_STAINED_GLASS), (2, 1, ITEM_PINK_STAINED_GLASS)] },
+    Recipe { needs: &[(ITEM_GLASS_PANE, 8), (ITEM_PINK_DYE, 1)], result: (ITEM_PINK_STAINED_GLASS_PANE, 8), name: "pink_stained_glass_pane_from_glass_pane", shaped: true, cells: &[(0, 0, ITEM_GLASS_PANE), (1, 0, ITEM_GLASS_PANE), (2, 0, ITEM_GLASS_PANE), (0, 1, ITEM_GLASS_PANE), (1, 1, ITEM_PINK_DYE), (2, 1, ITEM_GLASS_PANE), (0, 2, ITEM_GLASS_PANE), (1, 2, ITEM_GLASS_PANE), (2, 2, ITEM_GLASS_PANE)] },
+    Recipe { needs: &[(ITEM_PINK_DYE, 1), (ITEM_TERRACOTTA, 8)], result: (ITEM_PINK_TERRACOTTA, 8), name: "pink_terracotta", shaped: true, cells: &[(0, 0, ITEM_TERRACOTTA), (1, 0, ITEM_TERRACOTTA), (2, 0, ITEM_TERRACOTTA), (0, 1, ITEM_TERRACOTTA), (1, 1, ITEM_PINK_DYE), (2, 1, ITEM_TERRACOTTA), (0, 2, ITEM_TERRACOTTA), (1, 2, ITEM_TERRACOTTA), (2, 2, ITEM_TERRACOTTA)] },
+    Recipe { needs: &[(ITEM_PINK_WOOL, 3)], result: (ITEM_PINK_WOOL_SLAB, 6), name: "pink_wool_slab", shaped: true, cells: &[(0, 0, ITEM_PINK_WOOL), (1, 0, ITEM_PINK_WOOL), (2, 0, ITEM_PINK_WOOL)] },
+    Recipe { needs: &[(ITEM_PINK_WOOL, 6)], result: (ITEM_PINK_WOOL_STAIRS, 4), name: "pink_wool_stairs", shaped: true, cells: &[(0, 0, ITEM_PINK_WOOL), (0, 1, ITEM_PINK_WOOL), (1, 1, ITEM_PINK_WOOL), (0, 2, ITEM_PINK_WOOL), (1, 2, ITEM_PINK_WOOL), (2, 2, ITEM_PINK_WOOL)] },
+    Recipe { needs: &[(COBBLESTONE, 4), (ITEM_IRON_INGOT, 1), (ITEM_REDSTONE, 1), (TAG_PLANKS, 3)], result: (ITEM_PISTON, 1), name: "piston", shaped: true, cells: &[(0, 0, TAG_PLANKS), (1, 0, TAG_PLANKS), (2, 0, TAG_PLANKS), (0, 1, COBBLESTONE), (1, 1, ITEM_IRON_INGOT), (2, 1, COBBLESTONE), (0, 2, COBBLESTONE), (1, 2, ITEM_REDSTONE), (2, 2, COBBLESTONE)] },
+    Recipe { needs: &[(ITEM_ANDESITE, 4)], result: (ITEM_POLISHED_ANDESITE, 4), name: "polished_andesite", shaped: true, cells: &[(0, 0, ITEM_ANDESITE), (1, 0, ITEM_ANDESITE), (0, 1, ITEM_ANDESITE), (1, 1, ITEM_ANDESITE)] },
+    Recipe { needs: &[(ITEM_POLISHED_ANDESITE, 3)], result: (ITEM_POLISHED_ANDESITE_SLAB, 6), name: "polished_andesite_slab", shaped: true, cells: &[(0, 0, ITEM_POLISHED_ANDESITE), (1, 0, ITEM_POLISHED_ANDESITE), (2, 0, ITEM_POLISHED_ANDESITE)] },
+    Recipe { needs: &[(ITEM_POLISHED_ANDESITE, 6)], result: (ITEM_POLISHED_ANDESITE_STAIRS, 4), name: "polished_andesite_stairs", shaped: true, cells: &[(0, 0, ITEM_POLISHED_ANDESITE), (0, 1, ITEM_POLISHED_ANDESITE), (1, 1, ITEM_POLISHED_ANDESITE), (0, 2, ITEM_POLISHED_ANDESITE), (1, 2, ITEM_POLISHED_ANDESITE), (2, 2, ITEM_POLISHED_ANDESITE)] },
+    Recipe { needs: &[(ITEM_BASALT, 4)], result: (ITEM_POLISHED_BASALT, 4), name: "polished_basalt", shaped: true, cells: &[(0, 0, ITEM_BASALT), (1, 0, ITEM_BASALT), (0, 1, ITEM_BASALT), (1, 1, ITEM_BASALT)] },
+    Recipe { needs: &[(ITEM_BLACKSTONE, 4)], result: (ITEM_POLISHED_BLACKSTONE, 4), name: "polished_blackstone", shaped: true, cells: &[(0, 0, ITEM_BLACKSTONE), (1, 0, ITEM_BLACKSTONE), (0, 1, ITEM_BLACKSTONE), (1, 1, ITEM_BLACKSTONE)] },
+    Recipe { needs: &[(ITEM_POLISHED_BLACKSTONE_BRICKS, 3)], result: (ITEM_POLISHED_BLACKSTONE_BRICK_SLAB, 6), name: "polished_blackstone_brick_slab", shaped: true, cells: &[(0, 0, ITEM_POLISHED_BLACKSTONE_BRICKS), (1, 0, ITEM_POLISHED_BLACKSTONE_BRICKS), (2, 0, ITEM_POLISHED_BLACKSTONE_BRICKS)] },
+    Recipe { needs: &[(ITEM_POLISHED_BLACKSTONE_BRICKS, 6)], result: (ITEM_POLISHED_BLACKSTONE_BRICK_STAIRS, 4), name: "polished_blackstone_brick_stairs", shaped: true, cells: &[(0, 0, ITEM_POLISHED_BLACKSTONE_BRICKS), (0, 1, ITEM_POLISHED_BLACKSTONE_BRICKS), (1, 1, ITEM_POLISHED_BLACKSTONE_BRICKS), (0, 2, ITEM_POLISHED_BLACKSTONE_BRICKS), (1, 2, ITEM_POLISHED_BLACKSTONE_BRICKS), (2, 2, ITEM_POLISHED_BLACKSTONE_BRICKS)] },
+    Recipe { needs: &[(ITEM_POLISHED_BLACKSTONE_BRICKS, 6)], result: (ITEM_POLISHED_BLACKSTONE_BRICK_WALL, 6), name: "polished_blackstone_brick_wall", shaped: true, cells: &[(0, 0, ITEM_POLISHED_BLACKSTONE_BRICKS), (1, 0, ITEM_POLISHED_BLACKSTONE_BRICKS), (2, 0, ITEM_POLISHED_BLACKSTONE_BRICKS), (0, 1, ITEM_POLISHED_BLACKSTONE_BRICKS), (1, 1, ITEM_POLISHED_BLACKSTONE_BRICKS), (2, 1, ITEM_POLISHED_BLACKSTONE_BRICKS)] },
+    Recipe { needs: &[(ITEM_POLISHED_BLACKSTONE, 4)], result: (ITEM_POLISHED_BLACKSTONE_BRICKS, 4), name: "polished_blackstone_bricks", shaped: true, cells: &[(0, 0, ITEM_POLISHED_BLACKSTONE), (1, 0, ITEM_POLISHED_BLACKSTONE), (0, 1, ITEM_POLISHED_BLACKSTONE), (1, 1, ITEM_POLISHED_BLACKSTONE)] },
+    Recipe { needs: &[(ITEM_POLISHED_BLACKSTONE, 1)], result: (ITEM_POLISHED_BLACKSTONE_BUTTON, 1), name: "polished_blackstone_button", shaped: false, cells: &[] },
+    Recipe { needs: &[(ITEM_POLISHED_BLACKSTONE, 2)], result: (ITEM_POLISHED_BLACKSTONE_PRESSURE_PLATE, 1), name: "polished_blackstone_pressure_plate", shaped: true, cells: &[(0, 0, ITEM_POLISHED_BLACKSTONE), (1, 0, ITEM_POLISHED_BLACKSTONE)] },
+    Recipe { needs: &[(ITEM_POLISHED_BLACKSTONE, 3)], result: (ITEM_POLISHED_BLACKSTONE_SLAB, 6), name: "polished_blackstone_slab", shaped: true, cells: &[(0, 0, ITEM_POLISHED_BLACKSTONE), (1, 0, ITEM_POLISHED_BLACKSTONE), (2, 0, ITEM_POLISHED_BLACKSTONE)] },
+    Recipe { needs: &[(ITEM_POLISHED_BLACKSTONE, 6)], result: (ITEM_POLISHED_BLACKSTONE_STAIRS, 4), name: "polished_blackstone_stairs", shaped: true, cells: &[(0, 0, ITEM_POLISHED_BLACKSTONE), (0, 1, ITEM_POLISHED_BLACKSTONE), (1, 1, ITEM_POLISHED_BLACKSTONE), (0, 2, ITEM_POLISHED_BLACKSTONE), (1, 2, ITEM_POLISHED_BLACKSTONE), (2, 2, ITEM_POLISHED_BLACKSTONE)] },
+    Recipe { needs: &[(ITEM_POLISHED_BLACKSTONE, 6)], result: (ITEM_POLISHED_BLACKSTONE_WALL, 6), name: "polished_blackstone_wall", shaped: true, cells: &[(0, 0, ITEM_POLISHED_BLACKSTONE), (1, 0, ITEM_POLISHED_BLACKSTONE), (2, 0, ITEM_POLISHED_BLACKSTONE), (0, 1, ITEM_POLISHED_BLACKSTONE), (1, 1, ITEM_POLISHED_BLACKSTONE), (2, 1, ITEM_POLISHED_BLACKSTONE)] },
+    Recipe { needs: &[(ITEM_CINNABAR, 4)], result: (ITEM_POLISHED_CINNABAR, 4), name: "polished_cinnabar", shaped: true, cells: &[(0, 0, ITEM_CINNABAR), (1, 0, ITEM_CINNABAR), (0, 1, ITEM_CINNABAR), (1, 1, ITEM_CINNABAR)] },
+    Recipe { needs: &[(ITEM_POLISHED_CINNABAR, 3)], result: (ITEM_POLISHED_CINNABAR_SLAB, 6), name: "polished_cinnabar_slab", shaped: true, cells: &[(0, 0, ITEM_POLISHED_CINNABAR), (1, 0, ITEM_POLISHED_CINNABAR), (2, 0, ITEM_POLISHED_CINNABAR)] },
+    Recipe { needs: &[(ITEM_POLISHED_CINNABAR, 6)], result: (ITEM_POLISHED_CINNABAR_STAIRS, 4), name: "polished_cinnabar_stairs", shaped: true, cells: &[(0, 0, ITEM_POLISHED_CINNABAR), (0, 1, ITEM_POLISHED_CINNABAR), (1, 1, ITEM_POLISHED_CINNABAR), (0, 2, ITEM_POLISHED_CINNABAR), (1, 2, ITEM_POLISHED_CINNABAR), (2, 2, ITEM_POLISHED_CINNABAR)] },
+    Recipe { needs: &[(ITEM_POLISHED_CINNABAR, 6)], result: (ITEM_POLISHED_CINNABAR_WALL, 6), name: "polished_cinnabar_wall", shaped: true, cells: &[(0, 0, ITEM_POLISHED_CINNABAR), (1, 0, ITEM_POLISHED_CINNABAR), (2, 0, ITEM_POLISHED_CINNABAR), (0, 1, ITEM_POLISHED_CINNABAR), (1, 1, ITEM_POLISHED_CINNABAR), (2, 1, ITEM_POLISHED_CINNABAR)] },
+    Recipe { needs: &[(ITEM_COBBLED_DEEPSLATE, 4)], result: (ITEM_POLISHED_DEEPSLATE, 4), name: "polished_deepslate", shaped: true, cells: &[(0, 0, ITEM_COBBLED_DEEPSLATE), (1, 0, ITEM_COBBLED_DEEPSLATE), (0, 1, ITEM_COBBLED_DEEPSLATE), (1, 1, ITEM_COBBLED_DEEPSLATE)] },
+    Recipe { needs: &[(ITEM_POLISHED_DEEPSLATE, 3)], result: (ITEM_POLISHED_DEEPSLATE_SLAB, 6), name: "polished_deepslate_slab", shaped: true, cells: &[(0, 0, ITEM_POLISHED_DEEPSLATE), (1, 0, ITEM_POLISHED_DEEPSLATE), (2, 0, ITEM_POLISHED_DEEPSLATE)] },
+    Recipe { needs: &[(ITEM_POLISHED_DEEPSLATE, 6)], result: (ITEM_POLISHED_DEEPSLATE_STAIRS, 4), name: "polished_deepslate_stairs", shaped: true, cells: &[(0, 0, ITEM_POLISHED_DEEPSLATE), (0, 1, ITEM_POLISHED_DEEPSLATE), (1, 1, ITEM_POLISHED_DEEPSLATE), (0, 2, ITEM_POLISHED_DEEPSLATE), (1, 2, ITEM_POLISHED_DEEPSLATE), (2, 2, ITEM_POLISHED_DEEPSLATE)] },
+    Recipe { needs: &[(ITEM_POLISHED_DEEPSLATE, 6)], result: (ITEM_POLISHED_DEEPSLATE_WALL, 6), name: "polished_deepslate_wall", shaped: true, cells: &[(0, 0, ITEM_POLISHED_DEEPSLATE), (1, 0, ITEM_POLISHED_DEEPSLATE), (2, 0, ITEM_POLISHED_DEEPSLATE), (0, 1, ITEM_POLISHED_DEEPSLATE), (1, 1, ITEM_POLISHED_DEEPSLATE), (2, 1, ITEM_POLISHED_DEEPSLATE)] },
+    Recipe { needs: &[(ITEM_DIORITE, 4)], result: (ITEM_POLISHED_DIORITE, 4), name: "polished_diorite", shaped: true, cells: &[(0, 0, ITEM_DIORITE), (1, 0, ITEM_DIORITE), (0, 1, ITEM_DIORITE), (1, 1, ITEM_DIORITE)] },
+    Recipe { needs: &[(ITEM_POLISHED_DIORITE, 3)], result: (ITEM_POLISHED_DIORITE_SLAB, 6), name: "polished_diorite_slab", shaped: true, cells: &[(0, 0, ITEM_POLISHED_DIORITE), (1, 0, ITEM_POLISHED_DIORITE), (2, 0, ITEM_POLISHED_DIORITE)] },
+    Recipe { needs: &[(ITEM_POLISHED_DIORITE, 6)], result: (ITEM_POLISHED_DIORITE_STAIRS, 4), name: "polished_diorite_stairs", shaped: true, cells: &[(0, 0, ITEM_POLISHED_DIORITE), (0, 1, ITEM_POLISHED_DIORITE), (1, 1, ITEM_POLISHED_DIORITE), (0, 2, ITEM_POLISHED_DIORITE), (1, 2, ITEM_POLISHED_DIORITE), (2, 2, ITEM_POLISHED_DIORITE)] },
+    Recipe { needs: &[(ITEM_GRANITE, 4)], result: (ITEM_POLISHED_GRANITE, 4), name: "polished_granite", shaped: true, cells: &[(0, 0, ITEM_GRANITE), (1, 0, ITEM_GRANITE), (0, 1, ITEM_GRANITE), (1, 1, ITEM_GRANITE)] },
+    Recipe { needs: &[(ITEM_POLISHED_GRANITE, 3)], result: (ITEM_POLISHED_GRANITE_SLAB, 6), name: "polished_granite_slab", shaped: true, cells: &[(0, 0, ITEM_POLISHED_GRANITE), (1, 0, ITEM_POLISHED_GRANITE), (2, 0, ITEM_POLISHED_GRANITE)] },
+    Recipe { needs: &[(ITEM_POLISHED_GRANITE, 6)], result: (ITEM_POLISHED_GRANITE_STAIRS, 4), name: "polished_granite_stairs", shaped: true, cells: &[(0, 0, ITEM_POLISHED_GRANITE), (0, 1, ITEM_POLISHED_GRANITE), (1, 1, ITEM_POLISHED_GRANITE), (0, 2, ITEM_POLISHED_GRANITE), (1, 2, ITEM_POLISHED_GRANITE), (2, 2, ITEM_POLISHED_GRANITE)] },
+    Recipe { needs: &[(ITEM_SULFUR, 4)], result: (ITEM_POLISHED_SULFUR, 4), name: "polished_sulfur", shaped: true, cells: &[(0, 0, ITEM_SULFUR), (1, 0, ITEM_SULFUR), (0, 1, ITEM_SULFUR), (1, 1, ITEM_SULFUR)] },
+    Recipe { needs: &[(ITEM_POLISHED_SULFUR, 3)], result: (ITEM_POLISHED_SULFUR_SLAB, 6), name: "polished_sulfur_slab", shaped: true, cells: &[(0, 0, ITEM_POLISHED_SULFUR), (1, 0, ITEM_POLISHED_SULFUR), (2, 0, ITEM_POLISHED_SULFUR)] },
+    Recipe { needs: &[(ITEM_POLISHED_SULFUR, 6)], result: (ITEM_POLISHED_SULFUR_STAIRS, 4), name: "polished_sulfur_stairs", shaped: true, cells: &[(0, 0, ITEM_POLISHED_SULFUR), (0, 1, ITEM_POLISHED_SULFUR), (1, 1, ITEM_POLISHED_SULFUR), (0, 2, ITEM_POLISHED_SULFUR), (1, 2, ITEM_POLISHED_SULFUR), (2, 2, ITEM_POLISHED_SULFUR)] },
+    Recipe { needs: &[(ITEM_POLISHED_SULFUR, 6)], result: (ITEM_POLISHED_SULFUR_WALL, 6), name: "polished_sulfur_wall", shaped: true, cells: &[(0, 0, ITEM_POLISHED_SULFUR), (1, 0, ITEM_POLISHED_SULFUR), (2, 0, ITEM_POLISHED_SULFUR), (0, 1, ITEM_POLISHED_SULFUR), (1, 1, ITEM_POLISHED_SULFUR), (2, 1, ITEM_POLISHED_SULFUR)] },
+    Recipe { needs: &[(ITEM_TUFF, 4)], result: (ITEM_POLISHED_TUFF, 4), name: "polished_tuff", shaped: true, cells: &[(0, 0, ITEM_TUFF), (1, 0, ITEM_TUFF), (0, 1, ITEM_TUFF), (1, 1, ITEM_TUFF)] },
+    Recipe { needs: &[(ITEM_POLISHED_TUFF, 3)], result: (ITEM_POLISHED_TUFF_SLAB, 6), name: "polished_tuff_slab", shaped: true, cells: &[(0, 0, ITEM_POLISHED_TUFF), (1, 0, ITEM_POLISHED_TUFF), (2, 0, ITEM_POLISHED_TUFF)] },
+    Recipe { needs: &[(ITEM_POLISHED_TUFF, 6)], result: (ITEM_POLISHED_TUFF_STAIRS, 4), name: "polished_tuff_stairs", shaped: true, cells: &[(0, 0, ITEM_POLISHED_TUFF), (0, 1, ITEM_POLISHED_TUFF), (1, 1, ITEM_POLISHED_TUFF), (0, 2, ITEM_POLISHED_TUFF), (1, 2, ITEM_POLISHED_TUFF), (2, 2, ITEM_POLISHED_TUFF)] },
+    Recipe { needs: &[(ITEM_POLISHED_TUFF, 6)], result: (ITEM_POLISHED_TUFF_WALL, 6), name: "polished_tuff_wall", shaped: true, cells: &[(0, 0, ITEM_POLISHED_TUFF), (1, 0, ITEM_POLISHED_TUFF), (2, 0, ITEM_POLISHED_TUFF), (0, 1, ITEM_POLISHED_TUFF), (1, 1, ITEM_POLISHED_TUFF), (2, 1, ITEM_POLISHED_TUFF)] },
+    Recipe { needs: &[(ITEM_POPLAR_PLANKS, 5)], result: (ITEM_POPLAR_BOAT, 1), name: "poplar_boat", shaped: true, cells: &[(0, 0, ITEM_POPLAR_PLANKS), (2, 0, ITEM_POPLAR_PLANKS), (0, 1, ITEM_POPLAR_PLANKS), (1, 1, ITEM_POPLAR_PLANKS), (2, 1, ITEM_POPLAR_PLANKS)] },
+    Recipe { needs: &[(ITEM_POPLAR_PLANKS, 1)], result: (ITEM_POPLAR_BUTTON, 1), name: "poplar_button", shaped: false, cells: &[] },
+    Recipe { needs: &[(ITEM_CHEST, 1), (ITEM_POPLAR_BOAT, 1)], result: (ITEM_POPLAR_CHEST_BOAT, 1), name: "poplar_chest_boat", shaped: false, cells: &[] },
+    Recipe { needs: &[(ITEM_POPLAR_PLANKS, 6)], result: (ITEM_POPLAR_DOOR, 3), name: "poplar_door", shaped: true, cells: &[(0, 0, ITEM_POPLAR_PLANKS), (1, 0, ITEM_POPLAR_PLANKS), (0, 1, ITEM_POPLAR_PLANKS), (1, 1, ITEM_POPLAR_PLANKS), (0, 2, ITEM_POPLAR_PLANKS), (1, 2, ITEM_POPLAR_PLANKS)] },
+    Recipe { needs: &[(ITEM_POPLAR_PLANKS, 4), (STICK, 2)], result: (ITEM_POPLAR_FENCE, 3), name: "poplar_fence", shaped: true, cells: &[(0, 0, ITEM_POPLAR_PLANKS), (1, 0, STICK), (2, 0, ITEM_POPLAR_PLANKS), (0, 1, ITEM_POPLAR_PLANKS), (1, 1, STICK), (2, 1, ITEM_POPLAR_PLANKS)] },
+    Recipe { needs: &[(ITEM_POPLAR_PLANKS, 2), (STICK, 4)], result: (ITEM_POPLAR_FENCE_GATE, 1), name: "poplar_fence_gate", shaped: true, cells: &[(0, 0, STICK), (1, 0, ITEM_POPLAR_PLANKS), (2, 0, STICK), (0, 1, STICK), (1, 1, ITEM_POPLAR_PLANKS), (2, 1, STICK)] },
+    Recipe { needs: &[(ITEM_IRON_CHAIN, 2), (ITEM_STRIPPED_POPLAR_LOG, 6)], result: (ITEM_POPLAR_HANGING_SIGN, 6), name: "poplar_hanging_sign", shaped: true, cells: &[(0, 0, ITEM_IRON_CHAIN), (2, 0, ITEM_IRON_CHAIN), (0, 1, ITEM_STRIPPED_POPLAR_LOG), (1, 1, ITEM_STRIPPED_POPLAR_LOG), (2, 1, ITEM_STRIPPED_POPLAR_LOG), (0, 2, ITEM_STRIPPED_POPLAR_LOG), (1, 2, ITEM_STRIPPED_POPLAR_LOG), (2, 2, ITEM_STRIPPED_POPLAR_LOG)] },
+    Recipe { needs: &[(TAG_POPLAR_LOGS, 1)], result: (ITEM_POPLAR_PLANKS, 4), name: "poplar_planks", shaped: false, cells: &[] },
+    Recipe { needs: &[(ITEM_POPLAR_PLANKS, 2)], result: (ITEM_POPLAR_PRESSURE_PLATE, 1), name: "poplar_pressure_plate", shaped: true, cells: &[(0, 0, ITEM_POPLAR_PLANKS), (1, 0, ITEM_POPLAR_PLANKS)] },
+    Recipe { needs: &[(ITEM_STRIPPED_POPLAR_LOG, 6)], result: (ITEM_POPLAR_SHELF, 6), name: "poplar_shelf", shaped: true, cells: &[(0, 0, ITEM_STRIPPED_POPLAR_LOG), (1, 0, ITEM_STRIPPED_POPLAR_LOG), (2, 0, ITEM_STRIPPED_POPLAR_LOG), (0, 2, ITEM_STRIPPED_POPLAR_LOG), (1, 2, ITEM_STRIPPED_POPLAR_LOG), (2, 2, ITEM_STRIPPED_POPLAR_LOG)] },
+    Recipe { needs: &[(ITEM_POPLAR_PLANKS, 6), (STICK, 1)], result: (ITEM_POPLAR_SIGN, 3), name: "poplar_sign", shaped: true, cells: &[(0, 0, ITEM_POPLAR_PLANKS), (1, 0, ITEM_POPLAR_PLANKS), (2, 0, ITEM_POPLAR_PLANKS), (0, 1, ITEM_POPLAR_PLANKS), (1, 1, ITEM_POPLAR_PLANKS), (2, 1, ITEM_POPLAR_PLANKS), (1, 2, STICK)] },
+    Recipe { needs: &[(ITEM_POPLAR_PLANKS, 3)], result: (ITEM_POPLAR_SLAB, 6), name: "poplar_slab", shaped: true, cells: &[(0, 0, ITEM_POPLAR_PLANKS), (1, 0, ITEM_POPLAR_PLANKS), (2, 0, ITEM_POPLAR_PLANKS)] },
+    Recipe { needs: &[(ITEM_POPLAR_PLANKS, 6)], result: (ITEM_POPLAR_STAIRS, 4), name: "poplar_stairs", shaped: true, cells: &[(0, 0, ITEM_POPLAR_PLANKS), (0, 1, ITEM_POPLAR_PLANKS), (1, 1, ITEM_POPLAR_PLANKS), (0, 2, ITEM_POPLAR_PLANKS), (1, 2, ITEM_POPLAR_PLANKS), (2, 2, ITEM_POPLAR_PLANKS)] },
+    Recipe { needs: &[(ITEM_POPLAR_PLANKS, 6)], result: (ITEM_POPLAR_TRAPDOOR, 2), name: "poplar_trapdoor", shaped: true, cells: &[(0, 0, ITEM_POPLAR_PLANKS), (1, 0, ITEM_POPLAR_PLANKS), (2, 0, ITEM_POPLAR_PLANKS), (0, 1, ITEM_POPLAR_PLANKS), (1, 1, ITEM_POPLAR_PLANKS), (2, 1, ITEM_POPLAR_PLANKS)] },
+    Recipe { needs: &[(ITEM_POPLAR_LOG, 4)], result: (ITEM_POPLAR_WOOD, 3), name: "poplar_wood", shaped: true, cells: &[(0, 0, ITEM_POPLAR_LOG), (1, 0, ITEM_POPLAR_LOG), (0, 1, ITEM_POPLAR_LOG), (1, 1, ITEM_POPLAR_LOG)] },
+    Recipe { needs: &[(ITEM_SULFUR, 1), (ITEM_SULFUR, 1), (ITEM_SULFUR, 1), (ITEM_SULFUR, 1), (ITEM_SULFUR, 1), (ITEM_SULFUR, 1), (ITEM_SULFUR, 1), (ITEM_SULFUR, 1), (ITEM_SULFUR, 1)], result: (ITEM_POTENT_SULFUR, 1), name: "potent_sulfur", shaped: false, cells: &[] },
+    Recipe { needs: &[(ITEM_GOLD_INGOT, 6), (ITEM_REDSTONE, 1), (STICK, 1)], result: (ITEM_POWERED_RAIL, 6), name: "powered_rail", shaped: true, cells: &[(0, 0, ITEM_GOLD_INGOT), (2, 0, ITEM_GOLD_INGOT), (0, 1, ITEM_GOLD_INGOT), (1, 1, STICK), (2, 1, ITEM_GOLD_INGOT), (0, 2, ITEM_GOLD_INGOT), (1, 2, ITEM_REDSTONE), (2, 2, ITEM_GOLD_INGOT)] },
+    Recipe { needs: &[(ITEM_PRISMARINE_SHARD, 4)], result: (ITEM_PRISMARINE, 1), name: "prismarine", shaped: true, cells: &[(0, 0, ITEM_PRISMARINE_SHARD), (1, 0, ITEM_PRISMARINE_SHARD), (0, 1, ITEM_PRISMARINE_SHARD), (1, 1, ITEM_PRISMARINE_SHARD)] },
+    Recipe { needs: &[(ITEM_PRISMARINE_BRICKS, 3)], result: (ITEM_PRISMARINE_BRICK_SLAB, 6), name: "prismarine_brick_slab", shaped: true, cells: &[(0, 0, ITEM_PRISMARINE_BRICKS), (1, 0, ITEM_PRISMARINE_BRICKS), (2, 0, ITEM_PRISMARINE_BRICKS)] },
+    Recipe { needs: &[(ITEM_PRISMARINE_BRICKS, 6)], result: (ITEM_PRISMARINE_BRICK_STAIRS, 4), name: "prismarine_brick_stairs", shaped: true, cells: &[(0, 0, ITEM_PRISMARINE_BRICKS), (0, 1, ITEM_PRISMARINE_BRICKS), (1, 1, ITEM_PRISMARINE_BRICKS), (0, 2, ITEM_PRISMARINE_BRICKS), (1, 2, ITEM_PRISMARINE_BRICKS), (2, 2, ITEM_PRISMARINE_BRICKS)] },
+    Recipe { needs: &[(ITEM_PRISMARINE_SHARD, 1), (ITEM_PRISMARINE_SHARD, 1), (ITEM_PRISMARINE_SHARD, 1), (ITEM_PRISMARINE_SHARD, 1), (ITEM_PRISMARINE_SHARD, 1), (ITEM_PRISMARINE_SHARD, 1), (ITEM_PRISMARINE_SHARD, 1), (ITEM_PRISMARINE_SHARD, 1), (ITEM_PRISMARINE_SHARD, 1)], result: (ITEM_PRISMARINE_BRICKS, 1), name: "prismarine_bricks", shaped: false, cells: &[] },
+    Recipe { needs: &[(ITEM_PRISMARINE, 3)], result: (ITEM_PRISMARINE_SLAB, 6), name: "prismarine_slab", shaped: true, cells: &[(0, 0, ITEM_PRISMARINE), (1, 0, ITEM_PRISMARINE), (2, 0, ITEM_PRISMARINE)] },
+    Recipe { needs: &[(ITEM_PRISMARINE, 6)], result: (ITEM_PRISMARINE_STAIRS, 4), name: "prismarine_stairs", shaped: true, cells: &[(0, 0, ITEM_PRISMARINE), (0, 1, ITEM_PRISMARINE), (1, 1, ITEM_PRISMARINE), (0, 2, ITEM_PRISMARINE), (1, 2, ITEM_PRISMARINE), (2, 2, ITEM_PRISMARINE)] },
+    Recipe { needs: &[(ITEM_PRISMARINE, 6)], result: (ITEM_PRISMARINE_WALL, 6), name: "prismarine_wall", shaped: true, cells: &[(0, 0, ITEM_PRISMARINE), (1, 0, ITEM_PRISMARINE), (2, 0, ITEM_PRISMARINE), (0, 1, ITEM_PRISMARINE), (1, 1, ITEM_PRISMARINE), (2, 1, ITEM_PRISMARINE)] },
+    Recipe { needs: &[(ITEM_PUMPKIN, 1), (ITEM_SUGAR, 1), (TAG_EGGS, 1)], result: (ITEM_PUMPKIN_PIE, 1), name: "pumpkin_pie", shaped: false, cells: &[] },
+    Recipe { needs: &[(ITEM_PUMPKIN, 1)], result: (ITEM_PUMPKIN_SEEDS, 4), name: "pumpkin_seeds", shaped: false, cells: &[] },
+    Recipe { needs: &[(ITEM_PURPLE_WOOL, 6), (STICK, 1)], result: (ITEM_PURPLE_BANNER, 1), name: "purple_banner", shaped: true, cells: &[(0, 0, ITEM_PURPLE_WOOL), (1, 0, ITEM_PURPLE_WOOL), (2, 0, ITEM_PURPLE_WOOL), (0, 1, ITEM_PURPLE_WOOL), (1, 1, ITEM_PURPLE_WOOL), (2, 1, ITEM_PURPLE_WOOL), (1, 2, STICK)] },
+    Recipe { needs: &[(ITEM_PURPLE_WOOL, 3), (TAG_PLANKS, 3)], result: (ITEM_PURPLE_BED, 1), name: "purple_bed", shaped: true, cells: &[(0, 0, ITEM_PURPLE_WOOL), (1, 0, ITEM_PURPLE_WOOL), (2, 0, ITEM_PURPLE_WOOL), (0, 1, TAG_PLANKS), (1, 1, TAG_PLANKS), (2, 1, TAG_PLANKS)] },
+    Recipe { needs: &[(ITEM_CANDLE, 1), (ITEM_PURPLE_DYE, 1)], result: (ITEM_PURPLE_CANDLE, 1), name: "purple_candle", shaped: false, cells: &[] },
+    Recipe { needs: &[(ITEM_PURPLE_WOOL, 2)], result: (ITEM_PURPLE_CARPET, 3), name: "purple_carpet", shaped: true, cells: &[(0, 0, ITEM_PURPLE_WOOL), (1, 0, ITEM_PURPLE_WOOL)] },
+    Recipe { needs: &[(ITEM_GRAVEL, 1), (ITEM_GRAVEL, 1), (ITEM_GRAVEL, 1), (ITEM_GRAVEL, 1), (ITEM_PURPLE_DYE, 1), (ITEM_SAND, 1), (ITEM_SAND, 1), (ITEM_SAND, 1), (ITEM_SAND, 1)], result: (ITEM_PURPLE_CONCRETE_POWDER, 8), name: "purple_concrete_powder", shaped: false, cells: &[] },
+    Recipe { needs: &[(ITEM_PURPLE_CONCRETE, 3)], result: (ITEM_PURPLE_CONCRETE_SLAB, 6), name: "purple_concrete_slab", shaped: true, cells: &[(0, 0, ITEM_PURPLE_CONCRETE), (1, 0, ITEM_PURPLE_CONCRETE), (2, 0, ITEM_PURPLE_CONCRETE)] },
+    Recipe { needs: &[(ITEM_PURPLE_CONCRETE, 6)], result: (ITEM_PURPLE_CONCRETE_STAIRS, 4), name: "purple_concrete_stairs", shaped: true, cells: &[(0, 0, ITEM_PURPLE_CONCRETE), (0, 1, ITEM_PURPLE_CONCRETE), (1, 1, ITEM_PURPLE_CONCRETE), (0, 2, ITEM_PURPLE_CONCRETE), (1, 2, ITEM_PURPLE_CONCRETE), (2, 2, ITEM_PURPLE_CONCRETE)] },
+    Recipe { needs: &[(ITEM_PURPLE_WOOL_SLAB, 3)], result: (ITEM_PURPLE_CUSHION, 1), name: "purple_cushion", shaped: true, cells: &[(0, 0, ITEM_PURPLE_WOOL_SLAB), (1, 0, ITEM_PURPLE_WOOL_SLAB), (2, 0, ITEM_PURPLE_WOOL_SLAB)] },
+    Recipe { needs: &[(ITEM_BLUE_DYE, 1), (ITEM_RED_DYE, 1)], result: (ITEM_PURPLE_DYE, 2), name: "purple_dye", shaped: false, cells: &[] },
+    Recipe { needs: &[(ITEM_GLASS, 2), (ITEM_LEATHER, 3), (ITEM_PURPLE_WOOL, 1)], result: (ITEM_PURPLE_HARNESS, 1), name: "purple_harness", shaped: true, cells: &[(0, 0, ITEM_LEATHER), (1, 0, ITEM_LEATHER), (2, 0, ITEM_LEATHER), (0, 1, ITEM_GLASS), (1, 1, ITEM_PURPLE_WOOL), (2, 1, ITEM_GLASS)] },
+    Recipe { needs: &[(ITEM_GLASS, 8), (ITEM_PURPLE_DYE, 1)], result: (ITEM_PURPLE_STAINED_GLASS, 8), name: "purple_stained_glass", shaped: true, cells: &[(0, 0, ITEM_GLASS), (1, 0, ITEM_GLASS), (2, 0, ITEM_GLASS), (0, 1, ITEM_GLASS), (1, 1, ITEM_PURPLE_DYE), (2, 1, ITEM_GLASS), (0, 2, ITEM_GLASS), (1, 2, ITEM_GLASS), (2, 2, ITEM_GLASS)] },
+    Recipe { needs: &[(ITEM_PURPLE_STAINED_GLASS, 6)], result: (ITEM_PURPLE_STAINED_GLASS_PANE, 16), name: "purple_stained_glass_pane", shaped: true, cells: &[(0, 0, ITEM_PURPLE_STAINED_GLASS), (1, 0, ITEM_PURPLE_STAINED_GLASS), (2, 0, ITEM_PURPLE_STAINED_GLASS), (0, 1, ITEM_PURPLE_STAINED_GLASS), (1, 1, ITEM_PURPLE_STAINED_GLASS), (2, 1, ITEM_PURPLE_STAINED_GLASS)] },
+    Recipe { needs: &[(ITEM_GLASS_PANE, 8), (ITEM_PURPLE_DYE, 1)], result: (ITEM_PURPLE_STAINED_GLASS_PANE, 8), name: "purple_stained_glass_pane_from_glass_pane", shaped: true, cells: &[(0, 0, ITEM_GLASS_PANE), (1, 0, ITEM_GLASS_PANE), (2, 0, ITEM_GLASS_PANE), (0, 1, ITEM_GLASS_PANE), (1, 1, ITEM_PURPLE_DYE), (2, 1, ITEM_GLASS_PANE), (0, 2, ITEM_GLASS_PANE), (1, 2, ITEM_GLASS_PANE), (2, 2, ITEM_GLASS_PANE)] },
+    Recipe { needs: &[(ITEM_PURPLE_DYE, 1), (ITEM_TERRACOTTA, 8)], result: (ITEM_PURPLE_TERRACOTTA, 8), name: "purple_terracotta", shaped: true, cells: &[(0, 0, ITEM_TERRACOTTA), (1, 0, ITEM_TERRACOTTA), (2, 0, ITEM_TERRACOTTA), (0, 1, ITEM_TERRACOTTA), (1, 1, ITEM_PURPLE_DYE), (2, 1, ITEM_TERRACOTTA), (0, 2, ITEM_TERRACOTTA), (1, 2, ITEM_TERRACOTTA), (2, 2, ITEM_TERRACOTTA)] },
+    Recipe { needs: &[(ITEM_PURPLE_WOOL, 3)], result: (ITEM_PURPLE_WOOL_SLAB, 6), name: "purple_wool_slab", shaped: true, cells: &[(0, 0, ITEM_PURPLE_WOOL), (1, 0, ITEM_PURPLE_WOOL), (2, 0, ITEM_PURPLE_WOOL)] },
+    Recipe { needs: &[(ITEM_PURPLE_WOOL, 6)], result: (ITEM_PURPLE_WOOL_STAIRS, 4), name: "purple_wool_stairs", shaped: true, cells: &[(0, 0, ITEM_PURPLE_WOOL), (0, 1, ITEM_PURPLE_WOOL), (1, 1, ITEM_PURPLE_WOOL), (0, 2, ITEM_PURPLE_WOOL), (1, 2, ITEM_PURPLE_WOOL), (2, 2, ITEM_PURPLE_WOOL)] },
+    Recipe { needs: &[(ITEM_POPPED_CHORUS_FRUIT, 4)], result: (ITEM_PURPUR_BLOCK, 4), name: "purpur_block", shaped: true, cells: &[(0, 0, ITEM_POPPED_CHORUS_FRUIT), (1, 0, ITEM_POPPED_CHORUS_FRUIT), (0, 1, ITEM_POPPED_CHORUS_FRUIT), (1, 1, ITEM_POPPED_CHORUS_FRUIT)] },
+    Recipe { needs: &[(ITEM_PURPUR_SLAB, 2)], result: (ITEM_PURPUR_PILLAR, 1), name: "purpur_pillar", shaped: true, cells: &[(0, 0, ITEM_PURPUR_SLAB), (0, 1, ITEM_PURPUR_SLAB)] },
+    Recipe { needs: &[(TAG_ALT_114, 3)], result: (ITEM_PURPUR_SLAB, 6), name: "purpur_slab", shaped: true, cells: &[(0, 0, TAG_ALT_114), (1, 0, TAG_ALT_114), (2, 0, TAG_ALT_114)] },
+    Recipe { needs: &[(TAG_ALT_114, 6)], result: (ITEM_PURPUR_STAIRS, 4), name: "purpur_stairs", shaped: true, cells: &[(0, 0, TAG_ALT_114), (0, 1, TAG_ALT_114), (1, 1, TAG_ALT_114), (0, 2, TAG_ALT_114), (1, 2, TAG_ALT_114), (2, 2, TAG_ALT_114)] },
+    Recipe { needs: &[(ITEM_QUARTZ, 4)], result: (ITEM_QUARTZ_BLOCK, 1), name: "quartz_block", shaped: true, cells: &[(0, 0, ITEM_QUARTZ), (1, 0, ITEM_QUARTZ), (0, 1, ITEM_QUARTZ), (1, 1, ITEM_QUARTZ)] },
+    Recipe { needs: &[(ITEM_QUARTZ_BLOCK, 4)], result: (ITEM_QUARTZ_BRICKS, 4), name: "quartz_bricks", shaped: true, cells: &[(0, 0, ITEM_QUARTZ_BLOCK), (1, 0, ITEM_QUARTZ_BLOCK), (0, 1, ITEM_QUARTZ_BLOCK), (1, 1, ITEM_QUARTZ_BLOCK)] },
+    Recipe { needs: &[(ITEM_QUARTZ_BLOCK, 2)], result: (ITEM_QUARTZ_PILLAR, 2), name: "quartz_pillar", shaped: true, cells: &[(0, 0, ITEM_QUARTZ_BLOCK), (0, 1, ITEM_QUARTZ_BLOCK)] },
+    Recipe { needs: &[(TAG_ALT_115, 3)], result: (ITEM_QUARTZ_SLAB, 6), name: "quartz_slab", shaped: true, cells: &[(0, 0, TAG_ALT_115), (1, 0, TAG_ALT_115), (2, 0, TAG_ALT_115)] },
+    Recipe { needs: &[(TAG_ALT_115, 6)], result: (ITEM_QUARTZ_STAIRS, 4), name: "quartz_stairs", shaped: true, cells: &[(0, 0, TAG_ALT_115), (0, 1, TAG_ALT_115), (1, 1, TAG_ALT_115), (0, 2, TAG_ALT_115), (1, 2, TAG_ALT_115), (2, 2, TAG_ALT_115)] },
+    Recipe { needs: &[(ITEM_BAKED_POTATO, 1), (ITEM_BOWL, 1), (ITEM_BROWN_MUSHROOM, 1), (ITEM_CARROT, 1), (ITEM_COOKED_RABBIT, 1)], result: (ITEM_RABBIT_STEW, 1), name: "rabbit_stew_from_brown_mushroom", shaped: false, cells: &[] },
+    Recipe { needs: &[(ITEM_BAKED_POTATO, 1), (ITEM_BOWL, 1), (ITEM_CARROT, 1), (ITEM_COOKED_RABBIT, 1), (ITEM_RED_MUSHROOM, 1)], result: (ITEM_RABBIT_STEW, 1), name: "rabbit_stew_from_red_mushroom", shaped: false, cells: &[] },
+    Recipe { needs: &[(ITEM_BAKED_POTATO, 1), (ITEM_BOWL, 1), (ITEM_CARROT, 1), (ITEM_COOKED_RABBIT, 1), (ITEM_SHELF_MUSHROOM, 1)], result: (ITEM_RABBIT_STEW, 1), name: "rabbit_stew_from_shelf_mushroom", shaped: false, cells: &[] },
+    Recipe { needs: &[(ITEM_IRON_INGOT, 6), (STICK, 1)], result: (ITEM_RAIL, 16), name: "rail", shaped: true, cells: &[(0, 0, ITEM_IRON_INGOT), (2, 0, ITEM_IRON_INGOT), (0, 1, ITEM_IRON_INGOT), (1, 1, STICK), (2, 1, ITEM_IRON_INGOT), (0, 2, ITEM_IRON_INGOT), (2, 2, ITEM_IRON_INGOT)] },
+    Recipe { needs: &[(ITEM_DIAMOND, 7), (ITEM_RAISER_ARMOR_TRIM_SMITHING_TEMPLATE, 1), (ITEM_TERRACOTTA, 1)], result: (ITEM_RAISER_ARMOR_TRIM_SMITHING_TEMPLATE, 2), name: "raiser_armor_trim_smithing_template", shaped: true, cells: &[(0, 0, ITEM_DIAMOND), (1, 0, ITEM_RAISER_ARMOR_TRIM_SMITHING_TEMPLATE), (2, 0, ITEM_DIAMOND), (0, 1, ITEM_DIAMOND), (1, 1, ITEM_TERRACOTTA), (2, 1, ITEM_DIAMOND), (0, 2, ITEM_DIAMOND), (1, 2, ITEM_DIAMOND), (2, 2, ITEM_DIAMOND)] },
+    Recipe { needs: &[(ITEM_RAW_COPPER_BLOCK, 1)], result: (ITEM_RAW_COPPER, 9), name: "raw_copper", shaped: false, cells: &[] },
+    Recipe { needs: &[(ITEM_RAW_COPPER, 9)], result: (ITEM_RAW_COPPER_BLOCK, 1), name: "raw_copper_block", shaped: true, cells: &[(0, 0, ITEM_RAW_COPPER), (1, 0, ITEM_RAW_COPPER), (2, 0, ITEM_RAW_COPPER), (0, 1, ITEM_RAW_COPPER), (1, 1, ITEM_RAW_COPPER), (2, 1, ITEM_RAW_COPPER), (0, 2, ITEM_RAW_COPPER), (1, 2, ITEM_RAW_COPPER), (2, 2, ITEM_RAW_COPPER)] },
+    Recipe { needs: &[(ITEM_RAW_GOLD_BLOCK, 1)], result: (ITEM_RAW_GOLD, 9), name: "raw_gold", shaped: false, cells: &[] },
+    Recipe { needs: &[(ITEM_RAW_GOLD, 9)], result: (ITEM_RAW_GOLD_BLOCK, 1), name: "raw_gold_block", shaped: true, cells: &[(0, 0, ITEM_RAW_GOLD), (1, 0, ITEM_RAW_GOLD), (2, 0, ITEM_RAW_GOLD), (0, 1, ITEM_RAW_GOLD), (1, 1, ITEM_RAW_GOLD), (2, 1, ITEM_RAW_GOLD), (0, 2, ITEM_RAW_GOLD), (1, 2, ITEM_RAW_GOLD), (2, 2, ITEM_RAW_GOLD)] },
+    Recipe { needs: &[(ITEM_RAW_IRON_BLOCK, 1)], result: (ITEM_RAW_IRON, 9), name: "raw_iron", shaped: false, cells: &[] },
+    Recipe { needs: &[(ITEM_RAW_IRON, 9)], result: (ITEM_RAW_IRON_BLOCK, 1), name: "raw_iron_block", shaped: true, cells: &[(0, 0, ITEM_RAW_IRON), (1, 0, ITEM_RAW_IRON), (2, 0, ITEM_RAW_IRON), (0, 1, ITEM_RAW_IRON), (1, 1, ITEM_RAW_IRON), (2, 1, ITEM_RAW_IRON), (0, 2, ITEM_RAW_IRON), (1, 2, ITEM_RAW_IRON), (2, 2, ITEM_RAW_IRON)] },
+    Recipe { needs: &[(ITEM_COMPASS, 1), (ITEM_ECHO_SHARD, 8)], result: (ITEM_RECOVERY_COMPASS, 1), name: "recovery_compass", shaped: true, cells: &[(0, 0, ITEM_ECHO_SHARD), (1, 0, ITEM_ECHO_SHARD), (2, 0, ITEM_ECHO_SHARD), (0, 1, ITEM_ECHO_SHARD), (1, 1, ITEM_COMPASS), (2, 1, ITEM_ECHO_SHARD), (0, 2, ITEM_ECHO_SHARD), (1, 2, ITEM_ECHO_SHARD), (2, 2, ITEM_ECHO_SHARD)] },
+    Recipe { needs: &[(ITEM_RED_WOOL, 6), (STICK, 1)], result: (ITEM_RED_BANNER, 1), name: "red_banner", shaped: true, cells: &[(0, 0, ITEM_RED_WOOL), (1, 0, ITEM_RED_WOOL), (2, 0, ITEM_RED_WOOL), (0, 1, ITEM_RED_WOOL), (1, 1, ITEM_RED_WOOL), (2, 1, ITEM_RED_WOOL), (1, 2, STICK)] },
+    Recipe { needs: &[(ITEM_RED_WOOL, 3), (TAG_PLANKS, 3)], result: (ITEM_RED_BED, 1), name: "red_bed", shaped: true, cells: &[(0, 0, ITEM_RED_WOOL), (1, 0, ITEM_RED_WOOL), (2, 0, ITEM_RED_WOOL), (0, 1, TAG_PLANKS), (1, 1, TAG_PLANKS), (2, 1, TAG_PLANKS)] },
+    Recipe { needs: &[(ITEM_CANDLE, 1), (ITEM_RED_DYE, 1)], result: (ITEM_RED_CANDLE, 1), name: "red_candle", shaped: false, cells: &[] },
+    Recipe { needs: &[(ITEM_RED_WOOL, 2)], result: (ITEM_RED_CARPET, 3), name: "red_carpet", shaped: true, cells: &[(0, 0, ITEM_RED_WOOL), (1, 0, ITEM_RED_WOOL)] },
+    Recipe { needs: &[(ITEM_GRAVEL, 1), (ITEM_GRAVEL, 1), (ITEM_GRAVEL, 1), (ITEM_GRAVEL, 1), (ITEM_RED_DYE, 1), (ITEM_SAND, 1), (ITEM_SAND, 1), (ITEM_SAND, 1), (ITEM_SAND, 1)], result: (ITEM_RED_CONCRETE_POWDER, 8), name: "red_concrete_powder", shaped: false, cells: &[] },
+    Recipe { needs: &[(ITEM_RED_CONCRETE, 3)], result: (ITEM_RED_CONCRETE_SLAB, 6), name: "red_concrete_slab", shaped: true, cells: &[(0, 0, ITEM_RED_CONCRETE), (1, 0, ITEM_RED_CONCRETE), (2, 0, ITEM_RED_CONCRETE)] },
+    Recipe { needs: &[(ITEM_RED_CONCRETE, 6)], result: (ITEM_RED_CONCRETE_STAIRS, 4), name: "red_concrete_stairs", shaped: true, cells: &[(0, 0, ITEM_RED_CONCRETE), (0, 1, ITEM_RED_CONCRETE), (1, 1, ITEM_RED_CONCRETE), (0, 2, ITEM_RED_CONCRETE), (1, 2, ITEM_RED_CONCRETE), (2, 2, ITEM_RED_CONCRETE)] },
+    Recipe { needs: &[(ITEM_RED_WOOL_SLAB, 3)], result: (ITEM_RED_CUSHION, 1), name: "red_cushion", shaped: true, cells: &[(0, 0, ITEM_RED_WOOL_SLAB), (1, 0, ITEM_RED_WOOL_SLAB), (2, 0, ITEM_RED_WOOL_SLAB)] },
+    Recipe { needs: &[(ITEM_BEETROOT, 1)], result: (ITEM_RED_DYE, 1), name: "red_dye_from_beetroot", shaped: false, cells: &[] },
+    Recipe { needs: &[(ITEM_POPPY, 1)], result: (ITEM_RED_DYE, 1), name: "red_dye_from_poppy", shaped: false, cells: &[] },
+    Recipe { needs: &[(ITEM_ROSE_BUSH, 1)], result: (ITEM_RED_DYE, 2), name: "red_dye_from_rose_bush", shaped: false, cells: &[] },
+    Recipe { needs: &[(ITEM_RED_TULIP, 1)], result: (ITEM_RED_DYE, 1), name: "red_dye_from_tulip", shaped: false, cells: &[] },
+    Recipe { needs: &[(ITEM_GLASS, 2), (ITEM_LEATHER, 3), (ITEM_RED_WOOL, 1)], result: (ITEM_RED_HARNESS, 1), name: "red_harness", shaped: true, cells: &[(0, 0, ITEM_LEATHER), (1, 0, ITEM_LEATHER), (2, 0, ITEM_LEATHER), (0, 1, ITEM_GLASS), (1, 1, ITEM_RED_WOOL), (2, 1, ITEM_GLASS)] },
+    Recipe { needs: &[(ITEM_RED_NETHER_BRICKS, 3)], result: (ITEM_RED_NETHER_BRICK_SLAB, 6), name: "red_nether_brick_slab", shaped: true, cells: &[(0, 0, ITEM_RED_NETHER_BRICKS), (1, 0, ITEM_RED_NETHER_BRICKS), (2, 0, ITEM_RED_NETHER_BRICKS)] },
+    Recipe { needs: &[(ITEM_RED_NETHER_BRICKS, 6)], result: (ITEM_RED_NETHER_BRICK_STAIRS, 4), name: "red_nether_brick_stairs", shaped: true, cells: &[(0, 0, ITEM_RED_NETHER_BRICKS), (0, 1, ITEM_RED_NETHER_BRICKS), (1, 1, ITEM_RED_NETHER_BRICKS), (0, 2, ITEM_RED_NETHER_BRICKS), (1, 2, ITEM_RED_NETHER_BRICKS), (2, 2, ITEM_RED_NETHER_BRICKS)] },
+    Recipe { needs: &[(ITEM_RED_NETHER_BRICKS, 6)], result: (ITEM_RED_NETHER_BRICK_WALL, 6), name: "red_nether_brick_wall", shaped: true, cells: &[(0, 0, ITEM_RED_NETHER_BRICKS), (1, 0, ITEM_RED_NETHER_BRICKS), (2, 0, ITEM_RED_NETHER_BRICKS), (0, 1, ITEM_RED_NETHER_BRICKS), (1, 1, ITEM_RED_NETHER_BRICKS), (2, 1, ITEM_RED_NETHER_BRICKS)] },
+    Recipe { needs: &[(ITEM_NETHER_BRICK, 2), (ITEM_NETHER_WART, 2)], result: (ITEM_RED_NETHER_BRICKS, 1), name: "red_nether_bricks", shaped: true, cells: &[(0, 0, ITEM_NETHER_BRICK), (1, 0, ITEM_NETHER_WART), (0, 1, ITEM_NETHER_WART), (1, 1, ITEM_NETHER_BRICK)] },
+    Recipe { needs: &[(ITEM_RED_SAND, 4)], result: (ITEM_RED_SANDSTONE, 1), name: "red_sandstone", shaped: true, cells: &[(0, 0, ITEM_RED_SAND), (1, 0, ITEM_RED_SAND), (0, 1, ITEM_RED_SAND), (1, 1, ITEM_RED_SAND)] },
+    Recipe { needs: &[(TAG_ALT_116, 3)], result: (ITEM_RED_SANDSTONE_SLAB, 6), name: "red_sandstone_slab", shaped: true, cells: &[(0, 0, TAG_ALT_116), (1, 0, TAG_ALT_116), (2, 0, TAG_ALT_116)] },
+    Recipe { needs: &[(TAG_ALT_117, 6)], result: (ITEM_RED_SANDSTONE_STAIRS, 4), name: "red_sandstone_stairs", shaped: true, cells: &[(0, 0, TAG_ALT_117), (0, 1, TAG_ALT_117), (1, 1, TAG_ALT_117), (0, 2, TAG_ALT_117), (1, 2, TAG_ALT_117), (2, 2, TAG_ALT_117)] },
+    Recipe { needs: &[(ITEM_RED_SANDSTONE, 6)], result: (ITEM_RED_SANDSTONE_WALL, 6), name: "red_sandstone_wall", shaped: true, cells: &[(0, 0, ITEM_RED_SANDSTONE), (1, 0, ITEM_RED_SANDSTONE), (2, 0, ITEM_RED_SANDSTONE), (0, 1, ITEM_RED_SANDSTONE), (1, 1, ITEM_RED_SANDSTONE), (2, 1, ITEM_RED_SANDSTONE)] },
+    Recipe { needs: &[(ITEM_GLASS, 8), (ITEM_RED_DYE, 1)], result: (ITEM_RED_STAINED_GLASS, 8), name: "red_stained_glass", shaped: true, cells: &[(0, 0, ITEM_GLASS), (1, 0, ITEM_GLASS), (2, 0, ITEM_GLASS), (0, 1, ITEM_GLASS), (1, 1, ITEM_RED_DYE), (2, 1, ITEM_GLASS), (0, 2, ITEM_GLASS), (1, 2, ITEM_GLASS), (2, 2, ITEM_GLASS)] },
+    Recipe { needs: &[(ITEM_RED_STAINED_GLASS, 6)], result: (ITEM_RED_STAINED_GLASS_PANE, 16), name: "red_stained_glass_pane", shaped: true, cells: &[(0, 0, ITEM_RED_STAINED_GLASS), (1, 0, ITEM_RED_STAINED_GLASS), (2, 0, ITEM_RED_STAINED_GLASS), (0, 1, ITEM_RED_STAINED_GLASS), (1, 1, ITEM_RED_STAINED_GLASS), (2, 1, ITEM_RED_STAINED_GLASS)] },
+    Recipe { needs: &[(ITEM_GLASS_PANE, 8), (ITEM_RED_DYE, 1)], result: (ITEM_RED_STAINED_GLASS_PANE, 8), name: "red_stained_glass_pane_from_glass_pane", shaped: true, cells: &[(0, 0, ITEM_GLASS_PANE), (1, 0, ITEM_GLASS_PANE), (2, 0, ITEM_GLASS_PANE), (0, 1, ITEM_GLASS_PANE), (1, 1, ITEM_RED_DYE), (2, 1, ITEM_GLASS_PANE), (0, 2, ITEM_GLASS_PANE), (1, 2, ITEM_GLASS_PANE), (2, 2, ITEM_GLASS_PANE)] },
+    Recipe { needs: &[(ITEM_RED_DYE, 1), (ITEM_TERRACOTTA, 8)], result: (ITEM_RED_TERRACOTTA, 8), name: "red_terracotta", shaped: true, cells: &[(0, 0, ITEM_TERRACOTTA), (1, 0, ITEM_TERRACOTTA), (2, 0, ITEM_TERRACOTTA), (0, 1, ITEM_TERRACOTTA), (1, 1, ITEM_RED_DYE), (2, 1, ITEM_TERRACOTTA), (0, 2, ITEM_TERRACOTTA), (1, 2, ITEM_TERRACOTTA), (2, 2, ITEM_TERRACOTTA)] },
+    Recipe { needs: &[(ITEM_RED_WOOL, 3)], result: (ITEM_RED_WOOL_SLAB, 6), name: "red_wool_slab", shaped: true, cells: &[(0, 0, ITEM_RED_WOOL), (1, 0, ITEM_RED_WOOL), (2, 0, ITEM_RED_WOOL)] },
+    Recipe { needs: &[(ITEM_RED_WOOL, 6)], result: (ITEM_RED_WOOL_STAIRS, 4), name: "red_wool_stairs", shaped: true, cells: &[(0, 0, ITEM_RED_WOOL), (0, 1, ITEM_RED_WOOL), (1, 1, ITEM_RED_WOOL), (0, 2, ITEM_RED_WOOL), (1, 2, ITEM_RED_WOOL), (2, 2, ITEM_RED_WOOL)] },
+    Recipe { needs: &[(ITEM_REDSTONE_BLOCK, 1)], result: (ITEM_REDSTONE, 9), name: "redstone", shaped: false, cells: &[] },
+    Recipe { needs: &[(ITEM_REDSTONE, 9)], result: (ITEM_REDSTONE_BLOCK, 1), name: "redstone_block", shaped: true, cells: &[(0, 0, ITEM_REDSTONE), (1, 0, ITEM_REDSTONE), (2, 0, ITEM_REDSTONE), (0, 1, ITEM_REDSTONE), (1, 1, ITEM_REDSTONE), (2, 1, ITEM_REDSTONE), (0, 2, ITEM_REDSTONE), (1, 2, ITEM_REDSTONE), (2, 2, ITEM_REDSTONE)] },
+    Recipe { needs: &[(ITEM_GLOWSTONE, 1), (ITEM_REDSTONE, 4)], result: (ITEM_REDSTONE_LAMP, 1), name: "redstone_lamp", shaped: true, cells: &[(1, 0, ITEM_REDSTONE), (0, 1, ITEM_REDSTONE), (1, 1, ITEM_GLOWSTONE), (2, 1, ITEM_REDSTONE), (1, 2, ITEM_REDSTONE)] },
+    Recipe { needs: &[(ITEM_REDSTONE, 1), (STICK, 1)], result: (ITEM_REDSTONE_TORCH, 1), name: "redstone_torch", shaped: true, cells: &[(0, 0, ITEM_REDSTONE), (0, 1, STICK)] },
+    Recipe { needs: &[(ITEM_REDSTONE, 1), (ITEM_REDSTONE_TORCH, 2), (ITEM_STONE, 3)], result: (ITEM_REPEATER, 1), name: "repeater", shaped: true, cells: &[(0, 0, ITEM_REDSTONE_TORCH), (1, 0, ITEM_REDSTONE), (2, 0, ITEM_REDSTONE_TORCH), (0, 1, ITEM_STONE), (1, 1, ITEM_STONE), (2, 1, ITEM_STONE)] },
+    Recipe { needs: &[(ITEM_RESIN_CLUMP, 9)], result: (ITEM_RESIN_BLOCK, 1), name: "resin_block", shaped: true, cells: &[(0, 0, ITEM_RESIN_CLUMP), (1, 0, ITEM_RESIN_CLUMP), (2, 0, ITEM_RESIN_CLUMP), (0, 1, ITEM_RESIN_CLUMP), (1, 1, ITEM_RESIN_CLUMP), (2, 1, ITEM_RESIN_CLUMP), (0, 2, ITEM_RESIN_CLUMP), (1, 2, ITEM_RESIN_CLUMP), (2, 2, ITEM_RESIN_CLUMP)] },
+    Recipe { needs: &[(ITEM_RESIN_BRICKS, 3)], result: (ITEM_RESIN_BRICK_SLAB, 6), name: "resin_brick_slab", shaped: true, cells: &[(0, 0, ITEM_RESIN_BRICKS), (1, 0, ITEM_RESIN_BRICKS), (2, 0, ITEM_RESIN_BRICKS)] },
+    Recipe { needs: &[(ITEM_RESIN_BRICKS, 6)], result: (ITEM_RESIN_BRICK_STAIRS, 4), name: "resin_brick_stairs", shaped: true, cells: &[(0, 0, ITEM_RESIN_BRICKS), (0, 1, ITEM_RESIN_BRICKS), (1, 1, ITEM_RESIN_BRICKS), (0, 2, ITEM_RESIN_BRICKS), (1, 2, ITEM_RESIN_BRICKS), (2, 2, ITEM_RESIN_BRICKS)] },
+    Recipe { needs: &[(ITEM_RESIN_BRICKS, 6)], result: (ITEM_RESIN_BRICK_WALL, 6), name: "resin_brick_wall", shaped: true, cells: &[(0, 0, ITEM_RESIN_BRICKS), (1, 0, ITEM_RESIN_BRICKS), (2, 0, ITEM_RESIN_BRICKS), (0, 1, ITEM_RESIN_BRICKS), (1, 1, ITEM_RESIN_BRICKS), (2, 1, ITEM_RESIN_BRICKS)] },
+    Recipe { needs: &[(ITEM_RESIN_BRICK, 4)], result: (ITEM_RESIN_BRICKS, 1), name: "resin_bricks", shaped: true, cells: &[(0, 0, ITEM_RESIN_BRICK), (1, 0, ITEM_RESIN_BRICK), (0, 1, ITEM_RESIN_BRICK), (1, 1, ITEM_RESIN_BRICK)] },
+    Recipe { needs: &[(ITEM_RESIN_BLOCK, 1)], result: (ITEM_RESIN_CLUMP, 9), name: "resin_clump", shaped: false, cells: &[] },
+    Recipe { needs: &[(ITEM_CRYING_OBSIDIAN, 6), (ITEM_GLOWSTONE, 3)], result: (ITEM_RESPAWN_ANCHOR, 1), name: "respawn_anchor", shaped: true, cells: &[(0, 0, ITEM_CRYING_OBSIDIAN), (1, 0, ITEM_CRYING_OBSIDIAN), (2, 0, ITEM_CRYING_OBSIDIAN), (0, 1, ITEM_GLOWSTONE), (1, 1, ITEM_GLOWSTONE), (2, 1, ITEM_GLOWSTONE), (0, 2, ITEM_CRYING_OBSIDIAN), (1, 2, ITEM_CRYING_OBSIDIAN), (2, 2, ITEM_CRYING_OBSIDIAN)] },
+    Recipe { needs: &[(ITEM_DIAMOND, 7), (ITEM_NETHERRACK, 1), (ITEM_RIB_ARMOR_TRIM_SMITHING_TEMPLATE, 1)], result: (ITEM_RIB_ARMOR_TRIM_SMITHING_TEMPLATE, 2), name: "rib_armor_trim_smithing_template", shaped: true, cells: &[(0, 0, ITEM_DIAMOND), (1, 0, ITEM_RIB_ARMOR_TRIM_SMITHING_TEMPLATE), (2, 0, ITEM_DIAMOND), (0, 1, ITEM_DIAMOND), (1, 1, ITEM_NETHERRACK), (2, 1, ITEM_DIAMOND), (0, 2, ITEM_DIAMOND), (1, 2, ITEM_DIAMOND), (2, 2, ITEM_DIAMOND)] },
+    Recipe { needs: &[(ITEM_IRON_INGOT, 1), (ITEM_LEATHER, 3)], result: (ITEM_SADDLE, 1), name: "saddle", shaped: true, cells: &[(1, 0, ITEM_LEATHER), (0, 1, ITEM_LEATHER), (1, 1, ITEM_IRON_INGOT), (2, 1, ITEM_LEATHER)] },
+    Recipe { needs: &[(ITEM_SAND, 4)], result: (ITEM_SANDSTONE, 1), name: "sandstone", shaped: true, cells: &[(0, 0, ITEM_SAND), (1, 0, ITEM_SAND), (0, 1, ITEM_SAND), (1, 1, ITEM_SAND)] },
+    Recipe { needs: &[(TAG_ALT_118, 3)], result: (ITEM_SANDSTONE_SLAB, 6), name: "sandstone_slab", shaped: true, cells: &[(0, 0, TAG_ALT_118), (1, 0, TAG_ALT_118), (2, 0, TAG_ALT_118)] },
+    Recipe { needs: &[(TAG_ALT_119, 6)], result: (ITEM_SANDSTONE_STAIRS, 4), name: "sandstone_stairs", shaped: true, cells: &[(0, 0, TAG_ALT_119), (0, 1, TAG_ALT_119), (1, 1, TAG_ALT_119), (0, 2, TAG_ALT_119), (1, 2, TAG_ALT_119), (2, 2, TAG_ALT_119)] },
+    Recipe { needs: &[(ITEM_SANDSTONE, 6)], result: (ITEM_SANDSTONE_WALL, 6), name: "sandstone_wall", shaped: true, cells: &[(0, 0, ITEM_SANDSTONE), (1, 0, ITEM_SANDSTONE), (2, 0, ITEM_SANDSTONE), (0, 1, ITEM_SANDSTONE), (1, 1, ITEM_SANDSTONE), (2, 1, ITEM_SANDSTONE)] },
+    Recipe { needs: &[(ITEM_BAMBOO, 6), (ITEM_STRING, 1)], result: (ITEM_SCAFFOLDING, 6), name: "scaffolding", shaped: true, cells: &[(0, 0, ITEM_BAMBOO), (1, 0, ITEM_STRING), (2, 0, ITEM_BAMBOO), (0, 1, ITEM_BAMBOO), (2, 1, ITEM_BAMBOO), (0, 2, ITEM_BAMBOO), (2, 2, ITEM_BAMBOO)] },
+    Recipe { needs: &[(ITEM_PRISMARINE_CRYSTALS, 5), (ITEM_PRISMARINE_SHARD, 4)], result: (ITEM_SEA_LANTERN, 1), name: "sea_lantern", shaped: true, cells: &[(0, 0, ITEM_PRISMARINE_SHARD), (1, 0, ITEM_PRISMARINE_CRYSTALS), (2, 0, ITEM_PRISMARINE_SHARD), (0, 1, ITEM_PRISMARINE_CRYSTALS), (1, 1, ITEM_PRISMARINE_CRYSTALS), (2, 1, ITEM_PRISMARINE_CRYSTALS), (0, 2, ITEM_PRISMARINE_SHARD), (1, 2, ITEM_PRISMARINE_CRYSTALS), (2, 2, ITEM_PRISMARINE_SHARD)] },
+    Recipe { needs: &[(COBBLESTONE, 1), (ITEM_DIAMOND, 7), (ITEM_SENTRY_ARMOR_TRIM_SMITHING_TEMPLATE, 1)], result: (ITEM_SENTRY_ARMOR_TRIM_SMITHING_TEMPLATE, 2), name: "sentry_armor_trim_smithing_template", shaped: true, cells: &[(0, 0, ITEM_DIAMOND), (1, 0, ITEM_SENTRY_ARMOR_TRIM_SMITHING_TEMPLATE), (2, 0, ITEM_DIAMOND), (0, 1, ITEM_DIAMOND), (1, 1, COBBLESTONE), (2, 1, ITEM_DIAMOND), (0, 2, ITEM_DIAMOND), (1, 2, ITEM_DIAMOND), (2, 2, ITEM_DIAMOND)] },
+    Recipe { needs: &[(ITEM_DIAMOND, 7), (ITEM_SHAPER_ARMOR_TRIM_SMITHING_TEMPLATE, 1), (ITEM_TERRACOTTA, 1)], result: (ITEM_SHAPER_ARMOR_TRIM_SMITHING_TEMPLATE, 2), name: "shaper_armor_trim_smithing_template", shaped: true, cells: &[(0, 0, ITEM_DIAMOND), (1, 0, ITEM_SHAPER_ARMOR_TRIM_SMITHING_TEMPLATE), (2, 0, ITEM_DIAMOND), (0, 1, ITEM_DIAMOND), (1, 1, ITEM_TERRACOTTA), (2, 1, ITEM_DIAMOND), (0, 2, ITEM_DIAMOND), (1, 2, ITEM_DIAMOND), (2, 2, ITEM_DIAMOND)] },
+    Recipe { needs: &[(ITEM_IRON_INGOT, 2)], result: (ITEM_SHEARS, 1), name: "shears", shaped: true, cells: &[(1, 0, ITEM_IRON_INGOT), (0, 1, ITEM_IRON_INGOT)] },
+    Recipe { needs: &[(ITEM_IRON_INGOT, 1), (TAG_PLANKS, 6)], result: (ITEM_SHIELD, 1), name: "shield", shaped: true, cells: &[(0, 0, TAG_PLANKS), (1, 0, ITEM_IRON_INGOT), (2, 0, TAG_PLANKS), (0, 1, TAG_PLANKS), (1, 1, TAG_PLANKS), (2, 1, TAG_PLANKS), (1, 2, TAG_PLANKS)] },
+    Recipe { needs: &[(ITEM_CHEST, 1), (ITEM_SHULKER_SHELL, 2)], result: (ITEM_SHULKER_BOX, 1), name: "shulker_box", shaped: true, cells: &[(0, 0, ITEM_SHULKER_SHELL), (0, 1, ITEM_CHEST), (0, 2, ITEM_SHULKER_SHELL)] },
+    Recipe { needs: &[(ITEM_COBBLED_DEEPSLATE, 1), (ITEM_DIAMOND, 7), (ITEM_SILENCE_ARMOR_TRIM_SMITHING_TEMPLATE, 1)], result: (ITEM_SILENCE_ARMOR_TRIM_SMITHING_TEMPLATE, 2), name: "silence_armor_trim_smithing_template", shaped: true, cells: &[(0, 0, ITEM_DIAMOND), (1, 0, ITEM_SILENCE_ARMOR_TRIM_SMITHING_TEMPLATE), (2, 0, ITEM_DIAMOND), (0, 1, ITEM_DIAMOND), (1, 1, ITEM_COBBLED_DEEPSLATE), (2, 1, ITEM_DIAMOND), (0, 2, ITEM_DIAMOND), (1, 2, ITEM_DIAMOND), (2, 2, ITEM_DIAMOND)] },
+    Recipe { needs: &[(ITEM_PAPER, 1), (ITEM_WITHER_SKELETON_SKULL, 1)], result: (ITEM_SKULL_BANNER_PATTERN, 1), name: "skull_banner_pattern", shaped: false, cells: &[] },
+    Recipe { needs: &[(ITEM_SLIME_BLOCK, 1)], result: (ITEM_SLIME_BALL, 9), name: "slime_ball", shaped: false, cells: &[] },
+    Recipe { needs: &[(ITEM_SLIME_BALL, 9)], result: (ITEM_SLIME_BLOCK, 1), name: "slime_block", shaped: true, cells: &[(0, 0, ITEM_SLIME_BALL), (1, 0, ITEM_SLIME_BALL), (2, 0, ITEM_SLIME_BALL), (0, 1, ITEM_SLIME_BALL), (1, 1, ITEM_SLIME_BALL), (2, 1, ITEM_SLIME_BALL), (0, 2, ITEM_SLIME_BALL), (1, 2, ITEM_SLIME_BALL), (2, 2, ITEM_SLIME_BALL)] },
+    Recipe { needs: &[(ITEM_IRON_INGOT, 2), (TAG_PLANKS, 4)], result: (ITEM_SMITHING_TABLE, 1), name: "smithing_table", shaped: true, cells: &[(0, 0, ITEM_IRON_INGOT), (1, 0, ITEM_IRON_INGOT), (0, 1, TAG_PLANKS), (1, 1, TAG_PLANKS), (0, 2, TAG_PLANKS), (1, 2, TAG_PLANKS)] },
+    Recipe { needs: &[(ITEM_FURNACE, 1), (TAG_LOGS, 4)], result: (ITEM_SMOKER, 1), name: "smoker", shaped: true, cells: &[(1, 0, TAG_LOGS), (0, 1, TAG_LOGS), (1, 1, ITEM_FURNACE), (2, 1, TAG_LOGS), (1, 2, TAG_LOGS)] },
+    Recipe { needs: &[(ITEM_SMOOTH_QUARTZ, 3)], result: (ITEM_SMOOTH_QUARTZ_SLAB, 6), name: "smooth_quartz_slab", shaped: true, cells: &[(0, 0, ITEM_SMOOTH_QUARTZ), (1, 0, ITEM_SMOOTH_QUARTZ), (2, 0, ITEM_SMOOTH_QUARTZ)] },
+    Recipe { needs: &[(ITEM_SMOOTH_QUARTZ, 6)], result: (ITEM_SMOOTH_QUARTZ_STAIRS, 4), name: "smooth_quartz_stairs", shaped: true, cells: &[(0, 0, ITEM_SMOOTH_QUARTZ), (0, 1, ITEM_SMOOTH_QUARTZ), (1, 1, ITEM_SMOOTH_QUARTZ), (0, 2, ITEM_SMOOTH_QUARTZ), (1, 2, ITEM_SMOOTH_QUARTZ), (2, 2, ITEM_SMOOTH_QUARTZ)] },
+    Recipe { needs: &[(ITEM_SMOOTH_RED_SANDSTONE, 3)], result: (ITEM_SMOOTH_RED_SANDSTONE_SLAB, 6), name: "smooth_red_sandstone_slab", shaped: true, cells: &[(0, 0, ITEM_SMOOTH_RED_SANDSTONE), (1, 0, ITEM_SMOOTH_RED_SANDSTONE), (2, 0, ITEM_SMOOTH_RED_SANDSTONE)] },
+    Recipe { needs: &[(ITEM_SMOOTH_RED_SANDSTONE, 6)], result: (ITEM_SMOOTH_RED_SANDSTONE_STAIRS, 4), name: "smooth_red_sandstone_stairs", shaped: true, cells: &[(0, 0, ITEM_SMOOTH_RED_SANDSTONE), (0, 1, ITEM_SMOOTH_RED_SANDSTONE), (1, 1, ITEM_SMOOTH_RED_SANDSTONE), (0, 2, ITEM_SMOOTH_RED_SANDSTONE), (1, 2, ITEM_SMOOTH_RED_SANDSTONE), (2, 2, ITEM_SMOOTH_RED_SANDSTONE)] },
+    Recipe { needs: &[(ITEM_SMOOTH_SANDSTONE, 3)], result: (ITEM_SMOOTH_SANDSTONE_SLAB, 6), name: "smooth_sandstone_slab", shaped: true, cells: &[(0, 0, ITEM_SMOOTH_SANDSTONE), (1, 0, ITEM_SMOOTH_SANDSTONE), (2, 0, ITEM_SMOOTH_SANDSTONE)] },
+    Recipe { needs: &[(ITEM_SMOOTH_SANDSTONE, 6)], result: (ITEM_SMOOTH_SANDSTONE_STAIRS, 4), name: "smooth_sandstone_stairs", shaped: true, cells: &[(0, 0, ITEM_SMOOTH_SANDSTONE), (0, 1, ITEM_SMOOTH_SANDSTONE), (1, 1, ITEM_SMOOTH_SANDSTONE), (0, 2, ITEM_SMOOTH_SANDSTONE), (1, 2, ITEM_SMOOTH_SANDSTONE), (2, 2, ITEM_SMOOTH_SANDSTONE)] },
+    Recipe { needs: &[(ITEM_SMOOTH_STONE, 3)], result: (ITEM_SMOOTH_STONE_SLAB, 6), name: "smooth_stone_slab", shaped: true, cells: &[(0, 0, ITEM_SMOOTH_STONE), (1, 0, ITEM_SMOOTH_STONE), (2, 0, ITEM_SMOOTH_STONE)] },
+    Recipe { needs: &[(ITEM_BLACKSTONE, 1), (ITEM_DIAMOND, 7), (ITEM_SNOUT_ARMOR_TRIM_SMITHING_TEMPLATE, 1)], result: (ITEM_SNOUT_ARMOR_TRIM_SMITHING_TEMPLATE, 2), name: "snout_armor_trim_smithing_template", shaped: true, cells: &[(0, 0, ITEM_DIAMOND), (1, 0, ITEM_SNOUT_ARMOR_TRIM_SMITHING_TEMPLATE), (2, 0, ITEM_DIAMOND), (0, 1, ITEM_DIAMOND), (1, 1, ITEM_BLACKSTONE), (2, 1, ITEM_DIAMOND), (0, 2, ITEM_DIAMOND), (1, 2, ITEM_DIAMOND), (2, 2, ITEM_DIAMOND)] },
+    Recipe { needs: &[(ITEM_SNOW_BLOCK, 3)], result: (ITEM_SNOW, 6), name: "snow", shaped: true, cells: &[(0, 0, ITEM_SNOW_BLOCK), (1, 0, ITEM_SNOW_BLOCK), (2, 0, ITEM_SNOW_BLOCK)] },
+    Recipe { needs: &[(ITEM_SNOWBALL, 4)], result: (ITEM_SNOW_BLOCK, 1), name: "snow_block", shaped: true, cells: &[(0, 0, ITEM_SNOWBALL), (1, 0, ITEM_SNOWBALL), (0, 1, ITEM_SNOWBALL), (1, 1, ITEM_SNOWBALL)] },
+    Recipe { needs: &[(STICK, 3), (TAG_LOGS, 3), (TAG_SOUL_FIRE_BASE_BLOCKS, 1)], result: (ITEM_SOUL_CAMPFIRE, 1), name: "soul_campfire", shaped: true, cells: &[(1, 0, STICK), (0, 1, STICK), (1, 1, TAG_SOUL_FIRE_BASE_BLOCKS), (2, 1, STICK), (0, 2, TAG_LOGS), (1, 2, TAG_LOGS), (2, 2, TAG_LOGS)] },
+    Recipe { needs: &[(ITEM_IRON_NUGGET, 8), (ITEM_SOUL_TORCH, 1)], result: (ITEM_SOUL_LANTERN, 1), name: "soul_lantern", shaped: true, cells: &[(0, 0, ITEM_IRON_NUGGET), (1, 0, ITEM_IRON_NUGGET), (2, 0, ITEM_IRON_NUGGET), (0, 1, ITEM_IRON_NUGGET), (1, 1, ITEM_SOUL_TORCH), (2, 1, ITEM_IRON_NUGGET), (0, 2, ITEM_IRON_NUGGET), (1, 2, ITEM_IRON_NUGGET), (2, 2, ITEM_IRON_NUGGET)] },
+    Recipe { needs: &[(STICK, 1), (TAG_COALS, 1), (TAG_SOUL_FIRE_BASE_BLOCKS, 1)], result: (ITEM_SOUL_TORCH, 4), name: "soul_torch", shaped: true, cells: &[(0, 0, TAG_COALS), (0, 1, STICK), (0, 2, TAG_SOUL_FIRE_BASE_BLOCKS)] },
+    Recipe { needs: &[(ITEM_ARROW, 1), (ITEM_GLOWSTONE_DUST, 4)], result: (ITEM_SPECTRAL_ARROW, 2), name: "spectral_arrow", shaped: true, cells: &[(1, 0, ITEM_GLOWSTONE_DUST), (0, 1, ITEM_GLOWSTONE_DUST), (1, 1, ITEM_ARROW), (2, 1, ITEM_GLOWSTONE_DUST), (1, 2, ITEM_GLOWSTONE_DUST)] },
+    Recipe { needs: &[(ITEM_DIAMOND, 7), (ITEM_PURPUR_BLOCK, 1), (ITEM_SPIRE_ARMOR_TRIM_SMITHING_TEMPLATE, 1)], result: (ITEM_SPIRE_ARMOR_TRIM_SMITHING_TEMPLATE, 2), name: "spire_armor_trim_smithing_template", shaped: true, cells: &[(0, 0, ITEM_DIAMOND), (1, 0, ITEM_SPIRE_ARMOR_TRIM_SMITHING_TEMPLATE), (2, 0, ITEM_DIAMOND), (0, 1, ITEM_DIAMOND), (1, 1, ITEM_PURPUR_BLOCK), (2, 1, ITEM_DIAMOND), (0, 2, ITEM_DIAMOND), (1, 2, ITEM_DIAMOND), (2, 2, ITEM_DIAMOND)] },
+    Recipe { needs: &[(ITEM_SPRUCE_PLANKS, 5)], result: (ITEM_SPRUCE_BOAT, 1), name: "spruce_boat", shaped: true, cells: &[(0, 0, ITEM_SPRUCE_PLANKS), (2, 0, ITEM_SPRUCE_PLANKS), (0, 1, ITEM_SPRUCE_PLANKS), (1, 1, ITEM_SPRUCE_PLANKS), (2, 1, ITEM_SPRUCE_PLANKS)] },
+    Recipe { needs: &[(ITEM_SPRUCE_PLANKS, 1)], result: (ITEM_SPRUCE_BUTTON, 1), name: "spruce_button", shaped: false, cells: &[] },
+    Recipe { needs: &[(ITEM_CHEST, 1), (ITEM_SPRUCE_BOAT, 1)], result: (ITEM_SPRUCE_CHEST_BOAT, 1), name: "spruce_chest_boat", shaped: false, cells: &[] },
+    Recipe { needs: &[(ITEM_SPRUCE_PLANKS, 6)], result: (ITEM_SPRUCE_DOOR, 3), name: "spruce_door", shaped: true, cells: &[(0, 0, ITEM_SPRUCE_PLANKS), (1, 0, ITEM_SPRUCE_PLANKS), (0, 1, ITEM_SPRUCE_PLANKS), (1, 1, ITEM_SPRUCE_PLANKS), (0, 2, ITEM_SPRUCE_PLANKS), (1, 2, ITEM_SPRUCE_PLANKS)] },
+    Recipe { needs: &[(ITEM_SPRUCE_PLANKS, 4), (STICK, 2)], result: (ITEM_SPRUCE_FENCE, 3), name: "spruce_fence", shaped: true, cells: &[(0, 0, ITEM_SPRUCE_PLANKS), (1, 0, STICK), (2, 0, ITEM_SPRUCE_PLANKS), (0, 1, ITEM_SPRUCE_PLANKS), (1, 1, STICK), (2, 1, ITEM_SPRUCE_PLANKS)] },
+    Recipe { needs: &[(ITEM_SPRUCE_PLANKS, 2), (STICK, 4)], result: (ITEM_SPRUCE_FENCE_GATE, 1), name: "spruce_fence_gate", shaped: true, cells: &[(0, 0, STICK), (1, 0, ITEM_SPRUCE_PLANKS), (2, 0, STICK), (0, 1, STICK), (1, 1, ITEM_SPRUCE_PLANKS), (2, 1, STICK)] },
+    Recipe { needs: &[(ITEM_IRON_CHAIN, 2), (ITEM_STRIPPED_SPRUCE_LOG, 6)], result: (ITEM_SPRUCE_HANGING_SIGN, 6), name: "spruce_hanging_sign", shaped: true, cells: &[(0, 0, ITEM_IRON_CHAIN), (2, 0, ITEM_IRON_CHAIN), (0, 1, ITEM_STRIPPED_SPRUCE_LOG), (1, 1, ITEM_STRIPPED_SPRUCE_LOG), (2, 1, ITEM_STRIPPED_SPRUCE_LOG), (0, 2, ITEM_STRIPPED_SPRUCE_LOG), (1, 2, ITEM_STRIPPED_SPRUCE_LOG), (2, 2, ITEM_STRIPPED_SPRUCE_LOG)] },
+    Recipe { needs: &[(TAG_SPRUCE_LOGS, 1)], result: (ITEM_SPRUCE_PLANKS, 4), name: "spruce_planks", shaped: false, cells: &[] },
+    Recipe { needs: &[(ITEM_SPRUCE_PLANKS, 2)], result: (ITEM_SPRUCE_PRESSURE_PLATE, 1), name: "spruce_pressure_plate", shaped: true, cells: &[(0, 0, ITEM_SPRUCE_PLANKS), (1, 0, ITEM_SPRUCE_PLANKS)] },
+    Recipe { needs: &[(ITEM_STRIPPED_SPRUCE_LOG, 6)], result: (ITEM_SPRUCE_SHELF, 6), name: "spruce_shelf", shaped: true, cells: &[(0, 0, ITEM_STRIPPED_SPRUCE_LOG), (1, 0, ITEM_STRIPPED_SPRUCE_LOG), (2, 0, ITEM_STRIPPED_SPRUCE_LOG), (0, 2, ITEM_STRIPPED_SPRUCE_LOG), (1, 2, ITEM_STRIPPED_SPRUCE_LOG), (2, 2, ITEM_STRIPPED_SPRUCE_LOG)] },
+    Recipe { needs: &[(ITEM_SPRUCE_PLANKS, 6), (STICK, 1)], result: (ITEM_SPRUCE_SIGN, 3), name: "spruce_sign", shaped: true, cells: &[(0, 0, ITEM_SPRUCE_PLANKS), (1, 0, ITEM_SPRUCE_PLANKS), (2, 0, ITEM_SPRUCE_PLANKS), (0, 1, ITEM_SPRUCE_PLANKS), (1, 1, ITEM_SPRUCE_PLANKS), (2, 1, ITEM_SPRUCE_PLANKS), (1, 2, STICK)] },
+    Recipe { needs: &[(ITEM_SPRUCE_PLANKS, 3)], result: (ITEM_SPRUCE_SLAB, 6), name: "spruce_slab", shaped: true, cells: &[(0, 0, ITEM_SPRUCE_PLANKS), (1, 0, ITEM_SPRUCE_PLANKS), (2, 0, ITEM_SPRUCE_PLANKS)] },
+    Recipe { needs: &[(ITEM_SPRUCE_PLANKS, 6)], result: (ITEM_SPRUCE_STAIRS, 4), name: "spruce_stairs", shaped: true, cells: &[(0, 0, ITEM_SPRUCE_PLANKS), (0, 1, ITEM_SPRUCE_PLANKS), (1, 1, ITEM_SPRUCE_PLANKS), (0, 2, ITEM_SPRUCE_PLANKS), (1, 2, ITEM_SPRUCE_PLANKS), (2, 2, ITEM_SPRUCE_PLANKS)] },
+    Recipe { needs: &[(ITEM_SPRUCE_PLANKS, 6)], result: (ITEM_SPRUCE_TRAPDOOR, 2), name: "spruce_trapdoor", shaped: true, cells: &[(0, 0, ITEM_SPRUCE_PLANKS), (1, 0, ITEM_SPRUCE_PLANKS), (2, 0, ITEM_SPRUCE_PLANKS), (0, 1, ITEM_SPRUCE_PLANKS), (1, 1, ITEM_SPRUCE_PLANKS), (2, 1, ITEM_SPRUCE_PLANKS)] },
+    Recipe { needs: &[(ITEM_SPRUCE_LOG, 4)], result: (ITEM_SPRUCE_WOOD, 3), name: "spruce_wood", shaped: true, cells: &[(0, 0, ITEM_SPRUCE_LOG), (1, 0, ITEM_SPRUCE_LOG), (0, 1, ITEM_SPRUCE_LOG), (1, 1, ITEM_SPRUCE_LOG)] },
+    Recipe { needs: &[(ITEM_AMETHYST_SHARD, 1), (ITEM_COPPER_INGOT, 2)], result: (ITEM_SPYGLASS, 1), name: "spyglass", shaped: true, cells: &[(0, 0, ITEM_AMETHYST_SHARD), (0, 1, ITEM_COPPER_INGOT), (0, 2, ITEM_COPPER_INGOT)] },
+    Recipe { needs: &[(TAG_PLANKS, 2)], result: (STICK, 4), name: "stick", shaped: true, cells: &[(0, 0, TAG_PLANKS), (0, 1, TAG_PLANKS)] },
+    Recipe { needs: &[(ITEM_BAMBOO, 2)], result: (STICK, 1), name: "stick_from_bamboo_item", shaped: true, cells: &[(0, 0, ITEM_BAMBOO), (0, 1, ITEM_BAMBOO)] },
+    Recipe { needs: &[(ITEM_PISTON, 1), (ITEM_SLIME_BALL, 1)], result: (ITEM_STICKY_PISTON, 1), name: "sticky_piston", shaped: true, cells: &[(0, 0, ITEM_SLIME_BALL), (0, 1, ITEM_PISTON)] },
+    Recipe { needs: &[(STICK, 2), (TAG_STONE_CRAFTING_MATERIALS, 3)], result: (ITEM_STONE_AXE, 1), name: "stone_axe", shaped: true, cells: &[(0, 0, TAG_STONE_CRAFTING_MATERIALS), (1, 0, TAG_STONE_CRAFTING_MATERIALS), (0, 1, TAG_STONE_CRAFTING_MATERIALS), (1, 1, STICK), (1, 2, STICK)] },
+    Recipe { needs: &[(ITEM_STONE_BRICKS, 3)], result: (ITEM_STONE_BRICK_SLAB, 6), name: "stone_brick_slab", shaped: true, cells: &[(0, 0, ITEM_STONE_BRICKS), (1, 0, ITEM_STONE_BRICKS), (2, 0, ITEM_STONE_BRICKS)] },
+    Recipe { needs: &[(ITEM_STONE_BRICKS, 6)], result: (ITEM_STONE_BRICK_STAIRS, 4), name: "stone_brick_stairs", shaped: true, cells: &[(0, 0, ITEM_STONE_BRICKS), (0, 1, ITEM_STONE_BRICKS), (1, 1, ITEM_STONE_BRICKS), (0, 2, ITEM_STONE_BRICKS), (1, 2, ITEM_STONE_BRICKS), (2, 2, ITEM_STONE_BRICKS)] },
+    Recipe { needs: &[(ITEM_STONE_BRICKS, 6)], result: (ITEM_STONE_BRICK_WALL, 6), name: "stone_brick_wall", shaped: true, cells: &[(0, 0, ITEM_STONE_BRICKS), (1, 0, ITEM_STONE_BRICKS), (2, 0, ITEM_STONE_BRICKS), (0, 1, ITEM_STONE_BRICKS), (1, 1, ITEM_STONE_BRICKS), (2, 1, ITEM_STONE_BRICKS)] },
+    Recipe { needs: &[(ITEM_STONE, 4)], result: (ITEM_STONE_BRICKS, 4), name: "stone_bricks", shaped: true, cells: &[(0, 0, ITEM_STONE), (1, 0, ITEM_STONE), (0, 1, ITEM_STONE), (1, 1, ITEM_STONE)] },
+    Recipe { needs: &[(ITEM_STONE, 1)], result: (ITEM_STONE_BUTTON, 1), name: "stone_button", shaped: false, cells: &[] },
+    Recipe { needs: &[(STICK, 2), (TAG_STONE_CRAFTING_MATERIALS, 2)], result: (ITEM_STONE_HOE, 1), name: "stone_hoe", shaped: true, cells: &[(0, 0, TAG_STONE_CRAFTING_MATERIALS), (1, 0, TAG_STONE_CRAFTING_MATERIALS), (1, 1, STICK), (1, 2, STICK)] },
+    Recipe { needs: &[(STICK, 2), (TAG_STONE_CRAFTING_MATERIALS, 3)], result: (STONE_PICKAXE, 1), name: "stone_pickaxe", shaped: true, cells: &[(0, 0, TAG_STONE_CRAFTING_MATERIALS), (1, 0, TAG_STONE_CRAFTING_MATERIALS), (2, 0, TAG_STONE_CRAFTING_MATERIALS), (1, 1, STICK), (1, 2, STICK)] },
+    Recipe { needs: &[(ITEM_STONE, 2)], result: (ITEM_STONE_PRESSURE_PLATE, 1), name: "stone_pressure_plate", shaped: true, cells: &[(0, 0, ITEM_STONE), (1, 0, ITEM_STONE)] },
+    Recipe { needs: &[(STICK, 2), (TAG_STONE_CRAFTING_MATERIALS, 1)], result: (ITEM_STONE_SHOVEL, 1), name: "stone_shovel", shaped: true, cells: &[(0, 0, TAG_STONE_CRAFTING_MATERIALS), (0, 1, STICK), (0, 2, STICK)] },
+    Recipe { needs: &[(ITEM_STONE, 3)], result: (ITEM_STONE_SLAB, 6), name: "stone_slab", shaped: true, cells: &[(0, 0, ITEM_STONE), (1, 0, ITEM_STONE), (2, 0, ITEM_STONE)] },
+    Recipe { needs: &[(STICK, 2), (TAG_STONE_CRAFTING_MATERIALS, 1)], result: (ITEM_STONE_SPEAR, 1), name: "stone_spear", shaped: true, cells: &[(2, 0, TAG_STONE_CRAFTING_MATERIALS), (1, 1, STICK), (0, 2, STICK)] },
+    Recipe { needs: &[(ITEM_STONE, 6)], result: (ITEM_STONE_STAIRS, 4), name: "stone_stairs", shaped: true, cells: &[(0, 0, ITEM_STONE), (0, 1, ITEM_STONE), (1, 1, ITEM_STONE), (0, 2, ITEM_STONE), (1, 2, ITEM_STONE), (2, 2, ITEM_STONE)] },
+    Recipe { needs: &[(STICK, 1), (TAG_STONE_CRAFTING_MATERIALS, 2)], result: (ITEM_STONE_SWORD, 1), name: "stone_sword", shaped: true, cells: &[(0, 0, TAG_STONE_CRAFTING_MATERIALS), (0, 1, TAG_STONE_CRAFTING_MATERIALS), (0, 2, STICK)] },
+    Recipe { needs: &[(ITEM_IRON_INGOT, 1), (ITEM_STONE, 3)], result: (ITEM_STONECUTTER, 1), name: "stonecutter", shaped: true, cells: &[(1, 0, ITEM_IRON_INGOT), (0, 1, ITEM_STONE), (1, 1, ITEM_STONE), (2, 1, ITEM_STONE)] },
+    Recipe { needs: &[(ITEM_HAY_BLOCK, 3)], result: (ITEM_STRAW_BED, 4), name: "straw_bed", shaped: true, cells: &[(0, 0, ITEM_HAY_BLOCK), (1, 0, ITEM_HAY_BLOCK), (2, 0, ITEM_HAY_BLOCK)] },
+    Recipe { needs: &[(ITEM_STRIPPED_ACACIA_LOG, 4)], result: (ITEM_STRIPPED_ACACIA_WOOD, 3), name: "stripped_acacia_wood", shaped: true, cells: &[(0, 0, ITEM_STRIPPED_ACACIA_LOG), (1, 0, ITEM_STRIPPED_ACACIA_LOG), (0, 1, ITEM_STRIPPED_ACACIA_LOG), (1, 1, ITEM_STRIPPED_ACACIA_LOG)] },
+    Recipe { needs: &[(ITEM_STRIPPED_BIRCH_LOG, 4)], result: (ITEM_STRIPPED_BIRCH_WOOD, 3), name: "stripped_birch_wood", shaped: true, cells: &[(0, 0, ITEM_STRIPPED_BIRCH_LOG), (1, 0, ITEM_STRIPPED_BIRCH_LOG), (0, 1, ITEM_STRIPPED_BIRCH_LOG), (1, 1, ITEM_STRIPPED_BIRCH_LOG)] },
+    Recipe { needs: &[(ITEM_STRIPPED_CHERRY_LOG, 4)], result: (ITEM_STRIPPED_CHERRY_WOOD, 3), name: "stripped_cherry_wood", shaped: true, cells: &[(0, 0, ITEM_STRIPPED_CHERRY_LOG), (1, 0, ITEM_STRIPPED_CHERRY_LOG), (0, 1, ITEM_STRIPPED_CHERRY_LOG), (1, 1, ITEM_STRIPPED_CHERRY_LOG)] },
+    Recipe { needs: &[(ITEM_STRIPPED_CRIMSON_STEM, 4)], result: (ITEM_STRIPPED_CRIMSON_HYPHAE, 3), name: "stripped_crimson_hyphae", shaped: true, cells: &[(0, 0, ITEM_STRIPPED_CRIMSON_STEM), (1, 0, ITEM_STRIPPED_CRIMSON_STEM), (0, 1, ITEM_STRIPPED_CRIMSON_STEM), (1, 1, ITEM_STRIPPED_CRIMSON_STEM)] },
+    Recipe { needs: &[(ITEM_STRIPPED_DARK_OAK_LOG, 4)], result: (ITEM_STRIPPED_DARK_OAK_WOOD, 3), name: "stripped_dark_oak_wood", shaped: true, cells: &[(0, 0, ITEM_STRIPPED_DARK_OAK_LOG), (1, 0, ITEM_STRIPPED_DARK_OAK_LOG), (0, 1, ITEM_STRIPPED_DARK_OAK_LOG), (1, 1, ITEM_STRIPPED_DARK_OAK_LOG)] },
+    Recipe { needs: &[(ITEM_STRIPPED_JUNGLE_LOG, 4)], result: (ITEM_STRIPPED_JUNGLE_WOOD, 3), name: "stripped_jungle_wood", shaped: true, cells: &[(0, 0, ITEM_STRIPPED_JUNGLE_LOG), (1, 0, ITEM_STRIPPED_JUNGLE_LOG), (0, 1, ITEM_STRIPPED_JUNGLE_LOG), (1, 1, ITEM_STRIPPED_JUNGLE_LOG)] },
+    Recipe { needs: &[(ITEM_STRIPPED_MANGROVE_LOG, 4)], result: (ITEM_STRIPPED_MANGROVE_WOOD, 3), name: "stripped_mangrove_wood", shaped: true, cells: &[(0, 0, ITEM_STRIPPED_MANGROVE_LOG), (1, 0, ITEM_STRIPPED_MANGROVE_LOG), (0, 1, ITEM_STRIPPED_MANGROVE_LOG), (1, 1, ITEM_STRIPPED_MANGROVE_LOG)] },
+    Recipe { needs: &[(ITEM_STRIPPED_OAK_LOG, 4)], result: (ITEM_STRIPPED_OAK_WOOD, 3), name: "stripped_oak_wood", shaped: true, cells: &[(0, 0, ITEM_STRIPPED_OAK_LOG), (1, 0, ITEM_STRIPPED_OAK_LOG), (0, 1, ITEM_STRIPPED_OAK_LOG), (1, 1, ITEM_STRIPPED_OAK_LOG)] },
+    Recipe { needs: &[(ITEM_STRIPPED_PALE_OAK_LOG, 4)], result: (ITEM_STRIPPED_PALE_OAK_WOOD, 3), name: "stripped_pale_oak_wood", shaped: true, cells: &[(0, 0, ITEM_STRIPPED_PALE_OAK_LOG), (1, 0, ITEM_STRIPPED_PALE_OAK_LOG), (0, 1, ITEM_STRIPPED_PALE_OAK_LOG), (1, 1, ITEM_STRIPPED_PALE_OAK_LOG)] },
+    Recipe { needs: &[(ITEM_STRIPPED_POPLAR_LOG, 4)], result: (ITEM_STRIPPED_POPLAR_WOOD, 3), name: "stripped_poplar_wood", shaped: true, cells: &[(0, 0, ITEM_STRIPPED_POPLAR_LOG), (1, 0, ITEM_STRIPPED_POPLAR_LOG), (0, 1, ITEM_STRIPPED_POPLAR_LOG), (1, 1, ITEM_STRIPPED_POPLAR_LOG)] },
+    Recipe { needs: &[(ITEM_STRIPPED_SPRUCE_LOG, 4)], result: (ITEM_STRIPPED_SPRUCE_WOOD, 3), name: "stripped_spruce_wood", shaped: true, cells: &[(0, 0, ITEM_STRIPPED_SPRUCE_LOG), (1, 0, ITEM_STRIPPED_SPRUCE_LOG), (0, 1, ITEM_STRIPPED_SPRUCE_LOG), (1, 1, ITEM_STRIPPED_SPRUCE_LOG)] },
+    Recipe { needs: &[(ITEM_STRIPPED_WARPED_STEM, 4)], result: (ITEM_STRIPPED_WARPED_HYPHAE, 3), name: "stripped_warped_hyphae", shaped: true, cells: &[(0, 0, ITEM_STRIPPED_WARPED_STEM), (1, 0, ITEM_STRIPPED_WARPED_STEM), (0, 1, ITEM_STRIPPED_WARPED_STEM), (1, 1, ITEM_STRIPPED_WARPED_STEM)] },
+    Recipe { needs: &[(ITEM_HONEY_BOTTLE, 1)], result: (ITEM_SUGAR, 3), name: "sugar_from_honey_bottle", shaped: false, cells: &[] },
+    Recipe { needs: &[(ITEM_SUGAR_CANE, 1)], result: (ITEM_SUGAR, 1), name: "sugar_from_sugar_cane", shaped: false, cells: &[] },
+    Recipe { needs: &[(ITEM_SULFUR_BRICKS, 3)], result: (ITEM_SULFUR_BRICK_SLAB, 6), name: "sulfur_brick_slab", shaped: true, cells: &[(0, 0, ITEM_SULFUR_BRICKS), (1, 0, ITEM_SULFUR_BRICKS), (2, 0, ITEM_SULFUR_BRICKS)] },
+    Recipe { needs: &[(ITEM_SULFUR_BRICKS, 6)], result: (ITEM_SULFUR_BRICK_STAIRS, 4), name: "sulfur_brick_stairs", shaped: true, cells: &[(0, 0, ITEM_SULFUR_BRICKS), (0, 1, ITEM_SULFUR_BRICKS), (1, 1, ITEM_SULFUR_BRICKS), (0, 2, ITEM_SULFUR_BRICKS), (1, 2, ITEM_SULFUR_BRICKS), (2, 2, ITEM_SULFUR_BRICKS)] },
+    Recipe { needs: &[(ITEM_SULFUR_BRICKS, 6)], result: (ITEM_SULFUR_BRICK_WALL, 6), name: "sulfur_brick_wall", shaped: true, cells: &[(0, 0, ITEM_SULFUR_BRICKS), (1, 0, ITEM_SULFUR_BRICKS), (2, 0, ITEM_SULFUR_BRICKS), (0, 1, ITEM_SULFUR_BRICKS), (1, 1, ITEM_SULFUR_BRICKS), (2, 1, ITEM_SULFUR_BRICKS)] },
+    Recipe { needs: &[(ITEM_POLISHED_SULFUR, 4)], result: (ITEM_SULFUR_BRICKS, 4), name: "sulfur_bricks", shaped: true, cells: &[(0, 0, ITEM_POLISHED_SULFUR), (1, 0, ITEM_POLISHED_SULFUR), (0, 1, ITEM_POLISHED_SULFUR), (1, 1, ITEM_POLISHED_SULFUR)] },
+    Recipe { needs: &[(ITEM_SULFUR_SPIKE, 4)], result: (ITEM_SULFUR, 1), name: "sulfur_from_sulfur_spikes", shaped: true, cells: &[(0, 0, ITEM_SULFUR_SPIKE), (1, 0, ITEM_SULFUR_SPIKE), (0, 1, ITEM_SULFUR_SPIKE), (1, 1, ITEM_SULFUR_SPIKE)] },
+    Recipe { needs: &[(ITEM_SULFUR, 3)], result: (ITEM_SULFUR_SLAB, 6), name: "sulfur_slab", shaped: true, cells: &[(0, 0, ITEM_SULFUR), (1, 0, ITEM_SULFUR), (2, 0, ITEM_SULFUR)] },
+    Recipe { needs: &[(ITEM_SULFUR, 6)], result: (ITEM_SULFUR_STAIRS, 4), name: "sulfur_stairs", shaped: true, cells: &[(0, 0, ITEM_SULFUR), (0, 1, ITEM_SULFUR), (1, 1, ITEM_SULFUR), (0, 2, ITEM_SULFUR), (1, 2, ITEM_SULFUR), (2, 2, ITEM_SULFUR)] },
+    Recipe { needs: &[(ITEM_SULFUR, 6)], result: (ITEM_SULFUR_WALL, 6), name: "sulfur_wall", shaped: true, cells: &[(0, 0, ITEM_SULFUR), (1, 0, ITEM_SULFUR), (2, 0, ITEM_SULFUR), (0, 1, ITEM_SULFUR), (1, 1, ITEM_SULFUR), (2, 1, ITEM_SULFUR)] },
+    Recipe { needs: &[(ITEM_HAY_BLOCK, 1), (ITEM_REDSTONE, 4)], result: (ITEM_TARGET, 1), name: "target", shaped: true, cells: &[(1, 0, ITEM_REDSTONE), (0, 1, ITEM_REDSTONE), (1, 1, ITEM_HAY_BLOCK), (2, 1, ITEM_REDSTONE), (1, 2, ITEM_REDSTONE)] },
+    Recipe { needs: &[(ITEM_DIAMOND, 7), (ITEM_PRISMARINE, 1), (ITEM_TIDE_ARMOR_TRIM_SMITHING_TEMPLATE, 1)], result: (ITEM_TIDE_ARMOR_TRIM_SMITHING_TEMPLATE, 2), name: "tide_armor_trim_smithing_template", shaped: true, cells: &[(0, 0, ITEM_DIAMOND), (1, 0, ITEM_TIDE_ARMOR_TRIM_SMITHING_TEMPLATE), (2, 0, ITEM_DIAMOND), (0, 1, ITEM_DIAMOND), (1, 1, ITEM_PRISMARINE), (2, 1, ITEM_DIAMOND), (0, 2, ITEM_DIAMOND), (1, 2, ITEM_DIAMOND), (2, 2, ITEM_DIAMOND)] },
+    Recipe { needs: &[(ITEM_AMETHYST_SHARD, 4), (ITEM_GLASS, 1)], result: (ITEM_TINTED_GLASS, 2), name: "tinted_glass", shaped: true, cells: &[(1, 0, ITEM_AMETHYST_SHARD), (0, 1, ITEM_AMETHYST_SHARD), (1, 1, ITEM_GLASS), (2, 1, ITEM_AMETHYST_SHARD), (1, 2, ITEM_AMETHYST_SHARD)] },
+    Recipe { needs: &[(ITEM_GUNPOWDER, 5), (TAG_SMELTS_TO_GLASS, 4)], result: (ITEM_TNT, 1), name: "tnt", shaped: true, cells: &[(0, 0, ITEM_GUNPOWDER), (1, 0, TAG_SMELTS_TO_GLASS), (2, 0, ITEM_GUNPOWDER), (0, 1, TAG_SMELTS_TO_GLASS), (1, 1, ITEM_GUNPOWDER), (2, 1, TAG_SMELTS_TO_GLASS), (0, 2, ITEM_GUNPOWDER), (1, 2, TAG_SMELTS_TO_GLASS), (2, 2, ITEM_GUNPOWDER)] },
+    Recipe { needs: &[(ITEM_MINECART, 1), (ITEM_TNT, 1)], result: (ITEM_TNT_MINECART, 1), name: "tnt_minecart", shaped: false, cells: &[] },
+    Recipe { needs: &[(STICK, 1), (TAG_COALS, 1)], result: (TORCH, 4), name: "torch", shaped: true, cells: &[(0, 0, TAG_COALS), (0, 1, STICK)] },
+    Recipe { needs: &[(ITEM_CHEST, 1), (ITEM_TRIPWIRE_HOOK, 1)], result: (ITEM_TRAPPED_CHEST, 1), name: "trapped_chest", shaped: false, cells: &[] },
+    Recipe { needs: &[(ITEM_IRON_INGOT, 1), (STICK, 1), (TAG_PLANKS, 1)], result: (ITEM_TRIPWIRE_HOOK, 2), name: "tripwire_hook", shaped: true, cells: &[(0, 0, ITEM_IRON_INGOT), (0, 1, STICK), (0, 2, TAG_PLANKS)] },
+    Recipe { needs: &[(ITEM_TUFF_BRICKS, 3)], result: (ITEM_TUFF_BRICK_SLAB, 6), name: "tuff_brick_slab", shaped: true, cells: &[(0, 0, ITEM_TUFF_BRICKS), (1, 0, ITEM_TUFF_BRICKS), (2, 0, ITEM_TUFF_BRICKS)] },
+    Recipe { needs: &[(ITEM_TUFF_BRICKS, 6)], result: (ITEM_TUFF_BRICK_STAIRS, 4), name: "tuff_brick_stairs", shaped: true, cells: &[(0, 0, ITEM_TUFF_BRICKS), (0, 1, ITEM_TUFF_BRICKS), (1, 1, ITEM_TUFF_BRICKS), (0, 2, ITEM_TUFF_BRICKS), (1, 2, ITEM_TUFF_BRICKS), (2, 2, ITEM_TUFF_BRICKS)] },
+    Recipe { needs: &[(ITEM_TUFF_BRICKS, 6)], result: (ITEM_TUFF_BRICK_WALL, 6), name: "tuff_brick_wall", shaped: true, cells: &[(0, 0, ITEM_TUFF_BRICKS), (1, 0, ITEM_TUFF_BRICKS), (2, 0, ITEM_TUFF_BRICKS), (0, 1, ITEM_TUFF_BRICKS), (1, 1, ITEM_TUFF_BRICKS), (2, 1, ITEM_TUFF_BRICKS)] },
+    Recipe { needs: &[(ITEM_POLISHED_TUFF, 4)], result: (ITEM_TUFF_BRICKS, 4), name: "tuff_bricks", shaped: true, cells: &[(0, 0, ITEM_POLISHED_TUFF), (1, 0, ITEM_POLISHED_TUFF), (0, 1, ITEM_POLISHED_TUFF), (1, 1, ITEM_POLISHED_TUFF)] },
+    Recipe { needs: &[(ITEM_TUFF, 3)], result: (ITEM_TUFF_SLAB, 6), name: "tuff_slab", shaped: true, cells: &[(0, 0, ITEM_TUFF), (1, 0, ITEM_TUFF), (2, 0, ITEM_TUFF)] },
+    Recipe { needs: &[(ITEM_TUFF, 6)], result: (ITEM_TUFF_STAIRS, 4), name: "tuff_stairs", shaped: true, cells: &[(0, 0, ITEM_TUFF), (0, 1, ITEM_TUFF), (1, 1, ITEM_TUFF), (0, 2, ITEM_TUFF), (1, 2, ITEM_TUFF), (2, 2, ITEM_TUFF)] },
+    Recipe { needs: &[(ITEM_TUFF, 6)], result: (ITEM_TUFF_WALL, 6), name: "tuff_wall", shaped: true, cells: &[(0, 0, ITEM_TUFF), (1, 0, ITEM_TUFF), (2, 0, ITEM_TUFF), (0, 1, ITEM_TUFF), (1, 1, ITEM_TUFF), (2, 1, ITEM_TUFF)] },
+    Recipe { needs: &[(ITEM_TURTLE_SCUTE, 5)], result: (ITEM_TURTLE_HELMET, 1), name: "turtle_helmet", shaped: true, cells: &[(0, 0, ITEM_TURTLE_SCUTE), (1, 0, ITEM_TURTLE_SCUTE), (2, 0, ITEM_TURTLE_SCUTE), (0, 1, ITEM_TURTLE_SCUTE), (2, 1, ITEM_TURTLE_SCUTE)] },
+    Recipe { needs: &[(COBBLESTONE, 1), (ITEM_DIAMOND, 7), (ITEM_VEX_ARMOR_TRIM_SMITHING_TEMPLATE, 1)], result: (ITEM_VEX_ARMOR_TRIM_SMITHING_TEMPLATE, 2), name: "vex_armor_trim_smithing_template", shaped: true, cells: &[(0, 0, ITEM_DIAMOND), (1, 0, ITEM_VEX_ARMOR_TRIM_SMITHING_TEMPLATE), (2, 0, ITEM_DIAMOND), (0, 1, ITEM_DIAMOND), (1, 1, COBBLESTONE), (2, 1, ITEM_DIAMOND), (0, 2, ITEM_DIAMOND), (1, 2, ITEM_DIAMOND), (2, 2, ITEM_DIAMOND)] },
+    Recipe { needs: &[(ITEM_COBBLED_DEEPSLATE, 1), (ITEM_DIAMOND, 7), (ITEM_WARD_ARMOR_TRIM_SMITHING_TEMPLATE, 1)], result: (ITEM_WARD_ARMOR_TRIM_SMITHING_TEMPLATE, 2), name: "ward_armor_trim_smithing_template", shaped: true, cells: &[(0, 0, ITEM_DIAMOND), (1, 0, ITEM_WARD_ARMOR_TRIM_SMITHING_TEMPLATE), (2, 0, ITEM_DIAMOND), (0, 1, ITEM_DIAMOND), (1, 1, ITEM_COBBLED_DEEPSLATE), (2, 1, ITEM_DIAMOND), (0, 2, ITEM_DIAMOND), (1, 2, ITEM_DIAMOND), (2, 2, ITEM_DIAMOND)] },
+    Recipe { needs: &[(ITEM_WARPED_PLANKS, 1)], result: (ITEM_WARPED_BUTTON, 1), name: "warped_button", shaped: false, cells: &[] },
+    Recipe { needs: &[(ITEM_WARPED_PLANKS, 6)], result: (ITEM_WARPED_DOOR, 3), name: "warped_door", shaped: true, cells: &[(0, 0, ITEM_WARPED_PLANKS), (1, 0, ITEM_WARPED_PLANKS), (0, 1, ITEM_WARPED_PLANKS), (1, 1, ITEM_WARPED_PLANKS), (0, 2, ITEM_WARPED_PLANKS), (1, 2, ITEM_WARPED_PLANKS)] },
+    Recipe { needs: &[(STICK, 2), (ITEM_WARPED_PLANKS, 4)], result: (ITEM_WARPED_FENCE, 3), name: "warped_fence", shaped: true, cells: &[(0, 0, ITEM_WARPED_PLANKS), (1, 0, STICK), (2, 0, ITEM_WARPED_PLANKS), (0, 1, ITEM_WARPED_PLANKS), (1, 1, STICK), (2, 1, ITEM_WARPED_PLANKS)] },
+    Recipe { needs: &[(STICK, 4), (ITEM_WARPED_PLANKS, 2)], result: (ITEM_WARPED_FENCE_GATE, 1), name: "warped_fence_gate", shaped: true, cells: &[(0, 0, STICK), (1, 0, ITEM_WARPED_PLANKS), (2, 0, STICK), (0, 1, STICK), (1, 1, ITEM_WARPED_PLANKS), (2, 1, STICK)] },
+    Recipe { needs: &[(ITEM_FISHING_ROD, 1), (ITEM_WARPED_FUNGUS, 1)], result: (ITEM_WARPED_FUNGUS_ON_A_STICK, 1), name: "warped_fungus_on_a_stick", shaped: true, cells: &[(0, 0, ITEM_FISHING_ROD), (1, 1, ITEM_WARPED_FUNGUS)] },
+    Recipe { needs: &[(ITEM_IRON_CHAIN, 2), (ITEM_STRIPPED_WARPED_STEM, 6)], result: (ITEM_WARPED_HANGING_SIGN, 6), name: "warped_hanging_sign", shaped: true, cells: &[(0, 0, ITEM_IRON_CHAIN), (2, 0, ITEM_IRON_CHAIN), (0, 1, ITEM_STRIPPED_WARPED_STEM), (1, 1, ITEM_STRIPPED_WARPED_STEM), (2, 1, ITEM_STRIPPED_WARPED_STEM), (0, 2, ITEM_STRIPPED_WARPED_STEM), (1, 2, ITEM_STRIPPED_WARPED_STEM), (2, 2, ITEM_STRIPPED_WARPED_STEM)] },
+    Recipe { needs: &[(ITEM_WARPED_STEM, 4)], result: (ITEM_WARPED_HYPHAE, 3), name: "warped_hyphae", shaped: true, cells: &[(0, 0, ITEM_WARPED_STEM), (1, 0, ITEM_WARPED_STEM), (0, 1, ITEM_WARPED_STEM), (1, 1, ITEM_WARPED_STEM)] },
+    Recipe { needs: &[(TAG_WARPED_STEMS, 1)], result: (ITEM_WARPED_PLANKS, 4), name: "warped_planks", shaped: false, cells: &[] },
+    Recipe { needs: &[(ITEM_WARPED_PLANKS, 2)], result: (ITEM_WARPED_PRESSURE_PLATE, 1), name: "warped_pressure_plate", shaped: true, cells: &[(0, 0, ITEM_WARPED_PLANKS), (1, 0, ITEM_WARPED_PLANKS)] },
+    Recipe { needs: &[(ITEM_STRIPPED_WARPED_STEM, 6)], result: (ITEM_WARPED_SHELF, 6), name: "warped_shelf", shaped: true, cells: &[(0, 0, ITEM_STRIPPED_WARPED_STEM), (1, 0, ITEM_STRIPPED_WARPED_STEM), (2, 0, ITEM_STRIPPED_WARPED_STEM), (0, 2, ITEM_STRIPPED_WARPED_STEM), (1, 2, ITEM_STRIPPED_WARPED_STEM), (2, 2, ITEM_STRIPPED_WARPED_STEM)] },
+    Recipe { needs: &[(STICK, 1), (ITEM_WARPED_PLANKS, 6)], result: (ITEM_WARPED_SIGN, 3), name: "warped_sign", shaped: true, cells: &[(0, 0, ITEM_WARPED_PLANKS), (1, 0, ITEM_WARPED_PLANKS), (2, 0, ITEM_WARPED_PLANKS), (0, 1, ITEM_WARPED_PLANKS), (1, 1, ITEM_WARPED_PLANKS), (2, 1, ITEM_WARPED_PLANKS), (1, 2, STICK)] },
+    Recipe { needs: &[(ITEM_WARPED_PLANKS, 3)], result: (ITEM_WARPED_SLAB, 6), name: "warped_slab", shaped: true, cells: &[(0, 0, ITEM_WARPED_PLANKS), (1, 0, ITEM_WARPED_PLANKS), (2, 0, ITEM_WARPED_PLANKS)] },
+    Recipe { needs: &[(ITEM_WARPED_PLANKS, 6)], result: (ITEM_WARPED_STAIRS, 4), name: "warped_stairs", shaped: true, cells: &[(0, 0, ITEM_WARPED_PLANKS), (0, 1, ITEM_WARPED_PLANKS), (1, 1, ITEM_WARPED_PLANKS), (0, 2, ITEM_WARPED_PLANKS), (1, 2, ITEM_WARPED_PLANKS), (2, 2, ITEM_WARPED_PLANKS)] },
+    Recipe { needs: &[(ITEM_WARPED_PLANKS, 6)], result: (ITEM_WARPED_TRAPDOOR, 2), name: "warped_trapdoor", shaped: true, cells: &[(0, 0, ITEM_WARPED_PLANKS), (1, 0, ITEM_WARPED_PLANKS), (2, 0, ITEM_WARPED_PLANKS), (0, 1, ITEM_WARPED_PLANKS), (1, 1, ITEM_WARPED_PLANKS), (2, 1, ITEM_WARPED_PLANKS)] },
+    Recipe { needs: &[(ITEM_WAXED_CUT_COPPER_SLAB, 2)], result: (ITEM_WAXED_CHISELED_COPPER, 1), name: "waxed_chiseled_copper", shaped: true, cells: &[(0, 0, ITEM_WAXED_CUT_COPPER_SLAB), (0, 1, ITEM_WAXED_CUT_COPPER_SLAB)] },
+    Recipe { needs: &[(ITEM_CHISELED_COPPER, 1), (ITEM_HONEYCOMB, 1)], result: (ITEM_WAXED_CHISELED_COPPER, 1), name: "waxed_chiseled_copper_from_honeycomb", shaped: false, cells: &[] },
+    Recipe { needs: &[(ITEM_COPPER_BARS, 1), (ITEM_HONEYCOMB, 1)], result: (ITEM_WAXED_COPPER_BARS, 1), name: "waxed_copper_bars_from_honeycomb", shaped: false, cells: &[] },
+    Recipe { needs: &[(ITEM_COPPER_BLOCK, 1), (ITEM_HONEYCOMB, 1)], result: (ITEM_WAXED_COPPER_BLOCK, 1), name: "waxed_copper_block_from_honeycomb", shaped: false, cells: &[] },
+    Recipe { needs: &[(ITEM_BLAZE_ROD, 1), (ITEM_REDSTONE, 1), (ITEM_WAXED_COPPER_BLOCK, 3)], result: (ITEM_WAXED_COPPER_BULB, 4), name: "waxed_copper_bulb", shaped: true, cells: &[(1, 0, ITEM_WAXED_COPPER_BLOCK), (0, 1, ITEM_WAXED_COPPER_BLOCK), (1, 1, ITEM_BLAZE_ROD), (2, 1, ITEM_WAXED_COPPER_BLOCK), (1, 2, ITEM_REDSTONE)] },
+    Recipe { needs: &[(ITEM_COPPER_BULB, 1), (ITEM_HONEYCOMB, 1)], result: (ITEM_WAXED_COPPER_BULB, 1), name: "waxed_copper_bulb_from_honeycomb", shaped: false, cells: &[] },
+    Recipe { needs: &[(ITEM_COPPER_CHAIN, 1), (ITEM_HONEYCOMB, 1)], result: (ITEM_WAXED_COPPER_CHAIN, 1), name: "waxed_copper_chain_from_honeycomb", shaped: false, cells: &[] },
+    Recipe { needs: &[(ITEM_COPPER_CHEST, 1), (ITEM_HONEYCOMB, 1)], result: (ITEM_WAXED_COPPER_CHEST, 1), name: "waxed_copper_chest_from_honeycomb", shaped: false, cells: &[] },
+    Recipe { needs: &[(ITEM_COPPER_DOOR, 1), (ITEM_HONEYCOMB, 1)], result: (ITEM_WAXED_COPPER_DOOR, 1), name: "waxed_copper_door_from_honeycomb", shaped: false, cells: &[] },
+    Recipe { needs: &[(ITEM_COPPER_GOLEM_STATUE, 1), (ITEM_HONEYCOMB, 1)], result: (ITEM_WAXED_COPPER_GOLEM_STATUE, 1), name: "waxed_copper_golem_statue_from_honeycomb", shaped: false, cells: &[] },
+    Recipe { needs: &[(ITEM_WAXED_COPPER_BLOCK, 4)], result: (ITEM_WAXED_COPPER_GRATE, 4), name: "waxed_copper_grate", shaped: true, cells: &[(1, 0, ITEM_WAXED_COPPER_BLOCK), (0, 1, ITEM_WAXED_COPPER_BLOCK), (2, 1, ITEM_WAXED_COPPER_BLOCK), (1, 2, ITEM_WAXED_COPPER_BLOCK)] },
+    Recipe { needs: &[(ITEM_COPPER_GRATE, 1), (ITEM_HONEYCOMB, 1)], result: (ITEM_WAXED_COPPER_GRATE, 1), name: "waxed_copper_grate_from_honeycomb", shaped: false, cells: &[] },
+    Recipe { needs: &[(ITEM_COPPER_LANTERN, 1), (ITEM_HONEYCOMB, 1)], result: (ITEM_WAXED_COPPER_LANTERN, 1), name: "waxed_copper_lantern_from_honeycomb", shaped: false, cells: &[] },
+    Recipe { needs: &[(ITEM_COPPER_TRAPDOOR, 1), (ITEM_HONEYCOMB, 1)], result: (ITEM_WAXED_COPPER_TRAPDOOR, 1), name: "waxed_copper_trapdoor_from_honeycomb", shaped: false, cells: &[] },
+    Recipe { needs: &[(ITEM_WAXED_COPPER_BLOCK, 4)], result: (ITEM_WAXED_CUT_COPPER, 4), name: "waxed_cut_copper", shaped: true, cells: &[(0, 0, ITEM_WAXED_COPPER_BLOCK), (1, 0, ITEM_WAXED_COPPER_BLOCK), (0, 1, ITEM_WAXED_COPPER_BLOCK), (1, 1, ITEM_WAXED_COPPER_BLOCK)] },
+    Recipe { needs: &[(ITEM_CUT_COPPER, 1), (ITEM_HONEYCOMB, 1)], result: (ITEM_WAXED_CUT_COPPER, 1), name: "waxed_cut_copper_from_honeycomb", shaped: false, cells: &[] },
+    Recipe { needs: &[(ITEM_WAXED_CUT_COPPER, 3)], result: (ITEM_WAXED_CUT_COPPER_SLAB, 6), name: "waxed_cut_copper_slab", shaped: true, cells: &[(0, 0, ITEM_WAXED_CUT_COPPER), (1, 0, ITEM_WAXED_CUT_COPPER), (2, 0, ITEM_WAXED_CUT_COPPER)] },
+    Recipe { needs: &[(ITEM_CUT_COPPER_SLAB, 1), (ITEM_HONEYCOMB, 1)], result: (ITEM_WAXED_CUT_COPPER_SLAB, 1), name: "waxed_cut_copper_slab_from_honeycomb", shaped: false, cells: &[] },
+    Recipe { needs: &[(ITEM_WAXED_CUT_COPPER, 6)], result: (ITEM_WAXED_CUT_COPPER_STAIRS, 4), name: "waxed_cut_copper_stairs", shaped: true, cells: &[(0, 0, ITEM_WAXED_CUT_COPPER), (0, 1, ITEM_WAXED_CUT_COPPER), (1, 1, ITEM_WAXED_CUT_COPPER), (0, 2, ITEM_WAXED_CUT_COPPER), (1, 2, ITEM_WAXED_CUT_COPPER), (2, 2, ITEM_WAXED_CUT_COPPER)] },
+    Recipe { needs: &[(ITEM_CUT_COPPER_STAIRS, 1), (ITEM_HONEYCOMB, 1)], result: (ITEM_WAXED_CUT_COPPER_STAIRS, 1), name: "waxed_cut_copper_stairs_from_honeycomb", shaped: false, cells: &[] },
+    Recipe { needs: &[(ITEM_WAXED_EXPOSED_CUT_COPPER_SLAB, 2)], result: (ITEM_WAXED_EXPOSED_CHISELED_COPPER, 1), name: "waxed_exposed_chiseled_copper", shaped: true, cells: &[(0, 0, ITEM_WAXED_EXPOSED_CUT_COPPER_SLAB), (0, 1, ITEM_WAXED_EXPOSED_CUT_COPPER_SLAB)] },
+    Recipe { needs: &[(ITEM_EXPOSED_CHISELED_COPPER, 1), (ITEM_HONEYCOMB, 1)], result: (ITEM_WAXED_EXPOSED_CHISELED_COPPER, 1), name: "waxed_exposed_chiseled_copper_from_honeycomb", shaped: false, cells: &[] },
+    Recipe { needs: &[(ITEM_EXPOSED_COPPER_BARS, 1), (ITEM_HONEYCOMB, 1)], result: (ITEM_WAXED_EXPOSED_COPPER_BARS, 1), name: "waxed_exposed_copper_bars_from_honeycomb", shaped: false, cells: &[] },
+    Recipe { needs: &[(ITEM_BLAZE_ROD, 1), (ITEM_REDSTONE, 1), (ITEM_WAXED_EXPOSED_COPPER, 3)], result: (ITEM_WAXED_EXPOSED_COPPER_BULB, 4), name: "waxed_exposed_copper_bulb", shaped: true, cells: &[(1, 0, ITEM_WAXED_EXPOSED_COPPER), (0, 1, ITEM_WAXED_EXPOSED_COPPER), (1, 1, ITEM_BLAZE_ROD), (2, 1, ITEM_WAXED_EXPOSED_COPPER), (1, 2, ITEM_REDSTONE)] },
+    Recipe { needs: &[(ITEM_EXPOSED_COPPER_BULB, 1), (ITEM_HONEYCOMB, 1)], result: (ITEM_WAXED_EXPOSED_COPPER_BULB, 1), name: "waxed_exposed_copper_bulb_from_honeycomb", shaped: false, cells: &[] },
+    Recipe { needs: &[(ITEM_EXPOSED_COPPER_CHAIN, 1), (ITEM_HONEYCOMB, 1)], result: (ITEM_WAXED_EXPOSED_COPPER_CHAIN, 1), name: "waxed_exposed_copper_chain_from_honeycomb", shaped: false, cells: &[] },
+    Recipe { needs: &[(ITEM_EXPOSED_COPPER_CHEST, 1), (ITEM_HONEYCOMB, 1)], result: (ITEM_WAXED_EXPOSED_COPPER_CHEST, 1), name: "waxed_exposed_copper_chest_from_honeycomb", shaped: false, cells: &[] },
+    Recipe { needs: &[(ITEM_EXPOSED_COPPER_DOOR, 1), (ITEM_HONEYCOMB, 1)], result: (ITEM_WAXED_EXPOSED_COPPER_DOOR, 1), name: "waxed_exposed_copper_door_from_honeycomb", shaped: false, cells: &[] },
+    Recipe { needs: &[(ITEM_EXPOSED_COPPER, 1), (ITEM_HONEYCOMB, 1)], result: (ITEM_WAXED_EXPOSED_COPPER, 1), name: "waxed_exposed_copper_from_honeycomb", shaped: false, cells: &[] },
+    Recipe { needs: &[(ITEM_EXPOSED_COPPER_GOLEM_STATUE, 1), (ITEM_HONEYCOMB, 1)], result: (ITEM_WAXED_EXPOSED_COPPER_GOLEM_STATUE, 1), name: "waxed_exposed_copper_golem_statue_from_honeycomb", shaped: false, cells: &[] },
+    Recipe { needs: &[(ITEM_WAXED_EXPOSED_COPPER, 4)], result: (ITEM_WAXED_EXPOSED_COPPER_GRATE, 4), name: "waxed_exposed_copper_grate", shaped: true, cells: &[(1, 0, ITEM_WAXED_EXPOSED_COPPER), (0, 1, ITEM_WAXED_EXPOSED_COPPER), (2, 1, ITEM_WAXED_EXPOSED_COPPER), (1, 2, ITEM_WAXED_EXPOSED_COPPER)] },
+    Recipe { needs: &[(ITEM_EXPOSED_COPPER_GRATE, 1), (ITEM_HONEYCOMB, 1)], result: (ITEM_WAXED_EXPOSED_COPPER_GRATE, 1), name: "waxed_exposed_copper_grate_from_honeycomb", shaped: false, cells: &[] },
+    Recipe { needs: &[(ITEM_EXPOSED_COPPER_LANTERN, 1), (ITEM_HONEYCOMB, 1)], result: (ITEM_WAXED_EXPOSED_COPPER_LANTERN, 1), name: "waxed_exposed_copper_lantern_from_honeycomb", shaped: false, cells: &[] },
+    Recipe { needs: &[(ITEM_EXPOSED_COPPER_TRAPDOOR, 1), (ITEM_HONEYCOMB, 1)], result: (ITEM_WAXED_EXPOSED_COPPER_TRAPDOOR, 1), name: "waxed_exposed_copper_trapdoor_from_honeycomb", shaped: false, cells: &[] },
+    Recipe { needs: &[(ITEM_WAXED_EXPOSED_COPPER, 4)], result: (ITEM_WAXED_EXPOSED_CUT_COPPER, 4), name: "waxed_exposed_cut_copper", shaped: true, cells: &[(0, 0, ITEM_WAXED_EXPOSED_COPPER), (1, 0, ITEM_WAXED_EXPOSED_COPPER), (0, 1, ITEM_WAXED_EXPOSED_COPPER), (1, 1, ITEM_WAXED_EXPOSED_COPPER)] },
+    Recipe { needs: &[(ITEM_EXPOSED_CUT_COPPER, 1), (ITEM_HONEYCOMB, 1)], result: (ITEM_WAXED_EXPOSED_CUT_COPPER, 1), name: "waxed_exposed_cut_copper_from_honeycomb", shaped: false, cells: &[] },
+    Recipe { needs: &[(ITEM_WAXED_EXPOSED_CUT_COPPER, 3)], result: (ITEM_WAXED_EXPOSED_CUT_COPPER_SLAB, 6), name: "waxed_exposed_cut_copper_slab", shaped: true, cells: &[(0, 0, ITEM_WAXED_EXPOSED_CUT_COPPER), (1, 0, ITEM_WAXED_EXPOSED_CUT_COPPER), (2, 0, ITEM_WAXED_EXPOSED_CUT_COPPER)] },
+    Recipe { needs: &[(ITEM_EXPOSED_CUT_COPPER_SLAB, 1), (ITEM_HONEYCOMB, 1)], result: (ITEM_WAXED_EXPOSED_CUT_COPPER_SLAB, 1), name: "waxed_exposed_cut_copper_slab_from_honeycomb", shaped: false, cells: &[] },
+    Recipe { needs: &[(ITEM_WAXED_EXPOSED_CUT_COPPER, 6)], result: (ITEM_WAXED_EXPOSED_CUT_COPPER_STAIRS, 4), name: "waxed_exposed_cut_copper_stairs", shaped: true, cells: &[(0, 0, ITEM_WAXED_EXPOSED_CUT_COPPER), (0, 1, ITEM_WAXED_EXPOSED_CUT_COPPER), (1, 1, ITEM_WAXED_EXPOSED_CUT_COPPER), (0, 2, ITEM_WAXED_EXPOSED_CUT_COPPER), (1, 2, ITEM_WAXED_EXPOSED_CUT_COPPER), (2, 2, ITEM_WAXED_EXPOSED_CUT_COPPER)] },
+    Recipe { needs: &[(ITEM_EXPOSED_CUT_COPPER_STAIRS, 1), (ITEM_HONEYCOMB, 1)], result: (ITEM_WAXED_EXPOSED_CUT_COPPER_STAIRS, 1), name: "waxed_exposed_cut_copper_stairs_from_honeycomb", shaped: false, cells: &[] },
+    Recipe { needs: &[(ITEM_EXPOSED_LIGHTNING_ROD, 1), (ITEM_HONEYCOMB, 1)], result: (ITEM_WAXED_EXPOSED_LIGHTNING_ROD, 1), name: "waxed_exposed_lightning_rod_from_honeycomb", shaped: false, cells: &[] },
+    Recipe { needs: &[(ITEM_HONEYCOMB, 1), (ITEM_LIGHTNING_ROD, 1)], result: (ITEM_WAXED_LIGHTNING_ROD, 1), name: "waxed_lightning_rod_from_honeycomb", shaped: false, cells: &[] },
+    Recipe { needs: &[(ITEM_WAXED_OXIDIZED_CUT_COPPER_SLAB, 2)], result: (ITEM_WAXED_OXIDIZED_CHISELED_COPPER, 1), name: "waxed_oxidized_chiseled_copper", shaped: true, cells: &[(0, 0, ITEM_WAXED_OXIDIZED_CUT_COPPER_SLAB), (0, 1, ITEM_WAXED_OXIDIZED_CUT_COPPER_SLAB)] },
+    Recipe { needs: &[(ITEM_HONEYCOMB, 1), (ITEM_OXIDIZED_CHISELED_COPPER, 1)], result: (ITEM_WAXED_OXIDIZED_CHISELED_COPPER, 1), name: "waxed_oxidized_chiseled_copper_from_honeycomb", shaped: false, cells: &[] },
+    Recipe { needs: &[(ITEM_HONEYCOMB, 1), (ITEM_OXIDIZED_COPPER_BARS, 1)], result: (ITEM_WAXED_OXIDIZED_COPPER_BARS, 1), name: "waxed_oxidized_copper_bars_from_honeycomb", shaped: false, cells: &[] },
+    Recipe { needs: &[(ITEM_BLAZE_ROD, 1), (ITEM_REDSTONE, 1), (ITEM_WAXED_OXIDIZED_COPPER, 3)], result: (ITEM_WAXED_OXIDIZED_COPPER_BULB, 4), name: "waxed_oxidized_copper_bulb", shaped: true, cells: &[(1, 0, ITEM_WAXED_OXIDIZED_COPPER), (0, 1, ITEM_WAXED_OXIDIZED_COPPER), (1, 1, ITEM_BLAZE_ROD), (2, 1, ITEM_WAXED_OXIDIZED_COPPER), (1, 2, ITEM_REDSTONE)] },
+    Recipe { needs: &[(ITEM_HONEYCOMB, 1), (ITEM_OXIDIZED_COPPER_BULB, 1)], result: (ITEM_WAXED_OXIDIZED_COPPER_BULB, 1), name: "waxed_oxidized_copper_bulb_from_honeycomb", shaped: false, cells: &[] },
+    Recipe { needs: &[(ITEM_HONEYCOMB, 1), (ITEM_OXIDIZED_COPPER_CHAIN, 1)], result: (ITEM_WAXED_OXIDIZED_COPPER_CHAIN, 1), name: "waxed_oxidized_copper_chain_from_honeycomb", shaped: false, cells: &[] },
+    Recipe { needs: &[(ITEM_HONEYCOMB, 1), (ITEM_OXIDIZED_COPPER_CHEST, 1)], result: (ITEM_WAXED_OXIDIZED_COPPER_CHEST, 1), name: "waxed_oxidized_copper_chest_from_honeycomb", shaped: false, cells: &[] },
+    Recipe { needs: &[(ITEM_HONEYCOMB, 1), (ITEM_OXIDIZED_COPPER_DOOR, 1)], result: (ITEM_WAXED_OXIDIZED_COPPER_DOOR, 1), name: "waxed_oxidized_copper_door_from_honeycomb", shaped: false, cells: &[] },
+    Recipe { needs: &[(ITEM_HONEYCOMB, 1), (ITEM_OXIDIZED_COPPER, 1)], result: (ITEM_WAXED_OXIDIZED_COPPER, 1), name: "waxed_oxidized_copper_from_honeycomb", shaped: false, cells: &[] },
+    Recipe { needs: &[(ITEM_HONEYCOMB, 1), (ITEM_OXIDIZED_COPPER_GOLEM_STATUE, 1)], result: (ITEM_WAXED_OXIDIZED_COPPER_GOLEM_STATUE, 1), name: "waxed_oxidized_copper_golem_statue_from_honeycomb", shaped: false, cells: &[] },
+    Recipe { needs: &[(ITEM_WAXED_OXIDIZED_COPPER, 4)], result: (ITEM_WAXED_OXIDIZED_COPPER_GRATE, 4), name: "waxed_oxidized_copper_grate", shaped: true, cells: &[(1, 0, ITEM_WAXED_OXIDIZED_COPPER), (0, 1, ITEM_WAXED_OXIDIZED_COPPER), (2, 1, ITEM_WAXED_OXIDIZED_COPPER), (1, 2, ITEM_WAXED_OXIDIZED_COPPER)] },
+    Recipe { needs: &[(ITEM_HONEYCOMB, 1), (ITEM_OXIDIZED_COPPER_GRATE, 1)], result: (ITEM_WAXED_OXIDIZED_COPPER_GRATE, 1), name: "waxed_oxidized_copper_grate_from_honeycomb", shaped: false, cells: &[] },
+    Recipe { needs: &[(ITEM_HONEYCOMB, 1), (ITEM_OXIDIZED_COPPER_LANTERN, 1)], result: (ITEM_WAXED_OXIDIZED_COPPER_LANTERN, 1), name: "waxed_oxidized_copper_lantern_from_honeycomb", shaped: false, cells: &[] },
+    Recipe { needs: &[(ITEM_HONEYCOMB, 1), (ITEM_OXIDIZED_COPPER_TRAPDOOR, 1)], result: (ITEM_WAXED_OXIDIZED_COPPER_TRAPDOOR, 1), name: "waxed_oxidized_copper_trapdoor_from_honeycomb", shaped: false, cells: &[] },
+    Recipe { needs: &[(ITEM_WAXED_OXIDIZED_COPPER, 4)], result: (ITEM_WAXED_OXIDIZED_CUT_COPPER, 4), name: "waxed_oxidized_cut_copper", shaped: true, cells: &[(0, 0, ITEM_WAXED_OXIDIZED_COPPER), (1, 0, ITEM_WAXED_OXIDIZED_COPPER), (0, 1, ITEM_WAXED_OXIDIZED_COPPER), (1, 1, ITEM_WAXED_OXIDIZED_COPPER)] },
+    Recipe { needs: &[(ITEM_HONEYCOMB, 1), (ITEM_OXIDIZED_CUT_COPPER, 1)], result: (ITEM_WAXED_OXIDIZED_CUT_COPPER, 1), name: "waxed_oxidized_cut_copper_from_honeycomb", shaped: false, cells: &[] },
+    Recipe { needs: &[(ITEM_WAXED_OXIDIZED_CUT_COPPER, 3)], result: (ITEM_WAXED_OXIDIZED_CUT_COPPER_SLAB, 6), name: "waxed_oxidized_cut_copper_slab", shaped: true, cells: &[(0, 0, ITEM_WAXED_OXIDIZED_CUT_COPPER), (1, 0, ITEM_WAXED_OXIDIZED_CUT_COPPER), (2, 0, ITEM_WAXED_OXIDIZED_CUT_COPPER)] },
+    Recipe { needs: &[(ITEM_HONEYCOMB, 1), (ITEM_OXIDIZED_CUT_COPPER_SLAB, 1)], result: (ITEM_WAXED_OXIDIZED_CUT_COPPER_SLAB, 1), name: "waxed_oxidized_cut_copper_slab_from_honeycomb", shaped: false, cells: &[] },
+    Recipe { needs: &[(ITEM_WAXED_OXIDIZED_CUT_COPPER, 6)], result: (ITEM_WAXED_OXIDIZED_CUT_COPPER_STAIRS, 4), name: "waxed_oxidized_cut_copper_stairs", shaped: true, cells: &[(0, 0, ITEM_WAXED_OXIDIZED_CUT_COPPER), (0, 1, ITEM_WAXED_OXIDIZED_CUT_COPPER), (1, 1, ITEM_WAXED_OXIDIZED_CUT_COPPER), (0, 2, ITEM_WAXED_OXIDIZED_CUT_COPPER), (1, 2, ITEM_WAXED_OXIDIZED_CUT_COPPER), (2, 2, ITEM_WAXED_OXIDIZED_CUT_COPPER)] },
+    Recipe { needs: &[(ITEM_HONEYCOMB, 1), (ITEM_OXIDIZED_CUT_COPPER_STAIRS, 1)], result: (ITEM_WAXED_OXIDIZED_CUT_COPPER_STAIRS, 1), name: "waxed_oxidized_cut_copper_stairs_from_honeycomb", shaped: false, cells: &[] },
+    Recipe { needs: &[(ITEM_HONEYCOMB, 1), (ITEM_OXIDIZED_LIGHTNING_ROD, 1)], result: (ITEM_WAXED_OXIDIZED_LIGHTNING_ROD, 1), name: "waxed_oxidized_lightning_rod_from_honeycomb", shaped: false, cells: &[] },
+    Recipe { needs: &[(ITEM_WAXED_WEATHERED_CUT_COPPER_SLAB, 2)], result: (ITEM_WAXED_WEATHERED_CHISELED_COPPER, 1), name: "waxed_weathered_chiseled_copper", shaped: true, cells: &[(0, 0, ITEM_WAXED_WEATHERED_CUT_COPPER_SLAB), (0, 1, ITEM_WAXED_WEATHERED_CUT_COPPER_SLAB)] },
+    Recipe { needs: &[(ITEM_HONEYCOMB, 1), (ITEM_WEATHERED_CHISELED_COPPER, 1)], result: (ITEM_WAXED_WEATHERED_CHISELED_COPPER, 1), name: "waxed_weathered_chiseled_copper_from_honeycomb", shaped: false, cells: &[] },
+    Recipe { needs: &[(ITEM_HONEYCOMB, 1), (ITEM_WEATHERED_COPPER_BARS, 1)], result: (ITEM_WAXED_WEATHERED_COPPER_BARS, 1), name: "waxed_weathered_copper_bars_from_honeycomb", shaped: false, cells: &[] },
+    Recipe { needs: &[(ITEM_BLAZE_ROD, 1), (ITEM_REDSTONE, 1), (ITEM_WAXED_WEATHERED_COPPER, 3)], result: (ITEM_WAXED_WEATHERED_COPPER_BULB, 4), name: "waxed_weathered_copper_bulb", shaped: true, cells: &[(1, 0, ITEM_WAXED_WEATHERED_COPPER), (0, 1, ITEM_WAXED_WEATHERED_COPPER), (1, 1, ITEM_BLAZE_ROD), (2, 1, ITEM_WAXED_WEATHERED_COPPER), (1, 2, ITEM_REDSTONE)] },
+    Recipe { needs: &[(ITEM_HONEYCOMB, 1), (ITEM_WEATHERED_COPPER_BULB, 1)], result: (ITEM_WAXED_WEATHERED_COPPER_BULB, 1), name: "waxed_weathered_copper_bulb_from_honeycomb", shaped: false, cells: &[] },
+    Recipe { needs: &[(ITEM_HONEYCOMB, 1), (ITEM_WEATHERED_COPPER_CHAIN, 1)], result: (ITEM_WAXED_WEATHERED_COPPER_CHAIN, 1), name: "waxed_weathered_copper_chain_from_honeycomb", shaped: false, cells: &[] },
+    Recipe { needs: &[(ITEM_HONEYCOMB, 1), (ITEM_WEATHERED_COPPER_CHEST, 1)], result: (ITEM_WAXED_WEATHERED_COPPER_CHEST, 1), name: "waxed_weathered_copper_chest_from_honeycomb", shaped: false, cells: &[] },
+    Recipe { needs: &[(ITEM_HONEYCOMB, 1), (ITEM_WEATHERED_COPPER_DOOR, 1)], result: (ITEM_WAXED_WEATHERED_COPPER_DOOR, 1), name: "waxed_weathered_copper_door_from_honeycomb", shaped: false, cells: &[] },
+    Recipe { needs: &[(ITEM_HONEYCOMB, 1), (ITEM_WEATHERED_COPPER, 1)], result: (ITEM_WAXED_WEATHERED_COPPER, 1), name: "waxed_weathered_copper_from_honeycomb", shaped: false, cells: &[] },
+    Recipe { needs: &[(ITEM_HONEYCOMB, 1), (ITEM_WEATHERED_COPPER_GOLEM_STATUE, 1)], result: (ITEM_WAXED_WEATHERED_COPPER_GOLEM_STATUE, 1), name: "waxed_weathered_copper_golem_statue_from_honeycomb", shaped: false, cells: &[] },
+    Recipe { needs: &[(ITEM_WAXED_WEATHERED_COPPER, 4)], result: (ITEM_WAXED_WEATHERED_COPPER_GRATE, 4), name: "waxed_weathered_copper_grate", shaped: true, cells: &[(1, 0, ITEM_WAXED_WEATHERED_COPPER), (0, 1, ITEM_WAXED_WEATHERED_COPPER), (2, 1, ITEM_WAXED_WEATHERED_COPPER), (1, 2, ITEM_WAXED_WEATHERED_COPPER)] },
+    Recipe { needs: &[(ITEM_HONEYCOMB, 1), (ITEM_WEATHERED_COPPER_GRATE, 1)], result: (ITEM_WAXED_WEATHERED_COPPER_GRATE, 1), name: "waxed_weathered_copper_grate_from_honeycomb", shaped: false, cells: &[] },
+    Recipe { needs: &[(ITEM_HONEYCOMB, 1), (ITEM_WEATHERED_COPPER_LANTERN, 1)], result: (ITEM_WAXED_WEATHERED_COPPER_LANTERN, 1), name: "waxed_weathered_copper_lantern_from_honeycomb", shaped: false, cells: &[] },
+    Recipe { needs: &[(ITEM_HONEYCOMB, 1), (ITEM_WEATHERED_COPPER_TRAPDOOR, 1)], result: (ITEM_WAXED_WEATHERED_COPPER_TRAPDOOR, 1), name: "waxed_weathered_copper_trapdoor_from_honeycomb", shaped: false, cells: &[] },
+    Recipe { needs: &[(ITEM_WAXED_WEATHERED_COPPER, 4)], result: (ITEM_WAXED_WEATHERED_CUT_COPPER, 4), name: "waxed_weathered_cut_copper", shaped: true, cells: &[(0, 0, ITEM_WAXED_WEATHERED_COPPER), (1, 0, ITEM_WAXED_WEATHERED_COPPER), (0, 1, ITEM_WAXED_WEATHERED_COPPER), (1, 1, ITEM_WAXED_WEATHERED_COPPER)] },
+    Recipe { needs: &[(ITEM_HONEYCOMB, 1), (ITEM_WEATHERED_CUT_COPPER, 1)], result: (ITEM_WAXED_WEATHERED_CUT_COPPER, 1), name: "waxed_weathered_cut_copper_from_honeycomb", shaped: false, cells: &[] },
+    Recipe { needs: &[(ITEM_WAXED_WEATHERED_CUT_COPPER, 3)], result: (ITEM_WAXED_WEATHERED_CUT_COPPER_SLAB, 6), name: "waxed_weathered_cut_copper_slab", shaped: true, cells: &[(0, 0, ITEM_WAXED_WEATHERED_CUT_COPPER), (1, 0, ITEM_WAXED_WEATHERED_CUT_COPPER), (2, 0, ITEM_WAXED_WEATHERED_CUT_COPPER)] },
+    Recipe { needs: &[(ITEM_HONEYCOMB, 1), (ITEM_WEATHERED_CUT_COPPER_SLAB, 1)], result: (ITEM_WAXED_WEATHERED_CUT_COPPER_SLAB, 1), name: "waxed_weathered_cut_copper_slab_from_honeycomb", shaped: false, cells: &[] },
+    Recipe { needs: &[(ITEM_WAXED_WEATHERED_CUT_COPPER, 6)], result: (ITEM_WAXED_WEATHERED_CUT_COPPER_STAIRS, 4), name: "waxed_weathered_cut_copper_stairs", shaped: true, cells: &[(0, 0, ITEM_WAXED_WEATHERED_CUT_COPPER), (0, 1, ITEM_WAXED_WEATHERED_CUT_COPPER), (1, 1, ITEM_WAXED_WEATHERED_CUT_COPPER), (0, 2, ITEM_WAXED_WEATHERED_CUT_COPPER), (1, 2, ITEM_WAXED_WEATHERED_CUT_COPPER), (2, 2, ITEM_WAXED_WEATHERED_CUT_COPPER)] },
+    Recipe { needs: &[(ITEM_HONEYCOMB, 1), (ITEM_WEATHERED_CUT_COPPER_STAIRS, 1)], result: (ITEM_WAXED_WEATHERED_CUT_COPPER_STAIRS, 1), name: "waxed_weathered_cut_copper_stairs_from_honeycomb", shaped: false, cells: &[] },
+    Recipe { needs: &[(ITEM_HONEYCOMB, 1), (ITEM_WEATHERED_LIGHTNING_ROD, 1)], result: (ITEM_WAXED_WEATHERED_LIGHTNING_ROD, 1), name: "waxed_weathered_lightning_rod_from_honeycomb", shaped: false, cells: &[] },
+    Recipe { needs: &[(ITEM_DIAMOND, 7), (ITEM_TERRACOTTA, 1), (ITEM_WAYFINDER_ARMOR_TRIM_SMITHING_TEMPLATE, 1)], result: (ITEM_WAYFINDER_ARMOR_TRIM_SMITHING_TEMPLATE, 2), name: "wayfinder_armor_trim_smithing_template", shaped: true, cells: &[(0, 0, ITEM_DIAMOND), (1, 0, ITEM_WAYFINDER_ARMOR_TRIM_SMITHING_TEMPLATE), (2, 0, ITEM_DIAMOND), (0, 1, ITEM_DIAMOND), (1, 1, ITEM_TERRACOTTA), (2, 1, ITEM_DIAMOND), (0, 2, ITEM_DIAMOND), (1, 2, ITEM_DIAMOND), (2, 2, ITEM_DIAMOND)] },
+    Recipe { needs: &[(ITEM_WEATHERED_CUT_COPPER_SLAB, 2)], result: (ITEM_WEATHERED_CHISELED_COPPER, 1), name: "weathered_chiseled_copper", shaped: true, cells: &[(0, 0, ITEM_WEATHERED_CUT_COPPER_SLAB), (0, 1, ITEM_WEATHERED_CUT_COPPER_SLAB)] },
+    Recipe { needs: &[(ITEM_BLAZE_ROD, 1), (ITEM_REDSTONE, 1), (ITEM_WEATHERED_COPPER, 3)], result: (ITEM_WEATHERED_COPPER_BULB, 4), name: "weathered_copper_bulb", shaped: true, cells: &[(1, 0, ITEM_WEATHERED_COPPER), (0, 1, ITEM_WEATHERED_COPPER), (1, 1, ITEM_BLAZE_ROD), (2, 1, ITEM_WEATHERED_COPPER), (1, 2, ITEM_REDSTONE)] },
+    Recipe { needs: &[(ITEM_WEATHERED_COPPER, 4)], result: (ITEM_WEATHERED_COPPER_GRATE, 4), name: "weathered_copper_grate", shaped: true, cells: &[(1, 0, ITEM_WEATHERED_COPPER), (0, 1, ITEM_WEATHERED_COPPER), (2, 1, ITEM_WEATHERED_COPPER), (1, 2, ITEM_WEATHERED_COPPER)] },
+    Recipe { needs: &[(ITEM_WEATHERED_COPPER, 4)], result: (ITEM_WEATHERED_CUT_COPPER, 4), name: "weathered_cut_copper", shaped: true, cells: &[(0, 0, ITEM_WEATHERED_COPPER), (1, 0, ITEM_WEATHERED_COPPER), (0, 1, ITEM_WEATHERED_COPPER), (1, 1, ITEM_WEATHERED_COPPER)] },
+    Recipe { needs: &[(ITEM_WEATHERED_CUT_COPPER, 3)], result: (ITEM_WEATHERED_CUT_COPPER_SLAB, 6), name: "weathered_cut_copper_slab", shaped: true, cells: &[(0, 0, ITEM_WEATHERED_CUT_COPPER), (1, 0, ITEM_WEATHERED_CUT_COPPER), (2, 0, ITEM_WEATHERED_CUT_COPPER)] },
+    Recipe { needs: &[(ITEM_WEATHERED_CUT_COPPER, 6)], result: (ITEM_WEATHERED_CUT_COPPER_STAIRS, 4), name: "weathered_cut_copper_stairs", shaped: true, cells: &[(0, 0, ITEM_WEATHERED_CUT_COPPER), (0, 1, ITEM_WEATHERED_CUT_COPPER), (1, 1, ITEM_WEATHERED_CUT_COPPER), (0, 2, ITEM_WEATHERED_CUT_COPPER), (1, 2, ITEM_WEATHERED_CUT_COPPER), (2, 2, ITEM_WEATHERED_CUT_COPPER)] },
+    Recipe { needs: &[(ITEM_HAY_BLOCK, 1)], result: (WHEAT, 9), name: "wheat", shaped: false, cells: &[] },
+    Recipe { needs: &[(STICK, 1), (ITEM_WHITE_WOOL, 6)], result: (ITEM_WHITE_BANNER, 1), name: "white_banner", shaped: true, cells: &[(0, 0, ITEM_WHITE_WOOL), (1, 0, ITEM_WHITE_WOOL), (2, 0, ITEM_WHITE_WOOL), (0, 1, ITEM_WHITE_WOOL), (1, 1, ITEM_WHITE_WOOL), (2, 1, ITEM_WHITE_WOOL), (1, 2, STICK)] },
+    Recipe { needs: &[(ITEM_WHITE_WOOL, 3), (TAG_PLANKS, 3)], result: (ITEM_WHITE_BED, 1), name: "white_bed", shaped: true, cells: &[(0, 0, ITEM_WHITE_WOOL), (1, 0, ITEM_WHITE_WOOL), (2, 0, ITEM_WHITE_WOOL), (0, 1, TAG_PLANKS), (1, 1, TAG_PLANKS), (2, 1, TAG_PLANKS)] },
+    Recipe { needs: &[(ITEM_CANDLE, 1), (ITEM_WHITE_DYE, 1)], result: (ITEM_WHITE_CANDLE, 1), name: "white_candle", shaped: false, cells: &[] },
+    Recipe { needs: &[(ITEM_WHITE_WOOL, 2)], result: (ITEM_WHITE_CARPET, 3), name: "white_carpet", shaped: true, cells: &[(0, 0, ITEM_WHITE_WOOL), (1, 0, ITEM_WHITE_WOOL)] },
+    Recipe { needs: &[(ITEM_GRAVEL, 1), (ITEM_GRAVEL, 1), (ITEM_GRAVEL, 1), (ITEM_GRAVEL, 1), (ITEM_SAND, 1), (ITEM_SAND, 1), (ITEM_SAND, 1), (ITEM_SAND, 1), (ITEM_WHITE_DYE, 1)], result: (ITEM_WHITE_CONCRETE_POWDER, 8), name: "white_concrete_powder", shaped: false, cells: &[] },
+    Recipe { needs: &[(ITEM_WHITE_CONCRETE, 3)], result: (ITEM_WHITE_CONCRETE_SLAB, 6), name: "white_concrete_slab", shaped: true, cells: &[(0, 0, ITEM_WHITE_CONCRETE), (1, 0, ITEM_WHITE_CONCRETE), (2, 0, ITEM_WHITE_CONCRETE)] },
+    Recipe { needs: &[(ITEM_WHITE_CONCRETE, 6)], result: (ITEM_WHITE_CONCRETE_STAIRS, 4), name: "white_concrete_stairs", shaped: true, cells: &[(0, 0, ITEM_WHITE_CONCRETE), (0, 1, ITEM_WHITE_CONCRETE), (1, 1, ITEM_WHITE_CONCRETE), (0, 2, ITEM_WHITE_CONCRETE), (1, 2, ITEM_WHITE_CONCRETE), (2, 2, ITEM_WHITE_CONCRETE)] },
+    Recipe { needs: &[(ITEM_WHITE_WOOL_SLAB, 3)], result: (ITEM_WHITE_CUSHION, 1), name: "white_cushion", shaped: true, cells: &[(0, 0, ITEM_WHITE_WOOL_SLAB), (1, 0, ITEM_WHITE_WOOL_SLAB), (2, 0, ITEM_WHITE_WOOL_SLAB)] },
+    Recipe { needs: &[(ITEM_BONE_MEAL, 1)], result: (ITEM_WHITE_DYE, 1), name: "white_dye", shaped: false, cells: &[] },
+    Recipe { needs: &[(ITEM_LILY_OF_THE_VALLEY, 1)], result: (ITEM_WHITE_DYE, 1), name: "white_dye_from_lily_of_the_valley", shaped: false, cells: &[] },
+    Recipe { needs: &[(ITEM_GLASS, 2), (ITEM_LEATHER, 3), (ITEM_WHITE_WOOL, 1)], result: (ITEM_WHITE_HARNESS, 1), name: "white_harness", shaped: true, cells: &[(0, 0, ITEM_LEATHER), (1, 0, ITEM_LEATHER), (2, 0, ITEM_LEATHER), (0, 1, ITEM_GLASS), (1, 1, ITEM_WHITE_WOOL), (2, 1, ITEM_GLASS)] },
+    Recipe { needs: &[(ITEM_GLASS, 8), (ITEM_WHITE_DYE, 1)], result: (ITEM_WHITE_STAINED_GLASS, 8), name: "white_stained_glass", shaped: true, cells: &[(0, 0, ITEM_GLASS), (1, 0, ITEM_GLASS), (2, 0, ITEM_GLASS), (0, 1, ITEM_GLASS), (1, 1, ITEM_WHITE_DYE), (2, 1, ITEM_GLASS), (0, 2, ITEM_GLASS), (1, 2, ITEM_GLASS), (2, 2, ITEM_GLASS)] },
+    Recipe { needs: &[(ITEM_WHITE_STAINED_GLASS, 6)], result: (ITEM_WHITE_STAINED_GLASS_PANE, 16), name: "white_stained_glass_pane", shaped: true, cells: &[(0, 0, ITEM_WHITE_STAINED_GLASS), (1, 0, ITEM_WHITE_STAINED_GLASS), (2, 0, ITEM_WHITE_STAINED_GLASS), (0, 1, ITEM_WHITE_STAINED_GLASS), (1, 1, ITEM_WHITE_STAINED_GLASS), (2, 1, ITEM_WHITE_STAINED_GLASS)] },
+    Recipe { needs: &[(ITEM_GLASS_PANE, 8), (ITEM_WHITE_DYE, 1)], result: (ITEM_WHITE_STAINED_GLASS_PANE, 8), name: "white_stained_glass_pane_from_glass_pane", shaped: true, cells: &[(0, 0, ITEM_GLASS_PANE), (1, 0, ITEM_GLASS_PANE), (2, 0, ITEM_GLASS_PANE), (0, 1, ITEM_GLASS_PANE), (1, 1, ITEM_WHITE_DYE), (2, 1, ITEM_GLASS_PANE), (0, 2, ITEM_GLASS_PANE), (1, 2, ITEM_GLASS_PANE), (2, 2, ITEM_GLASS_PANE)] },
+    Recipe { needs: &[(ITEM_TERRACOTTA, 8), (ITEM_WHITE_DYE, 1)], result: (ITEM_WHITE_TERRACOTTA, 8), name: "white_terracotta", shaped: true, cells: &[(0, 0, ITEM_TERRACOTTA), (1, 0, ITEM_TERRACOTTA), (2, 0, ITEM_TERRACOTTA), (0, 1, ITEM_TERRACOTTA), (1, 1, ITEM_WHITE_DYE), (2, 1, ITEM_TERRACOTTA), (0, 2, ITEM_TERRACOTTA), (1, 2, ITEM_TERRACOTTA), (2, 2, ITEM_TERRACOTTA)] },
+    Recipe { needs: &[(ITEM_STRING, 4)], result: (ITEM_WHITE_WOOL, 1), name: "white_wool_from_string", shaped: true, cells: &[(0, 0, ITEM_STRING), (1, 0, ITEM_STRING), (0, 1, ITEM_STRING), (1, 1, ITEM_STRING)] },
+    Recipe { needs: &[(ITEM_WHITE_WOOL, 3)], result: (ITEM_WHITE_WOOL_SLAB, 6), name: "white_wool_slab", shaped: true, cells: &[(0, 0, ITEM_WHITE_WOOL), (1, 0, ITEM_WHITE_WOOL), (2, 0, ITEM_WHITE_WOOL)] },
+    Recipe { needs: &[(ITEM_WHITE_WOOL, 6)], result: (ITEM_WHITE_WOOL_STAIRS, 4), name: "white_wool_stairs", shaped: true, cells: &[(0, 0, ITEM_WHITE_WOOL), (0, 1, ITEM_WHITE_WOOL), (1, 1, ITEM_WHITE_WOOL), (0, 2, ITEM_WHITE_WOOL), (1, 2, ITEM_WHITE_WOOL), (2, 2, ITEM_WHITE_WOOL)] },
+    Recipe { needs: &[(ITEM_DIAMOND, 7), (ITEM_MOSSY_COBBLESTONE, 1), (ITEM_WILD_ARMOR_TRIM_SMITHING_TEMPLATE, 1)], result: (ITEM_WILD_ARMOR_TRIM_SMITHING_TEMPLATE, 2), name: "wild_armor_trim_smithing_template", shaped: true, cells: &[(0, 0, ITEM_DIAMOND), (1, 0, ITEM_WILD_ARMOR_TRIM_SMITHING_TEMPLATE), (2, 0, ITEM_DIAMOND), (0, 1, ITEM_DIAMOND), (1, 1, ITEM_MOSSY_COBBLESTONE), (2, 1, ITEM_DIAMOND), (0, 2, ITEM_DIAMOND), (1, 2, ITEM_DIAMOND), (2, 2, ITEM_DIAMOND)] },
+    Recipe { needs: &[(ITEM_BREEZE_ROD, 1)], result: (ITEM_WIND_CHARGE, 4), name: "wind_charge", shaped: false, cells: &[] },
+    Recipe { needs: &[(ITEM_ARMADILLO_SCUTE, 6)], result: (ITEM_WOLF_ARMOR, 1), name: "wolf_armor", shaped: true, cells: &[(0, 0, ITEM_ARMADILLO_SCUTE), (0, 1, ITEM_ARMADILLO_SCUTE), (1, 1, ITEM_ARMADILLO_SCUTE), (2, 1, ITEM_ARMADILLO_SCUTE), (0, 2, ITEM_ARMADILLO_SCUTE), (2, 2, ITEM_ARMADILLO_SCUTE)] },
+    Recipe { needs: &[(STICK, 2), (TAG_PLANKS, 3)], result: (ITEM_WOODEN_AXE, 1), name: "wooden_axe", shaped: true, cells: &[(0, 0, TAG_PLANKS), (1, 0, TAG_PLANKS), (0, 1, TAG_PLANKS), (1, 1, STICK), (1, 2, STICK)] },
+    Recipe { needs: &[(STICK, 2), (TAG_PLANKS, 2)], result: (ITEM_WOODEN_HOE, 1), name: "wooden_hoe", shaped: true, cells: &[(0, 0, TAG_PLANKS), (1, 0, TAG_PLANKS), (1, 1, STICK), (1, 2, STICK)] },
+    Recipe { needs: &[(STICK, 2), (TAG_PLANKS, 3)], result: (WOODEN_PICKAXE, 1), name: "wooden_pickaxe", shaped: true, cells: &[(0, 0, TAG_PLANKS), (1, 0, TAG_PLANKS), (2, 0, TAG_PLANKS), (1, 1, STICK), (1, 2, STICK)] },
+    Recipe { needs: &[(STICK, 2), (TAG_PLANKS, 1)], result: (ITEM_WOODEN_SHOVEL, 1), name: "wooden_shovel", shaped: true, cells: &[(0, 0, TAG_PLANKS), (0, 1, STICK), (0, 2, STICK)] },
+    Recipe { needs: &[(STICK, 2), (TAG_PLANKS, 1)], result: (ITEM_WOODEN_SPEAR, 1), name: "wooden_spear", shaped: true, cells: &[(2, 0, TAG_PLANKS), (1, 1, STICK), (0, 2, STICK)] },
+    Recipe { needs: &[(STICK, 1), (TAG_PLANKS, 2)], result: (ITEM_WOODEN_SWORD, 1), name: "wooden_sword", shaped: true, cells: &[(0, 0, TAG_PLANKS), (0, 1, TAG_PLANKS), (0, 2, STICK)] },
+    Recipe { needs: &[(ITEM_BOOK, 1), (ITEM_FEATHER, 1), (ITEM_INK_SAC, 1)], result: (ITEM_WRITABLE_BOOK, 1), name: "writable_book", shaped: false, cells: &[] },
+    Recipe { needs: &[(STICK, 1), (ITEM_YELLOW_WOOL, 6)], result: (ITEM_YELLOW_BANNER, 1), name: "yellow_banner", shaped: true, cells: &[(0, 0, ITEM_YELLOW_WOOL), (1, 0, ITEM_YELLOW_WOOL), (2, 0, ITEM_YELLOW_WOOL), (0, 1, ITEM_YELLOW_WOOL), (1, 1, ITEM_YELLOW_WOOL), (2, 1, ITEM_YELLOW_WOOL), (1, 2, STICK)] },
+    Recipe { needs: &[(ITEM_YELLOW_WOOL, 3), (TAG_PLANKS, 3)], result: (ITEM_YELLOW_BED, 1), name: "yellow_bed", shaped: true, cells: &[(0, 0, ITEM_YELLOW_WOOL), (1, 0, ITEM_YELLOW_WOOL), (2, 0, ITEM_YELLOW_WOOL), (0, 1, TAG_PLANKS), (1, 1, TAG_PLANKS), (2, 1, TAG_PLANKS)] },
+    Recipe { needs: &[(ITEM_CANDLE, 1), (ITEM_YELLOW_DYE, 1)], result: (ITEM_YELLOW_CANDLE, 1), name: "yellow_candle", shaped: false, cells: &[] },
+    Recipe { needs: &[(ITEM_YELLOW_WOOL, 2)], result: (ITEM_YELLOW_CARPET, 3), name: "yellow_carpet", shaped: true, cells: &[(0, 0, ITEM_YELLOW_WOOL), (1, 0, ITEM_YELLOW_WOOL)] },
+    Recipe { needs: &[(ITEM_GRAVEL, 1), (ITEM_GRAVEL, 1), (ITEM_GRAVEL, 1), (ITEM_GRAVEL, 1), (ITEM_SAND, 1), (ITEM_SAND, 1), (ITEM_SAND, 1), (ITEM_SAND, 1), (ITEM_YELLOW_DYE, 1)], result: (ITEM_YELLOW_CONCRETE_POWDER, 8), name: "yellow_concrete_powder", shaped: false, cells: &[] },
+    Recipe { needs: &[(ITEM_YELLOW_CONCRETE, 3)], result: (ITEM_YELLOW_CONCRETE_SLAB, 6), name: "yellow_concrete_slab", shaped: true, cells: &[(0, 0, ITEM_YELLOW_CONCRETE), (1, 0, ITEM_YELLOW_CONCRETE), (2, 0, ITEM_YELLOW_CONCRETE)] },
+    Recipe { needs: &[(ITEM_YELLOW_CONCRETE, 6)], result: (ITEM_YELLOW_CONCRETE_STAIRS, 4), name: "yellow_concrete_stairs", shaped: true, cells: &[(0, 0, ITEM_YELLOW_CONCRETE), (0, 1, ITEM_YELLOW_CONCRETE), (1, 1, ITEM_YELLOW_CONCRETE), (0, 2, ITEM_YELLOW_CONCRETE), (1, 2, ITEM_YELLOW_CONCRETE), (2, 2, ITEM_YELLOW_CONCRETE)] },
+    Recipe { needs: &[(ITEM_YELLOW_WOOL_SLAB, 3)], result: (ITEM_YELLOW_CUSHION, 1), name: "yellow_cushion", shaped: true, cells: &[(0, 0, ITEM_YELLOW_WOOL_SLAB), (1, 0, ITEM_YELLOW_WOOL_SLAB), (2, 0, ITEM_YELLOW_WOOL_SLAB)] },
+    Recipe { needs: &[(ITEM_DANDELION, 1)], result: (ITEM_YELLOW_DYE, 1), name: "yellow_dye_from_dandelion", shaped: false, cells: &[] },
+    Recipe { needs: &[(ITEM_GOLDEN_DANDELION, 1)], result: (ITEM_YELLOW_DYE, 1), name: "yellow_dye_from_golden_dandelion", shaped: false, cells: &[] },
+    Recipe { needs: &[(ITEM_SUNFLOWER, 1)], result: (ITEM_YELLOW_DYE, 2), name: "yellow_dye_from_sunflower", shaped: false, cells: &[] },
+    Recipe { needs: &[(ITEM_WILDFLOWERS, 1)], result: (ITEM_YELLOW_DYE, 1), name: "yellow_dye_from_wildflowers", shaped: false, cells: &[] },
+    Recipe { needs: &[(ITEM_GLASS, 2), (ITEM_LEATHER, 3), (ITEM_YELLOW_WOOL, 1)], result: (ITEM_YELLOW_HARNESS, 1), name: "yellow_harness", shaped: true, cells: &[(0, 0, ITEM_LEATHER), (1, 0, ITEM_LEATHER), (2, 0, ITEM_LEATHER), (0, 1, ITEM_GLASS), (1, 1, ITEM_YELLOW_WOOL), (2, 1, ITEM_GLASS)] },
+    Recipe { needs: &[(ITEM_GLASS, 8), (ITEM_YELLOW_DYE, 1)], result: (ITEM_YELLOW_STAINED_GLASS, 8), name: "yellow_stained_glass", shaped: true, cells: &[(0, 0, ITEM_GLASS), (1, 0, ITEM_GLASS), (2, 0, ITEM_GLASS), (0, 1, ITEM_GLASS), (1, 1, ITEM_YELLOW_DYE), (2, 1, ITEM_GLASS), (0, 2, ITEM_GLASS), (1, 2, ITEM_GLASS), (2, 2, ITEM_GLASS)] },
+    Recipe { needs: &[(ITEM_YELLOW_STAINED_GLASS, 6)], result: (ITEM_YELLOW_STAINED_GLASS_PANE, 16), name: "yellow_stained_glass_pane", shaped: true, cells: &[(0, 0, ITEM_YELLOW_STAINED_GLASS), (1, 0, ITEM_YELLOW_STAINED_GLASS), (2, 0, ITEM_YELLOW_STAINED_GLASS), (0, 1, ITEM_YELLOW_STAINED_GLASS), (1, 1, ITEM_YELLOW_STAINED_GLASS), (2, 1, ITEM_YELLOW_STAINED_GLASS)] },
+    Recipe { needs: &[(ITEM_GLASS_PANE, 8), (ITEM_YELLOW_DYE, 1)], result: (ITEM_YELLOW_STAINED_GLASS_PANE, 8), name: "yellow_stained_glass_pane_from_glass_pane", shaped: true, cells: &[(0, 0, ITEM_GLASS_PANE), (1, 0, ITEM_GLASS_PANE), (2, 0, ITEM_GLASS_PANE), (0, 1, ITEM_GLASS_PANE), (1, 1, ITEM_YELLOW_DYE), (2, 1, ITEM_GLASS_PANE), (0, 2, ITEM_GLASS_PANE), (1, 2, ITEM_GLASS_PANE), (2, 2, ITEM_GLASS_PANE)] },
+    Recipe { needs: &[(ITEM_TERRACOTTA, 8), (ITEM_YELLOW_DYE, 1)], result: (ITEM_YELLOW_TERRACOTTA, 8), name: "yellow_terracotta", shaped: true, cells: &[(0, 0, ITEM_TERRACOTTA), (1, 0, ITEM_TERRACOTTA), (2, 0, ITEM_TERRACOTTA), (0, 1, ITEM_TERRACOTTA), (1, 1, ITEM_YELLOW_DYE), (2, 1, ITEM_TERRACOTTA), (0, 2, ITEM_TERRACOTTA), (1, 2, ITEM_TERRACOTTA), (2, 2, ITEM_TERRACOTTA)] },
+    Recipe { needs: &[(ITEM_YELLOW_WOOL, 3)], result: (ITEM_YELLOW_WOOL_SLAB, 6), name: "yellow_wool_slab", shaped: true, cells: &[(0, 0, ITEM_YELLOW_WOOL), (1, 0, ITEM_YELLOW_WOOL), (2, 0, ITEM_YELLOW_WOOL)] },
+    Recipe { needs: &[(ITEM_YELLOW_WOOL, 6)], result: (ITEM_YELLOW_WOOL_STAIRS, 4), name: "yellow_wool_stairs", shaped: true, cells: &[(0, 0, ITEM_YELLOW_WOOL), (0, 1, ITEM_YELLOW_WOOL), (1, 1, ITEM_YELLOW_WOOL), (0, 2, ITEM_YELLOW_WOOL), (1, 2, ITEM_YELLOW_WOOL), (2, 2, ITEM_YELLOW_WOOL)] },
 ];
 // === GEN-TABLE-END ===
 
@@ -2744,14 +2741,10 @@ pub const CRAFT9_WINDOW_ID: i32 = 1;
 /// 工作台结果槽。
 pub const CRAFT9_RESULT_SLOT: i16 = 0;
 
-/// 3×3 配方匹配：与 2×2 共用配方表/无序口径（子集匹配 + 规范槽型拆分），
-/// 9 格用自己的占用槽指纹做规范槽型拆分，仍无命中时按
-/// 总需求量降序 + 表序兜底，确定性且与 HashMap 无关。
+/// 3×3 配方匹配：P60 vanilla 口径（shaped 定位+镜像+平移，shapeless 逐格单位）。
+/// 9 格行序（idx = y*3+x），与窗口槽 1..=9 一一对应。
 pub fn match_recipe_9(grid: [Option<(i32, i32)>; GRID9_SIZE]) -> Option<&'static Recipe> {
-    let input = normalized_multiset(&grid_stacks9(grid));
-    let candidates: Vec<&'static Recipe> =
-        RECIPES.iter().filter(|r| needs_subset_of(r.needs, &input)).collect();
-    resolve_candidates(candidates, slot_fingerprint9(grid))
+    match_in_grid(&grid, 3)
 }
 
 /// 3×3 合成格展平。
@@ -2759,39 +2752,10 @@ pub fn grid_stacks9(grid: [Option<(i32, i32)>; GRID9_SIZE]) -> Vec<(i32, i32)> {
     grid.into_iter().flatten().collect()
 }
 
-/// 按 ID 从 3×3 格扣除原料（与 `consume_grid` 同语义，返回是否足够）。
-/// 标签需求从成员槽按槽序扣（确定性）。
+/// 按 ID 从 3×3 格扣除原料（P60 vanilla 口径：shaped 按命中定位格各扣 1；
+/// shapeless 每个占用格扣 1，多的留下）。返回是否全部扣成功。
 pub fn consume_grid9(grid: &mut [Option<(i32, i32)>; GRID9_SIZE], recipe: &Recipe) -> bool {
-    for (id, need) in recipe.needs {
-        let mut left = *need;
-        let members;
-        let want_tag = *id < 0;
-        if want_tag {
-            members = tag_members(*id);
-        } else {
-            members = &[];
-        }
-        for slot in grid.iter_mut() {
-            if left <= 0 {
-                break;
-            }
-            if let Some((sid, count)) = slot {
-                if !(if want_tag { members.contains(sid) } else { *sid == *id }) {
-                    continue;
-                }
-                let take = (*count).min(left);
-                *count -= take;
-                left -= take;
-                if *count <= 0 {
-                    *slot = None;
-                }
-            }
-        }
-        if left > 0 {
-            return false;
-        }
-    }
-    true
+    consume_in_grid(grid, 3, recipe)
 }
 
 /// 某物品能否作为配方的原料：具体需求精确对应，标签需求按成员归属。
@@ -2816,274 +2780,270 @@ fn tag_members(tag_id: i32) -> &'static [i32] {
     CRAFT_TAGS.get((-tag_id - 1) as usize).copied().unwrap_or(&[])
 }
 
-/// 配方需求是否被输入多重集满足：输入的每种物品必须被某条需求覆盖
-///（具体物品需求精确对应；标签需求按成员归属），且每条需求的数量被满足
-///（具体物品按该 ID 计数，标签按成员总量计数）。多的留下，杂物不行。
-/// `needs`/`input` 均为 [`normalized_multiset`] 后的 `(id, count)` 有序表。
-fn needs_subset_of(needs: &[(i32, i32)], input: &[(i32, i32)]) -> bool {
-    let agg = normalized_multiset(needs);
-    agg.iter().all(|(id, n)| {
-        if *id >= 0 {
-            input.iter().any(|(i, h)| i == id && h >= n)
-        } else {
-            let members = tag_members(*id);
-            input.iter().filter(|(i, _)| members.contains(i)).map(|(_, h)| h).sum::<i32>() >= *n
-        }
-    }) && input.iter().all(|(id, _)| {
-        agg.iter().any(|(i, _)| i == id)
-            || agg.iter().any(|(i, _)| *i < 0 && tag_members(*i).contains(id))
-    })
-}
-
-/// 规范槽型是否命中指纹：先直接比较；含标签需求的配方把指纹里的成员 ID
-/// 折叠成标签占位后再比（同一成员若属多个需求标签则判为不命中，保证确定性）。
-/// 纯具体配方走旧逐字节口径，行为不变。
-fn layout_matches(recipe: &Recipe, fingerprint: &[(i32, i32)]) -> bool {
-    let Some(layout) = canonical_layout(recipe) else { return false };
-    if layout.as_slice() == fingerprint {
-        return true;
-    }
-    if layout.iter().all(|(id, _)| *id >= 0) {
-        return false;
-    }
-    let mut tags: Vec<(i32, &[i32])> = Vec::new();
-    for (id, _) in recipe.needs {
-        if *id < 0 && !tags.iter().any(|(t, _)| t == id) {
-            tags.push((*id, tag_members(*id)));
-        }
-    }
-    let mut mapped: Vec<(i32, i32)> = Vec::with_capacity(fingerprint.len());
-    for (id, c) in fingerprint {
-        let mut hit: Option<i32> = None;
-        if layout.iter().any(|(lid, _)| *lid == *id) {
-            hit = Some(*id);
-        } else {
-            for (tid, members) in &tags {
-                if members.contains(id) {
-                    if hit.is_some() {
-                        return false;
-                    }
-                    hit = Some(*tid);
-                }
-            }
-        }
-        let Some(h) = hit else { return false };
-        mapped.push((h, *c));
-    }
-    mapped.sort_unstable();
-    mapped.as_slice() == layout.as_slice()
-}
-
-/// 候选配方确定性拆分：规范槽型优先（歧义组），否则总需求量降序
-///（越具体越优先），同量按表序（`candidates` 本来就是表序，稳定排序保持它）。
-/// 严格子集候选永远匹配不上任何指纹（槽位总数对不上），
-/// 因此指纹轮只在"精确命中"的候选里选，与旧"精确优先"口径一致。
-fn resolve_candidates(
-    candidates: Vec<&'static Recipe>,
-    fingerprint: Vec<(i32, i32)>,
-) -> Option<&'static Recipe> {
-    if candidates.is_empty() {
-        return None;
-    }
-    if candidates.len() == 1 {
-        return Some(candidates[0]);
-    }
-    for recipe in &candidates {
-        if layout_matches(recipe, &fingerprint) {
-            return Some(recipe);
-        }
-    }
-    let mut ranked = candidates;
-    ranked.sort_by_key(|r| std::cmp::Reverse(r.needs.iter().map(|(_, n)| *n).sum::<i32>()));
-    ranked.into_iter().next()
-}
-
-/// 把合成格展平成 `(id, count)` 列表（跳过空槽；未合并，匹配时按 ID 累计）。
-pub fn grid_stacks(grid: [Option<(i32, i32)>; GRID_SIZE]) -> Vec<(i32, i32)> {
-    grid.into_iter().flatten().collect()
-}
-
-/// 把物品列表按 ID 聚合、排序成规范多重集（跳过空/负数数量，0 视为不存在）。
-fn normalized_multiset(items: &[(i32, i32)]) -> Vec<(i32, i32)> {
-    let mut out: Vec<(i32, i32)> = Vec::with_capacity(items.len());
-    for &(id, count) in items {
-        if count <= 0 {
-            continue;
-        }
-        match out.iter_mut().find(|(i, _)| *i == id) {
-            Some(entry) => entry.1 += count,
-            None => out.push((id, count)),
-        }
-    }
-    out.sort_unstable();
-    out
-}
-
-/// 槽分布指纹：按 (id,count) 排序的占用槽列表，位置无关（4 格内）。
-/// 只在“多条配方输入多重集完全相同”的歧义组里用作确定性拆分键。
-fn slot_fingerprint(grid: [Option<(i32, i32)>; GRID_SIZE]) -> Vec<(i32, i32)> {
-    let mut slots: Vec<(i32, i32)> = grid.into_iter().flatten().filter(|(_, c)| *c > 0).collect();
-    slots.sort_unstable();
-    slots
-}
-
-/// 9 格占用槽指纹（与 [`slot_fingerprint`] 同口径，供 3×3 规范槽型拆分）。
-fn slot_fingerprint9(grid: [Option<(i32, i32)>; GRID9_SIZE]) -> Vec<(i32, i32)> {
-    let mut slots: Vec<(i32, i32)> = grid.into_iter().flatten().filter(|(_, c)| *c > 0).collect();
-    slots.sort_unstable();
-    slots
-}
-
-/// 歧义组的规范槽型（按 (id,count) 排序后比较）。
+/// P60 vanilla 形状匹配核心（`match_recipe`/`match_recipe_9` 共用）。
 ///
-/// 原版里下列配方恰好消耗相同的物品集合（本服不检查形状），用规范槽型做确定性拆分；
-/// 槽型本身也相同的按总需求量降序 + 表序回退（确定性，见 [`resolve_candidates`]）：
-/// - 木棍/压力板：2 木板分两格(1+1) → 木棍；2 木板放单格 → 压力板。
-/// - 工作台：4 木板单格（或 2+2 等其它拆分经回退）→ 工作台。
-/// - 镐/斧：材料 3 单格 + 木棍 2 单格 → 镐；材料 2+1 + 木棍 1+1（占满 4 格）→ 斧。
-/// - 门/活板门/楼梯（6 木板）：3+3 → 门（楼梯同槽型，按表序归门）；
-///   2+2+2 → 活板门；1+2+3 台阶形 → 楼梯。
-/// - 栅栏/栅栏门：木板 2+2 + 木棍 1+1 → 栅栏；木板 2+1+1 + 木棍 2 单格 → 栅栏门。
-/// - 护腿/炼药锅：7 材料拆 3+2+2 → 护腿；7 材料单格 → 炼药锅。
-/// - 碗/台阶：3 木板拆 1+1+1 → 碗；3 木板单格 → 台阶。
-/// - 铲/矛：材料 1 + 木棍 1+1 → 铲（矛同槽型，按表序归铲；木棍叠放 2 格 → 矛）。
-/// - 靴子/切制铜/砖块/陶罐（4 同材）：1+1+1+1 → 靴子（铜靴）/栅格；
-///   2+2 → 切制铜/砖块；1+2+1 → 饰纹陶罐；其余回退按表序。
-/// - 头盔/矿车：3+2 → 头盔（矿车同槽型，按表序归头盔；2+2+1 → 矿车）。
-/// - 栅格：4 材料分 4 格 → 栅格。
-/// - 马铠/护腿：槽型相同，按表序归马铠（单格 7 也归马铠；3+2+2 拆分归护腿）。
-fn canonical_layout(recipe: &Recipe) -> Option<Vec<(i32, i32)>> {
-    // 主材料判定（与生成表 needs 顺序无关，确定性）：
-    // 有 tag 需求取首个 tag（tag 配方的主材料恒为 tag）；
-    // 否则取唯一的非木棍具体材料（栅栏门/铲等多 sticks 配方也能找对）；
-    // 兜底取首条需求。木棍 ID 见 STICK（1060）。
-    let (mat, n) = recipe
-        .needs
-        .iter()
-        .find(|(id, _)| *id < 0)
-        .or_else(|| {
-            let mut concrete = recipe
-                .needs
-                .iter()
-                .filter(|(id, _)| *id >= 0 && *id != STICK);
-            let first = concrete.next()?;
-            if concrete.next().is_some() {
-                return None;
-            }
-            Some(first)
-        })
-        .or_else(|| recipe.needs.first())
-        .copied()?;
-    let mut layout = if recipe.name == "stick" || recipe.name.ends_with("_stick") {
-        vec![(mat, 1), (mat, 1)]
-    } else if recipe.name == "crafting_table" || recipe.name.ends_with("_crafting_table") {
-        vec![(mat, 4)]
-    } else if recipe.name.ends_with("_pressure_plate") {
-        vec![(mat, n)]
-    } else if recipe.name.ends_with("_stairs") {
-        // 台阶 vanialla 形状是 1+2+3 的台阶（不是 3+3，后者归门）。
-        vec![(mat, 1), (mat, 2), (mat, 3)]
-    } else if recipe.name.ends_with("_pickaxe") {
-        vec![(mat, 3), (STICK, 2)]
-    } else if recipe.name.ends_with("_axe") {
-        vec![(mat, 2), (mat, 1), (STICK, 1), (STICK, 1)]
-    } else if recipe.name.ends_with("_door") {
-        vec![(mat, 3), (mat, 3)]
-    } else if recipe.name.ends_with("_trapdoor") {
-        // 木活板门 6 个（2+2+2）；铁/铜活板门 4 个（2×2），按总需求量区分。
-        let total: i32 = recipe.needs.iter().map(|(_, n)| *n).sum();
-        if total == 4 {
-            vec![(mat, 2), (mat, 2)]
-        } else {
-            vec![(mat, 2), (mat, 2), (mat, 2)]
-        }
-    } else if recipe.name.ends_with("_fence_gate") {
-        // 栅栏门：木板 2+1+1 + 木棍整组（vanilla 为 4 木棍一格；旧表曾简写成 2 棍）。
-        let sn: i32 = recipe.needs.iter().filter(|(id, _)| *id == STICK).map(|(_, n)| *n).sum();
-        vec![(mat, 2), (mat, 1), (mat, 1), (STICK, sn)]
-    } else if recipe.name.ends_with("_fence") {
-        vec![(mat, 2), (mat, 2), (STICK, 1), (STICK, 1)]
-    } else if recipe.name == "cauldron" {
-        vec![(mat, 7)]
-    } else if recipe.name == "bowl" {
-        vec![(mat, 1), (mat, 1), (mat, 1)]
-    } else if recipe.name.ends_with("_slab") {
-        vec![(mat, 3)]
-    } else if recipe.name == "decorated_pot_simple" {
-        vec![(mat, 1), (mat, 1), (mat, 2)]
-    } else if recipe.name.ends_with("_boots") {
-        vec![(mat, 1), (mat, 1), (mat, 1), (mat, 1)]
-    } else if recipe.name == "cut_copper" || recipe.name.ends_with("_cut_copper") {
-        vec![(mat, 2), (mat, 2)]
-    } else if recipe.name == "bricks" {
-        vec![(mat, 2), (mat, 2)]
-    } else if recipe.name == "shears" {
-        vec![(mat, 1), (mat, 1)]
-    } else if recipe.name == "minecart" {
-        vec![(mat, 2), (mat, 2), (mat, 1)]
-    } else if recipe.name.ends_with("_spear") {
-        // 矛（对角线）与铲（竖列）槽位 multiset 相同，按表序归铲；
-        // 木棍叠放的 2 格安排只匹配矛，保证矛也可合成。
-        vec![(mat, 1), (STICK, 2)]
-    } else if recipe.name.ends_with("_grate") {
-        vec![(mat, 1), (mat, 1), (mat, 1), (mat, 1)]
-    } else if recipe.name.ends_with("_shovel") {
-        vec![(mat, 1), (STICK, 1), (STICK, 1)]
-    } else if recipe.name.ends_with("_helmet") {
-        vec![(mat, 3), (mat, 2)]
-    } else if recipe.name.ends_with("_leggings") {
-        vec![(mat, 3), (mat, 2), (mat, 2)]
+/// 网格行序（2×2 idx = y*2+x；3×3 idx = y*3+x）：
+/// - shaped：`cells` 为去边稀疏格；允许平移 + 水平镜像；
+///   覆盖格须非空（数量 ≥1，tag 按成员归属），其余格须空。
+/// - shapeless：`needs` 展开为逐单位列表（每占用格提供 1 单位，多的留下）；
+///   占用格数须等于单位数（格外有货就不中，原版口径），tag 灵活归属。
+/// 首个命中的配方即结果（表序，确定性；原版同输入形状冲突时同样按配方序）。
+
+/// 料引用是否接受槽内物品（负数 id = [`CRAFT_TAGS`] 索引）。
+/// 匹配/补料共用同一口径。
+pub fn need_accepts(need_id: i32, slot_id: i32) -> bool {
+    if need_id >= 0 {
+        need_id == slot_id
     } else {
-        return None;
-    };
-    layout.sort_unstable();
-    Some(layout)
+        tag_members(need_id).contains(&slot_id)
+    }
 }
 
-/// 无序匹配（原版 shapeless 口径）：输入多重集满足某配方的需求
-///（每种物品数量 ≥ 配方需求、且无配方外的杂物）即命中，多的留下
-///（原版放一整组也只扣一份）。候选多条时先按规范槽型拆分
-///（[`canonical_layout`] + [`layout_matches`]，tag 成员归属折叠后比较），
-/// 再按总需求量降序（越具体越优先），同量按表序，绝不随机、也不按 HashMap 迭代顺序出结果。
-pub fn match_recipe(grid: [Option<(i32, i32)>; GRID_SIZE]) -> Option<&'static Recipe> {
-    let input = normalized_multiset(&grid_stacks(grid));
-    let candidates: Vec<&'static Recipe> =
-        RECIPES.iter().filter(|r| needs_subset_of(r.needs, &input)).collect();
-    resolve_candidates(candidates, slot_fingerprint(grid))
+/// 槽是否视为空（None 或数量 ≤0）。
+fn slot_empty(s: &Option<(i32, i32)>) -> bool {
+    match s {
+        None => true,
+        Some((_, c)) => *c <= 0,
+    }
 }
-/// 配方命中后按 ID 从合成格扣除原料（每格最多取自己数量；返回是否全部扣成功）。
-/// 标签需求从成员槽按槽序扣（确定性）。调用方应先 `match_recipe`；不匹配时不要调用，避免误扣。
-pub fn consume_grid(grid: &mut [Option<(i32, i32)>; GRID_SIZE], recipe: &Recipe) -> bool {
-    for (id, need) in recipe.needs {
-        let mut left = *need;
-        let members;
-        let want_tag = *id < 0;
-        if want_tag {
-            members = tag_members(*id);
-        } else {
-            members = &[];
-        }
-        for slot in grid.iter_mut() {
-            if left <= 0 {
-                break;
-            }
-            if let Some((sid, count)) = slot {
-                if !(if want_tag { members.contains(sid) } else { *sid == *id }) {
+
+/// 在 gw×gh 行序网格中找 shaped 配方的首个命中
+///（镜像 × 平移均按先上后下/先左后右），返回命中的格下标（升序）。
+fn find_placement(
+    cells: &[(u8, u8, i32)],
+    grid: &[Option<(i32, i32)>],
+    gw: usize,
+) -> Option<Vec<usize>> {
+    if cells.is_empty() {
+        return None;
+    }
+    let pw = cells.iter().map(|(x, _, _)| *x as usize).max().unwrap_or(0) + 1;
+    let ph = cells.iter().map(|(_, y, _)| *y as usize).max().unwrap_or(0) + 1;
+    let gh = grid.len() / gw;
+    if pw > gw || ph > gh {
+        return None;
+    }
+    for mirror in [false, true] {
+        for oy in 0..=(gh - ph) {
+            for ox in 0..=(gw - pw) {
+                let mut covered = [false; 9];
+                let mut hit = Vec::with_capacity(cells.len());
+                let mut ok = true;
+                for (x, y, need) in cells {
+                    let cx = (if mirror { pw - 1 - *x as usize } else { *x as usize }) + ox;
+                    let cy = *y as usize + oy;
+                    let idx = cy * gw + cx;
+                    match grid[idx] {
+                        Some((sid, c)) if c > 0 && need_accepts(*need, sid) => {
+                            if covered[idx] {
+                                ok = false;
+                                break;
+                            }
+                            covered[idx] = true;
+                            hit.push(idx);
+                        }
+                        _ => {
+                            ok = false;
+                            break;
+                        }
+                    }
+                }
+                if !ok {
                     continue;
                 }
-                let take = (*count).min(left);
-                *count -= take;
-                left -= take;
-                if *count <= 0 {
-                    *slot = None;
+                if grid.iter().enumerate().any(|(i, s)| !covered[i] && !slot_empty(s)) {
+                    continue;
                 }
+                hit.sort_unstable();
+                return Some(hit);
             }
         }
-        if left > 0 {
+    }
+    None
+}
+
+/// shapeless 单位展开：needs (id, n) → n 个 id（表序，确定性）。
+fn shapeless_units(needs: &[(i32, i32)]) -> Vec<i32> {
+    let mut units = Vec::new();
+    for (id, n) in needs {
+        for _ in 0..*n {
+            units.push(*id);
+        }
+    }
+    units
+}
+
+/// 网格占用槽（行序 idx，id；跳过空槽）。
+fn occupied_slots(grid: &[Option<(i32, i32)>]) -> Vec<(usize, i32)> {
+    grid.iter()
+        .enumerate()
+        .filter_map(|(i, s)| match s {
+            Some((id, c)) if *c > 0 => Some((i, *id)),
+            _ => None,
+        })
+        .collect()
+}
+
+/// shapeless 匹配存在性：占用格与单位二分图匹配（Kuhn，行序/表序确定性）。
+/// 占用格数须等于单位数（格外有货就不中）。
+fn shapeless_match(units: &[i32], slots: &[(usize, i32)]) -> bool {
+    if units.len() != slots.len() {
+        return false;
+    }
+    fn dfs(
+        u: usize,
+        units: &[i32],
+        slots: &[(usize, i32)],
+        mt: &mut [Option<usize>],
+        seen: &mut [bool],
+    ) -> bool {
+        for (s, &(_, sid)) in slots.iter().enumerate() {
+            if seen[s] || !need_accepts(units[u], sid) {
+                continue;
+            }
+            seen[s] = true;
+            if mt[s].is_none() || dfs(mt[s].unwrap(), units, slots, mt, seen) {
+                mt[s] = Some(u);
+                return true;
+            }
+        }
+        false
+    }
+    let mut mt: Vec<Option<usize>> = vec![None; slots.len()];
+    for u in 0..units.len() {
+        let mut seen = vec![false; slots.len()];
+        if !dfs(u, units, slots, &mut mt, &mut seen) {
             return false;
         }
     }
     true
+}
+
+/// 通用匹配：在 gw×gh 行序网格中按表序找首个命中的配方。
+fn match_in_grid(grid: &[Option<(i32, i32)>], gw: usize) -> Option<&'static Recipe> {
+    RECIPES.iter().find(|r| {
+        if r.shaped {
+            find_placement(r.cells, grid, gw).is_some()
+        } else {
+            shapeless_match(&shapeless_units(r.needs), &occupied_slots(grid))
+        }
+    })
+}
+
+/// 命中后扣料：shaped 按首个命中的定位格各扣 1；
+/// shapeless 每个占用格扣 1（归属无关：全占用格恰好各扣 1，多的留下）。
+/// 调用方应先 match；不匹配时返回 false，不扣。格外有货时同样拒绝。
+fn consume_in_grid(grid: &mut [Option<(i32, i32)>], gw: usize, recipe: &Recipe) -> bool {
+    if recipe.shaped {
+        let Some(hit) = find_placement(recipe.cells, grid, gw) else {
+            return false;
+        };
+        for i in hit {
+            match grid[i].as_mut() {
+                Some((_, c)) if *c > 0 => {
+                    *c -= 1;
+                    if *c <= 0 {
+                        grid[i] = None;
+                    }
+                }
+                _ => return false,
+            }
+        }
+        true
+    } else {
+        let occ = occupied_slots(grid);
+        if !shapeless_match(&shapeless_units(recipe.needs), &occ) {
+            return false;
+        }
+        for (i, _) in occ {
+            match grid[i].as_mut() {
+                Some((_, c)) if *c > 0 => {
+                    *c -= 1;
+                    if *c <= 0 {
+                        grid[i] = None;
+                    }
+                }
+                _ => return false,
+            }
+        }
+        true
+    }
+}
+
+/// P60：找首个"可继续补料"的 shaped 放置：非覆盖格须空；
+/// 覆盖格空着待补，或放着可接受的料。返回 (格下标, 该格料引用)（下标升序）。
+/// shapeless 不用此函数（见工作台补料：已占格须全可接受，填空格即可）。
+pub fn refill_placement(
+    recipe: &Recipe,
+    grid: &[Option<(i32, i32)>],
+    gw: usize,
+) -> Option<Vec<(usize, i32)>> {
+    if !recipe.shaped || recipe.cells.is_empty() {
+        return None;
+    }
+    let pw = recipe.cells.iter().map(|(x, _, _)| *x as usize).max().unwrap_or(0) + 1;
+    let ph = recipe.cells.iter().map(|(_, y, _)| *y as usize).max().unwrap_or(0) + 1;
+    let gh = grid.len() / gw;
+    if pw > gw || ph > gh {
+        return None;
+    }
+    for mirror in [false, true] {
+        for oy in 0..=(gh - ph) {
+            for ox in 0..=(gw - pw) {
+                let mut covered = [false; 9];
+                let mut hit = Vec::with_capacity(recipe.cells.len());
+                let mut ok = true;
+                for (x, y, need) in recipe.cells {
+                    let cx = (if mirror { pw - 1 - *x as usize } else { *x as usize }) + ox;
+                    let cy = *y as usize + oy;
+                    let idx = cy * gw + cx;
+                    match grid[idx] {
+                        Some((sid, c)) if c > 0 => {
+                            if covered[idx] || !need_accepts(*need, sid) {
+                                ok = false;
+                                break;
+                            }
+                            covered[idx] = true;
+                        }
+                        _ => {
+                            if covered[idx] {
+                                ok = false;
+                                break;
+                            }
+                            covered[idx] = true;
+                        }
+                    }
+                    hit.push((idx, *need));
+                }
+                if !ok {
+                    continue;
+                }
+                if grid.iter().enumerate().any(|(i, s)| !covered[i] && !slot_empty(s)) {
+                    continue;
+                }
+                hit.sort_unstable();
+                return Some(hit);
+            }
+        }
+    }
+    None
+}
+
+/// P60：旧 multiset 指纹拆分已删除（形状即真相，无需规范槽型）。
+
+/// P60：旧展平/多重集/指纹 helper 已删除（见 [`match_in_grid`]）。
+
+/// P60：旧规范槽型表已删除（vanilla 形状由生成器逐条给出，见 `cells`）。
+
+/// 2×2 配方匹配：P60 vanilla 口径（shaped 定位+镜像+平移，shapeless 逐格单位）。
+/// 4 格行序（idx = y*2+x），与背包槽 1..=4 一一对应；表序首中，确定性。
+pub fn match_recipe(grid: [Option<(i32, i32)>; GRID_SIZE]) -> Option<&'static Recipe> {
+    match_in_grid(&grid, 2)
+}
+/// 配方命中后按 vanilla 口径从 2×2 格扣除原料（每命中格扣 1，多的留下；
+/// 返回是否全部扣成功）。调用方应先 `match_recipe`；不匹配时不要调用。
+pub fn consume_grid(grid: &mut [Option<(i32, i32)>; GRID_SIZE], recipe: &Recipe) -> bool {
+    consume_in_grid(grid, 2, recipe)
 }
 
 #[cfg(test)]
@@ -3109,62 +3069,91 @@ mod tests {
         }
     }
 
+    /// P60 vanilla 形状：位置/朝向决定一切，堆叠多件只算 1 单位/格。
     #[test]
     fn match_and_consume_basic_recipes() {
+        // 1 原木（单格，shapeless 单单位）→ 4 木板；整组也只扣 1 个。
         let mut grid = [None, Some((OAK_LOG, 1)), None, None];
         let r = match_recipe(grid).expect("one log must make planks");
         assert_eq!(r.result, (OAK_PLANKS, 4));
         assert!(consume_grid(&mut grid, r));
         assert_eq!(grid, [None; GRID_SIZE]);
+        let mut grid = [Some((OAK_LOG, 5)), None, None, None];
+        let r = match_recipe(grid).expect("stacked log still crafts");
+        assert!(consume_grid(&mut grid, r));
+        assert_eq!(grid, [Some((OAK_LOG, 4)), None, None, None]);
 
-        // 2 木板 → 4 木棍（无序，位置无关）。
-        let grid = [Some((OAK_PLANKS, 1)), None, None, Some((OAK_PLANKS, 1))];
+        // 木棍 = 竖列 2 木板（左右列都行，平移口径）。
+        let grid = [Some((OAK_PLANKS, 1)), None, Some((OAK_PLANKS, 1)), None];
         assert_eq!(match_recipe(grid).unwrap().result, (STICK, 4));
+        let grid = [None, Some((OAK_PLANKS, 1)), None, Some((OAK_PLANKS, 1))];
+        assert_eq!(match_recipe(grid).unwrap().name, "stick");
+        // 横摆 2 木板是压力板，不是木棍（问题 1 的核心区分）。
+        let grid = [Some((OAK_PLANKS, 1)), Some((OAK_PLANKS, 1)), None, None];
+        assert_eq!(match_recipe(grid).unwrap().name, "oak_pressure_plate");
+        // 单格堆 2 木板：木棍/压力板都不成立；命中的是木按钮（1 木板 shapeless）。
+        assert_eq!(
+            match_recipe([Some((OAK_PLANKS, 2)), None, None, None]).unwrap().name,
+            "oak_button"
+        );
+        // 对角线也不是任何配方。
+        assert!(match_recipe([Some((OAK_PLANKS, 1)), None, None, Some((OAK_PLANKS, 1))]).is_none());
 
-        // 3 木板 + 2 木棍 → 木镐（堆叠也算数量）。
-        let grid = [Some((OAK_PLANKS, 3)), Some((STICK, 2)), None, None];
-        assert_eq!(match_recipe(grid).unwrap().result, (WOODEN_PICKAXE, 1));
+        // 火把 = 煤上木棍下（左列）；只扣每格 1 个，多的留下。
+        let mut grid = [Some((COAL, 3)), None, Some((STICK, 5)), None];
+        let r = match_recipe(grid).expect("torch column");
+        assert_eq!(r.result, (TORCH, 4));
+        assert!(consume_grid(&mut grid, r));
+        assert_eq!(grid, [Some((COAL, 2)), None, Some((STICK, 4)), None]);
+        // 火把横摆/倒置不成立。
+        assert!(match_recipe([Some((COAL, 1)), Some((STICK, 1)), None, None]).is_none());
+        assert!(match_recipe([Some((STICK, 1)), None, Some((COAL, 1)), None]).is_none());
 
-        // 3 小麦 → 面包；煤 + 木棍 → 火把。
-        assert_eq!(match_recipe([Some((WHEAT, 3)), None, None, None]).unwrap().result, (BREAD, 1));
-        assert_eq!(match_recipe([Some((COAL, 1)), Some((STICK, 1)), None, None]).unwrap().result, (TORCH, 4));
+        // 工作台 = 2×2 铺满；缺一格不成立。
+        let mut grid =
+            [Some((OAK_PLANKS, 2)), Some((OAK_PLANKS, 1)), Some((OAK_PLANKS, 1)), Some((OAK_PLANKS, 3))];
+        let r = match_recipe(grid).expect("crafting table");
+        assert_eq!(r.name, "crafting_table");
+        assert!(consume_grid(&mut grid, r));
+        assert_eq!(
+            grid,
+            [Some((OAK_PLANKS, 1)), None, None, Some((OAK_PLANKS, 2))]
+        );
+        assert!(match_recipe([Some((OAK_PLANKS, 1)), Some((OAK_PLANKS, 1)), Some((OAK_PLANKS, 1)), None]).is_none());
+
+        // 书 = shapeless（3 纸 + 皮革，占满 4 格，顺序无关）。
+        let mut grid = [Some((ITEM_PAPER, 2)), Some((ITEM_PAPER, 1)), Some((ITEM_PAPER, 7)), Some((ITEM_LEATHER, 1))];
+        let r = match_recipe(grid).expect("book");
+        assert_eq!(r.result, (ITEM_BOOK, 1));
+        assert!(consume_grid(&mut grid, r));
+        assert_eq!(
+            grid,
+            [Some((ITEM_PAPER, 1)), None, Some((ITEM_PAPER, 6)), None]
+        );
+
+        // TAG 混合：橡木 + 云杉木板竖列也能出木棍。
+        let grid = [Some((OAK_PLANKS, 1)), None, Some((ITEM_SPRUCE_PLANKS, 1)), None];
+        assert_eq!(match_recipe(grid).unwrap().name, "stick");
     }
 
+    /// 格外有货就不中（原版口径）：多的不是数量，而是位置/格数。
     #[test]
     fn extra_or_missing_items_never_match() {
         assert!(match_recipe([None; GRID_SIZE]).is_none());
-        // 同种多一件仍命中（只扣一份，多的留下；原版放一整组也一样）。
-        let mut grid = [Some((OAK_LOG, 2)), None, None, None];
-        assert_eq!(match_recipe(grid).unwrap().result, (OAK_PLANKS, 4));
-        let r = match_recipe(grid).unwrap();
-        assert!(consume_grid(&mut grid, r));
-        assert_eq!(grid, [Some((OAK_LOG, 1)), None, None, None]);
+        // 面包要 3 格小麦横排：单格 3 个、两格都不成立（每格只提供 1 单位）。
+        assert!(match_recipe([Some((WHEAT, 3)), None, None, None]).is_none());
+        assert!(match_recipe([Some((WHEAT, 1)), Some((WHEAT, 1)), None, None]).is_none());
         // 多一个无关物品 → 原木配方不成立（避免白送木板）。
         assert!(match_recipe([Some((OAK_LOG, 1)), Some((STICK, 1)), None, None]).is_none());
-        // 3 圆石 + 1 木棍 → 石剑成立（总需求量 3 > 拉杆 2，越具体越优先；
-        // 只扣 2 圆石 + 1 木棍，剩 1 圆石）。
-        let mut grid = [Some((COBBLESTONE, 3)), Some((STICK, 1)), None, None];
-        let r = match_recipe(grid).expect("3 cobble + 1 stick must match stone_sword");
-        assert_eq!(r.name, "stone_sword");
-        assert!(consume_grid(&mut grid, r));
-        assert_eq!(grid, [Some((COBBLESTONE, 1)), None, None, None]);
-        // 少一件原料 → 面包不成立（2 小麦不够 3 个，其它小麦配方也差东西）。
-        assert!(match_recipe([Some((WHEAT, 2)), None, None, None]).is_none());
-    }
-
-    #[test]
-    fn consume_grid_takes_only_matching_stacks() {
-        let mut grid = [Some((OAK_PLANKS, 3)), Some((STICK, 2)), None, None];
-        let r = match_recipe(grid).unwrap();
-        assert_eq!(r.name, "wooden_pickaxe");
-        assert!(consume_grid(&mut grid, r));
-        assert_eq!(grid, [None; GRID_SIZE]);
+        // 竖列木棍格外多一块 → 木棍和压力板都不成立。
+        assert!(match_recipe([Some((OAK_PLANKS, 1)), None, Some((OAK_PLANKS, 1)), Some((OAK_PLANKS, 1))]).is_none());
+        // 火把列旁边多一块煤 → 不成立。
+        assert!(match_recipe([Some((COAL, 1)), Some((COAL, 1)), Some((STICK, 1)), None]).is_none());
     }
 
     // ---- P41：扩充配方的回归测试（下面 4 个旧测试保持原样） ----
 
-    /// 每条配方（含旧 7 条）的每个输入/输出 ID 都必须可在生成表中解析；
-    /// 同时锁定若干关键 ID 的实测值，防 codegen 漂移。
+    /// P60：3×3 同一张表走形状口径（行序 idx = y*3+x）。
     #[test]
     fn p47_grid9_uses_same_recipe_table_without_touching_2x2() {
         assert_eq!(GRID_SIZE, 4, "2×2 slot semantics must stay intact");
@@ -3180,29 +3169,76 @@ mod tests {
         assert!(consume_grid9(&mut g9, r));
         assert!(g9.iter().all(|s| s.is_none()));
         assert!(match_recipe_9(g9).is_none(), "empty grid has no recipe");
-        // 同一配方在 2×2（9 个塞一格）仍可命中，旧口径不变。
+        // P60：2×2 单格 9 小麦不再命中（shapeless 要 9 个占用格，原版口径）。
         let mut g4 = [None; GRID_SIZE];
         g4[0] = Some((WHEAT, 9));
-        assert_eq!(match_recipe(g4).unwrap().name, "hay_block");
-        // 18 个小麦（每格 2 个）→ 干草捆成立，扣 9 个剩 9 个（子集语义）。
-        let mut too_many = [None; GRID9_SIZE];
-        for slot in too_many.iter_mut() {
-            *slot = Some((WHEAT, 2));
+        assert!(match_recipe(g4).is_none(), "single stacked slot is not 9 units");
+
+        // 门 = 两列 3 木板（问题 2 的核心：6 块散放不出门）。
+        let mut door = [None; GRID9_SIZE];
+        for i in [0, 1, 3, 4, 6, 7] {
+            door[i] = Some((OAK_PLANKS, 1));
         }
-        let r = match_recipe_9(too_many).expect("18 wheat must still match hay_block");
-        assert_eq!(r.name, "hay_block");
-        assert!(consume_grid9(&mut too_many, r));
-        assert_eq!(too_many.iter().flatten().map(|(_, c)| c).sum::<i32>(), 9);
-        assert!(match_recipe_9(too_many).is_some(), "leftover 9 wheat still crafts");
+        assert_eq!(match_recipe_9(door).unwrap().name, "oak_door");
+        // 同样 6 块摆成两整行 → 活板门（3×2），不是门。
+        let mut trap = [None; GRID9_SIZE];
+        for i in 0..6 {
+            trap[i] = Some((OAK_PLANKS, 1));
+        }
+        assert_eq!(match_recipe_9(trap).unwrap().name, "oak_trapdoor");
+        // 6 块散放（对角 + 边）→ 什么都不出。
+        let mut scatter = [None; GRID9_SIZE];
+        for i in [0, 2, 3, 5, 6, 8] {
+            scatter[i] = Some((OAK_PLANKS, 1));
+        }
+        assert!(match_recipe_9(scatter).is_none(), "scattered planks must not craft a door");
+        // 台阶 = 1+2+3 台阶形（含镜像）；3+3 两列是门不是台阶。
+        let mut stairs = [None; GRID9_SIZE];
+        for i in [0, 3, 4, 6, 7, 8] {
+            stairs[i] = Some((OAK_PLANKS, 1));
+        }
+        assert_eq!(match_recipe_9(stairs).unwrap().name, "oak_stairs");
+        let mut stairs_m = [None; GRID9_SIZE];
+        for i in [2, 4, 5, 6, 7, 8] {
+            stairs_m[i] = Some((OAK_PLANKS, 1));
+        }
+        assert_eq!(match_recipe_9(stairs_m).unwrap().name, "oak_stairs");
+        // 铁镐 = 顶行 3 铁 + 中下两棍（tag 料，混合其他木棍不行；格外多一块就不中）。
+        let mut pick = [None; GRID9_SIZE];
+        for i in [0, 1, 2] {
+            pick[i] = Some((ITEM_IRON_INGOT, 1));
+        }
+        pick[4] = Some((STICK, 1));
+        pick[7] = Some((STICK, 1));
+        let r = match_recipe_9(pick).expect("iron pickaxe shape");
+        assert_eq!(r.name, "iron_pickaxe");
+        assert!(consume_grid9(&mut pick, r));
+        assert!(pick.iter().all(|s| s.is_none()));
+        // 镐形太大，2×2 放不下（原版一致：工具须去工作台）。
+        let small = [Some((ITEM_IRON_INGOT, 1)), Some((ITEM_IRON_INGOT, 1)), Some((STICK, 1)), Some((STICK, 1))];
+        assert!(match_recipe(small).is_none(), "pickaxe does not fit 2x2");
     }
 
+    /// 每条配方的每个输入/输出 ID 都必须可在生成表中解析；
+    /// 同时锁定若干关键 ID 的实测值，防 codegen 漂移。
+    /// P60 加形状 sanity：shaped 有去边非空 cells（≤3×3），shapeless cells 为空且单位 ≤9。
     #[test]
     fn p41_all_recipe_ids_resolve_in_generated_table() {
         let mut seen = std::collections::BTreeSet::new();
         // P59 全量表：1185 条 vanilla（data/777/full/recipes 生成，scripts/gen_recipes.py 复核）。
-        assert_eq!(RECIPES.len(), 1185, "P59 配方总数（vanilla 26.3 全量，tag 原生）");
+        assert_eq!(RECIPES.len(), 1185, "P60 配方总数（vanilla 26.3 全量，tag 原生，带形状）");
         for recipe in RECIPES {
             assert!(!recipe.needs.is_empty(), "empty needs in {}", recipe.name);
+            if recipe.shaped {
+                assert!(!recipe.cells.is_empty(), "shaped {} has no cells", recipe.name);
+                for (x, y, _) in recipe.cells {
+                    assert!(*x < 3 && *y < 3, "{} cell out of 3x3", recipe.name);
+                }
+            } else {
+                assert!(recipe.cells.is_empty(), "shapeless {} must not carry cells", recipe.name);
+                let units: i32 = recipe.needs.iter().map(|(_, c)| *c).sum();
+                assert!(units <= 9, "shapeless {} needs {units} units > 9 slots", recipe.name);
+            }
             let total: i32 = recipe.needs.iter().map(|(_, c)| *c).sum();
             // 单格堆叠上限 64，9 格合计不超过 576（vanilla 最大约 9）。
             assert!(total > 0 && total <= 576, "{} needs {total} items", recipe.name);
@@ -3246,190 +3282,175 @@ mod tests {
         }
     }
 
-    /// 输入多重集相同的配方组必须恰好是已知的 72 个（P59 全量表锁定）；
-    /// 有规范槽型的成员按槽型拆分（逐个验证），其余按总需求量降序 + 表序回退（确定性）。
+    /// P60 形状审计：每条配方造一个"教科书"格子（origin 放置，tag 取首成员；
+    /// shapeless 取前 k 格按单位顺序），断言命中自己；若被别条偷家，必须是锁定的
+    /// 已知表序赢家（vanilla 同形冲突同样按配方序），且重复两次一致。
     #[test]
-    fn p41_input_multiset_conflicts_are_known_and_splittable() {
-        use std::collections::BTreeMap;
-        let mut groups: BTreeMap<Vec<(i32, i32)>, Vec<&Recipe>> = BTreeMap::new();
-        for recipe in RECIPES {
-            groups.entry(normalized_multiset(recipe.needs)).or_default().push(recipe);
-        }
-        let conflicts: Vec<Vec<&Recipe>> =
-            groups.into_values().filter(|group| group.len() > 1).collect();
-        assert_eq!(conflicts.len(), 72, "unexpected number of ambiguous input groups");
-        // 表序位置（回退 tie-break 用）。
-        let pos_of = |r: &Recipe| RECIPES.iter().position(|x| x.name == r.name).unwrap();
-        for group in &conflicts {
-            // 1) 有规范槽型的成员：在其槽型上放料必须命中它（tag 成员取首个具体物品）。
-            for r in group.iter().filter(|r| canonical_layout(r).is_some()) {
-                let layout = canonical_layout(r).unwrap();
-                let mut grid = [None; GRID_SIZE];
-                // 槽型条目数一定 ≤4（布局定义保证；超限直接判失败）。
-                assert!(layout.len() <= GRID_SIZE, "{} layout too big", r.name);
-                for (i, (id, c)) in layout.iter().enumerate() {
-                    let concrete = if *id >= 0 {
-                        *id
-                    } else {
-                        tag_members(*id).first().copied().unwrap_or(*id)
-                    };
-                    grid[i] = Some((concrete, *c));
-                }
-                let got = match_recipe(grid).unwrap_or_else(|| {
-                    panic!("canonical layout of {} matches nothing", r.name)
-                });
-                // 同一槽型被多配方共享时（如门/楼梯 3+3），表序首个获胜。
-                let sharers: Vec<&&Recipe> = group
-                    .iter()
-                    .filter(|c| {
-                        canonical_layout(c).as_deref()
-                            == canonical_layout(r).as_deref()
-                    })
-                    .collect();
-                let expected = sharers.iter().min_by_key(|c| pos_of(c)).unwrap().name;
-                assert_eq!(got.name, expected, "canonical split of {}", r.name);
+    fn p60_canonical_grids_match_their_own_recipe_or_known_steal() {
+        fn concrete(id: i32) -> i32 {
+            if id >= 0 {
+                id
+            } else {
+                tag_members(id).first().copied().unwrap_or(id)
             }
-            // 2) 无槽型成员：回退路径是确定性的（重复解析结果一致）。
-            let mut fp: Vec<(i32, i32)> = group[0]
-                .needs
-                .iter()
-                .map(|(id, c)| {
-                    let concrete = if *id >= 0 {
-                        *id
-                    } else {
-                        tag_members(*id).first().copied().unwrap_or(*id)
-                    };
-                    (concrete, *c)
-                })
-                .collect();
-            fp.sort_unstable();
-            let a = resolve_candidates(group.clone(), fp.clone());
-            let b = resolve_candidates(group.clone(), fp);
-            assert_eq!(
-                a.map(|r| r.name),
-                b.map(|r| r.name),
-                "fallback must be deterministic"
-            );
         }
-        // 3) 回退赢家在 p41_ambiguous_families_are_deterministic 里逐个 pin 住（文档化口径）。
+        // 已知偷家（grid 属于 A 却命中 B）：逐条核对过 vanilla 真值，表序赢家。
+        // 当前为空：跑出来若有新增，必须先核对形状/材料再锁定，禁止直接加。
+        let known_steals: &[(&str, &str)] = &[];
+        let mut found: Vec<(&str, &str)> = Vec::new();
+        for recipe in RECIPES {
+            let mut grid = [None; GRID9_SIZE];
+            if recipe.shaped {
+                for (x, y, need) in recipe.cells {
+                    grid[*y as usize * 3 + *x as usize] = Some((concrete(*need), 1));
+                }
+            } else {
+                let mut i = 0;
+                for (id, n) in recipe.needs {
+                    for _ in 0..*n {
+                        grid[i] = Some((concrete(*id), 1));
+                        i += 1;
+                    }
+                }
+            }
+            let a = match_recipe_9(grid).map(|r| r.name);
+            let b = match_recipe_9(grid).map(|r| r.name);
+            assert_eq!(a, b, "match must be deterministic for {}", recipe.name);
+            match a {
+                Some(winner) if winner != recipe.name => {
+                    found.push((recipe.name, winner));
+                }
+                None => panic!("canonical grid of {} matches nothing", recipe.name),
+                _ => {}
+            }
+        }
+        assert_eq!(found, known_steals, "unexpected steals: {found:?}");
     }
 
-    /// 代表性新配方：匹配结果、数量与扣料（位置/堆叠顺序无关）。
+    /// P60 代表性配方：3×3 教科书摆法命中、扣料每格 1 个；2×2 只放得下小形状。
     #[test]
     fn p41_representative_new_recipes_match_and_consume() {
-        // 铁镐：3 铁锭 + 2 木棍，分两格。
-        let mut grid = [Some((ITEM_IRON_INGOT, 3)), Some((STICK, 2)), None, None];
-        let r = match_recipe(grid).expect("iron pickaxe");
-        assert_eq!(r.name, "iron_pickaxe");
-        assert_eq!(r.result, (ITEM_IRON_PICKAXE, 1));
-        assert!(consume_grid(&mut grid, r));
-        assert_eq!(grid, [None; GRID_SIZE]);
-
-        // 箱子：8 木板放一格（vanilla 通用箱子配方，tag 口径）。
-        let mut grid = [Some((OAK_PLANKS, 8)), None, None, None];
-        let r = match_recipe(grid).expect("chest");
+        // 箱子 = 3×3 木框（中空）；扣完 8 格各剩 1 个（每格只扣 1）。
+        let mut grid = [None; GRID9_SIZE];
+        for i in [0, 1, 2, 3, 5, 6, 7, 8] {
+            grid[i] = Some((OAK_PLANKS, 2));
+        }
+        let r = match_recipe_9(grid).expect("chest ring");
         assert_eq!(r.name, "chest");
         assert_eq!(r.result, (ITEM_CHEST, 1));
-        assert!(consume_grid(&mut grid, r));
-        assert_eq!(grid, [None; GRID_SIZE]);
+        assert!(consume_grid9(&mut grid, r));
+        assert_eq!(
+            grid,
+            [
+                Some((OAK_PLANKS, 1)),
+                Some((OAK_PLANKS, 1)),
+                Some((OAK_PLANKS, 1)),
+                Some((OAK_PLANKS, 1)),
+                None,
+                Some((OAK_PLANKS, 1)),
+                Some((OAK_PLANKS, 1)),
+                Some((OAK_PLANKS, 1)),
+                Some((OAK_PLANKS, 1)),
+            ],
+            "each ring slot loses exactly one"
+        );
 
-        // 红床：3 木板 + 3 羊毛；3 种输入以内仍可放进 2×2。
-        let mut grid = [Some((OAK_PLANKS, 3)), Some((ITEM_RED_WOOL, 3)), None, None];
-        let r = match_recipe(grid).expect("red bed");
+        // 红床 = 顶行 3 羊毛 + 次行 3 木板（3×2，非 2×2 口径）。
+        let mut grid = [None; GRID9_SIZE];
+        for i in [0, 1, 2] {
+            grid[i] = Some((ITEM_RED_WOOL, 1));
+        }
+        for i in [3, 4, 5] {
+            grid[i] = Some((OAK_PLANKS, 1));
+        }
+        let r = match_recipe_9(grid).expect("red bed");
         assert_eq!(r.name, "red_bed");
         assert_eq!(r.result, (ITEM_RED_BED, 1));
-        assert!(consume_grid(&mut grid, r));
-        assert_eq!(grid, [None; GRID_SIZE]);
+        assert!(consume_grid9(&mut grid, r));
+        assert!(grid.iter().all(|s| s.is_none()));
 
-        // 干草捆：9 小麦单格；纸/书/火把（旧）依旧命中。
+        // 2×2 放得下：单格甘蔗是糖（1 甘蔗 shapeless），不是纸；
+        // 纸要 3 格宽横排，2×2 放不下。
         assert_eq!(
-            match_recipe([Some((WHEAT, 9)), None, None, None]).unwrap().result,
-            (ITEM_HAY_BLOCK, 1)
+            match_recipe([Some((ITEM_SUGAR_CANE, 3)), None, None, None]).unwrap().name,
+            "sugar_from_sugar_cane"
         );
-        assert_eq!(
-            match_recipe([Some((ITEM_SUGAR_CANE, 3)), None, None, None]).unwrap().result,
-            (ITEM_PAPER, 3)
-        );
-        assert_eq!(
-            match_recipe([Some((ITEM_PAPER, 3)), Some((ITEM_LEATHER, 1)), None, None])
-                .unwrap()
-                .result,
-            (ITEM_BOOK, 1)
-        );
-        assert_eq!(
-            match_recipe([Some((COAL, 1)), Some((STICK, 1)), None, None]).unwrap().result,
-            (TORCH, 4)
-        );
-        // 多一件无关物品仍不命中（杂物照样挡配方，只有"同种多件"放宽）。
-        assert!(match_recipe([Some((ITEM_IRON_INGOT, 3)), Some((STICK, 2)), Some((COBBLESTONE, 1)), None]).is_none());
+        let row = [Some((ITEM_SUGAR_CANE, 1)), Some((ITEM_SUGAR_CANE, 1)), None, None];
+        assert!(match_recipe(row).is_none(), "paper needs a 3-wide row");
+        let mut row9 = [None; GRID9_SIZE];
+        row9[3] = Some((ITEM_SUGAR_CANE, 4));
+        row9[4] = Some((ITEM_SUGAR_CANE, 1));
+        row9[5] = Some((ITEM_SUGAR_CANE, 2));
+        assert_eq!(match_recipe_9(row9).unwrap().name, "paper");
+        // 格外多放一根 → 纸不成立。
+        row9[0] = Some((ITEM_SUGAR_CANE, 1));
+        assert!(match_recipe_9(row9).is_none());
+
+        // 头盔 U 形 vs 矿车 n 形：同 5 铁，不同形状，各归各位。
+        let mut helmet = [None; GRID9_SIZE];
+        for i in [0, 1, 2, 3, 5] {
+            helmet[i] = Some((ITEM_IRON_INGOT, 1));
+        }
+        assert_eq!(match_recipe_9(helmet).unwrap().name, "iron_helmet");
+        let mut cart = [None; GRID9_SIZE];
+        for i in [0, 2, 3, 4, 5] {
+            cart[i] = Some((ITEM_IRON_INGOT, 1));
+        }
+        assert_eq!(match_recipe_9(cart).unwrap().name, "minecart");
     }
 
-    /// 歧义组的确定性拆分：每种规范槽型给出唯一结果，重复调用不变；
-    /// 未命中任何规范槽型时按总需求量降序 + 表序回退，绝不随机。
+    /// P60 确定性：同输入永远同输出（表序首中），重复调用不变。
     #[test]
     fn p41_ambiguous_families_are_deterministic() {
-        let cases: [([Option<(i32, i32)>; 4], &str); 10] = [
-            // 木棍（1+1）/ 压力板（单格 2）
-            ([Some((OAK_PLANKS, 1)), Some((OAK_PLANKS, 1)), None, None], "stick"),
-            ([Some((OAK_PLANKS, 2)), None, None, None], "oak_pressure_plate"),
-            // 工作台（单格 4）；2+2 木板也是 2×2 铺满 → 工作台（vanilla 真值）。
-            ([Some((OAK_PLANKS, 4)), None, None, None], "crafting_table"),
-            ([Some((OAK_PLANKS, 2)), Some((OAK_PLANKS, 2)), None, None], "crafting_table"),
-            // 木镐（3 单格 + 2 单格）/ 木斧（2+1 + 1+1）
-            ([Some((OAK_PLANKS, 3)), Some((STICK, 2)), None, None], "wooden_pickaxe"),
-            ([Some((OAK_PLANKS, 2)), Some((OAK_PLANKS, 1)), Some((STICK, 1)), Some((STICK, 1))], "wooden_axe"),
-            // 门（3+3）/ 活板门（2+2+2）；台阶须摆 1+2+3 才命中
-            ([Some((OAK_PLANKS, 3)), Some((OAK_PLANKS, 3)), None, None], "oak_door"),
-            ([Some((OAK_PLANKS, 2)), Some((OAK_PLANKS, 2)), Some((OAK_PLANKS, 2)), None], "oak_trapdoor"),
-            // 栅栏（2+2 + 1+1）/ 栅栏门（2+1+1 + 棍 4 单格；vanilla 真值，旧表曾简写成 2 棍）
-            ([Some((OAK_PLANKS, 2)), Some((OAK_PLANKS, 2)), Some((STICK, 1)), Some((STICK, 1))], "oak_fence"),
-            ([Some((OAK_PLANKS, 2)), Some((OAK_PLANKS, 1)), Some((OAK_PLANKS, 1)), Some((STICK, 4))], "oak_fence_gate"),
+        // 门 2 列 vs 台阶形：同 6 木板不同形状，各归各位，重复一致。
+        let door = [
+            Some((OAK_PLANKS, 1)),
+            Some((OAK_PLANKS, 1)),
+            None,
+            Some((OAK_PLANKS, 1)),
+            Some((OAK_PLANKS, 1)),
+            None,
+            Some((OAK_PLANKS, 1)),
+            Some((OAK_PLANKS, 1)),
+            None,
         ];
-        for (grid, expected) in cases {
-            assert_eq!(match_recipe(grid).unwrap().name, expected);
-            assert_eq!(match_recipe(grid).unwrap().name, expected, "must be repeatable");
-        }
-        // 铁护腿（3+2+2）/ 炼药锅（单格 7）。
-        let leggings = [Some((ITEM_IRON_INGOT, 3)), Some((ITEM_IRON_INGOT, 2)), Some((ITEM_IRON_INGOT, 2)), None];
-        assert_eq!(match_recipe(leggings).unwrap().name, "iron_leggings");
-        assert_eq!(match_recipe([Some((ITEM_IRON_INGOT, 7)), None, None, None]).unwrap().name, "cauldron");
-        // 未命中规范槽型（3+1 木板）→ 总需求量最大者 crafting_table，绝不随机。
-        let odd = [Some((OAK_PLANKS, 3)), Some((OAK_PLANKS, 1)), None, None];
-        assert_eq!(match_recipe(odd).unwrap().name, "crafting_table");
-        // P59 新增槽型：碗（1+1+1）/ 台阶（单格 3）/ 台阶形 1+2+3 / 铁活板门（2+2）。
-        let bowl = [Some((OAK_PLANKS, 1)), Some((OAK_PLANKS, 1)), Some((OAK_PLANKS, 1)), None];
-        assert_eq!(match_recipe(bowl).unwrap().name, "bowl");
-        assert_eq!(match_recipe([Some((OAK_PLANKS, 3)), None, None, None]).unwrap().name, "oak_slab");
-        let stairs = [Some((OAK_PLANKS, 1)), Some((OAK_PLANKS, 2)), Some((OAK_PLANKS, 3)), None];
-        assert_eq!(match_recipe(stairs).unwrap().name, "oak_stairs");
-        let trap4 = [Some((ITEM_IRON_INGOT, 2)), Some((ITEM_IRON_INGOT, 2)), None, None];
-        assert_eq!(match_recipe(trap4).unwrap().name, "iron_trapdoor");
-        // TAG 混合：橡木 + 云杉木板混搭也能出木棍（子集语义 + 标签归属）。
-        let mixed = [Some((OAK_PLANKS, 1)), Some((ITEM_SPRUCE_PLANKS, 1)), None, None];
-        assert_eq!(match_recipe(mixed).unwrap().name, "stick");
-        let mut mixed_grid = mixed;
-        let r = match_recipe(mixed_grid).unwrap();
-        assert!(consume_grid(&mut mixed_grid, r));
-        assert_eq!(mixed_grid, [None, None, None, None]);
+        assert_eq!(match_recipe_9(door).unwrap().name, "oak_door");
+        assert_eq!(match_recipe_9(door).unwrap().name, "oak_door", "must be repeatable");
+        // 头盔 vs 矿车同上。
+        let helmet = [
+            Some((ITEM_IRON_INGOT, 1)),
+            Some((ITEM_IRON_INGOT, 1)),
+            Some((ITEM_IRON_INGOT, 1)),
+            Some((ITEM_IRON_INGOT, 1)),
+            None,
+            Some((ITEM_IRON_INGOT, 1)),
+            None,
+            None,
+            None,
+        ];
+        assert_eq!(match_recipe_9(helmet).unwrap().name, "iron_helmet");
+        assert_eq!(match_recipe_9(helmet).unwrap().name, "iron_helmet", "must be repeatable");
     }
 
-    /// P56：2×2 与 3×3 必须共用同一张配方表（同一 recipe / 同一 ID），不得分化。
+    /// P56/P60：2×2 与 3×3 共用同一张配方表（同一 recipe / 同一 ID），不得分化。
     #[test]
     fn p56_both_grids_share_one_recipe_table() {
-        // 3 小麦 → 面包：2×2 单格与 3×3 单格都命中同一条配方、同一结果。
-        let g4 = [Some((WHEAT, 3)), None, None, None];
+        // 火把列：2×2 左列与 3×3 左列命中同一条配方、同一结果。
+        let g4 = [Some((COAL, 1)), None, Some((STICK, 1)), None];
         let mut g9 = [None; GRID9_SIZE];
-        g9[4] = Some((WHEAT, 3));
-        let r4 = match_recipe(g4).expect("2×2 bread");
-        let r9 = match_recipe_9(g9).expect("3×3 bread");
-        assert_eq!(r4.name, "bread");
+        g9[3] = Some((COAL, 1));
+        g9[6] = Some((STICK, 1));
+        let r4 = match_recipe(g4).expect("2×2 torch");
+        let r9 = match_recipe_9(g9).expect("3×3 torch");
+        assert_eq!(r4.name, "torch");
         assert_eq!(r9.name, r4.name);
         assert_eq!(r4.result, r9.result);
         assert_eq!(r4.needs, r9.needs);
-        // 9 小麦 → 干草捆在两种网格里都命中同一条（2×2 是既有“单格堆叠”口径）。
-        let mut hay9 = [None; GRID9_SIZE];
-        hay9.iter_mut().for_each(|s| *s = Some((WHEAT, 1)));
-        assert_eq!(match_recipe_9(hay9).unwrap().name, "hay_block");
-        assert_eq!(match_recipe([Some((WHEAT, 9)), None, None, None]).unwrap().name, "hay_block");
+        // 原木→木板：单格在两种网格里都命中同一条。
+        let r4 = match_recipe([Some((OAK_LOG, 1)), None, None, None]).expect("2x2 planks");
+        let mut g9 = [None; GRID9_SIZE];
+        g9[8] = Some((OAK_LOG, 1));
+        let r9 = match_recipe_9(g9).expect("3x3 planks");
+        assert_eq!(r4.name, r9.name);
     }
 }

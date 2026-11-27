@@ -716,41 +716,50 @@ fn handle_items() -> AdminResponse {
 /// ID 来自同一张生成表，面板只展示、不自行拼数字。
 /// P59 tag-native：负数 need id 是 CRAFT_TAGS 索引，name 记 `#tag{idx}` 并附成员名，
 /// 避免旧 `item_name(huge u32) = null` 的不可读展示。
+/// P60 追加 `shaped` + `shape`（去边稀疏格 [x, y, item_id]，tag 同 needs 口径）。
 fn handle_recipes() -> AdminResponse {
+    fn need_json(id: i32, count: i32) -> serde_json::Value {
+        if id >= 0 {
+            serde_json::json!({
+                "item_id": id,
+                "name": mc_registry::item_name(id as u32),
+                "count": count,
+            })
+        } else {
+            let members: Vec<serde_json::Value> = mc_world::crafting::CRAFT_TAGS
+                .get((-id - 1) as usize)
+                .copied()
+                .unwrap_or(&[])
+                .iter()
+                .map(|m| {
+                    serde_json::json!({
+                        "item_id": m,
+                        "name": mc_registry::item_name(*m as u32),
+                    })
+                })
+                .collect();
+            serde_json::json!({
+                "item_id": id,
+                "name": format!("#tag{}", -id),
+                "count": count,
+                "members": members,
+            })
+        }
+    }
     let recipes: Vec<serde_json::Value> = mc_world::crafting::RECIPES
         .iter()
         .map(|r| {
-            let needs: Vec<serde_json::Value> = r
-                .needs
+            let needs: Vec<serde_json::Value> =
+                r.needs.iter().map(|(id, count)| need_json(*id, *count)).collect();
+            let shape: Vec<serde_json::Value> = r
+                .cells
                 .iter()
-                .map(|(id, count)| {
-                    if *id >= 0 {
-                        serde_json::json!({
-                            "item_id": id,
-                            "name": mc_registry::item_name(*id as u32),
-                            "count": count,
-                        })
-                    } else {
-                        let members: Vec<serde_json::Value> =
-                            mc_world::crafting::CRAFT_TAGS
-                                .get((-id - 1) as usize)
-                                .copied()
-                                .unwrap_or(&[])
-                                .iter()
-                                .map(|m| {
-                                    serde_json::json!({
-                                        "item_id": m,
-                                        "name": mc_registry::item_name(*m as u32),
-                                    })
-                                })
-                                .collect();
-                        serde_json::json!({
-                            "item_id": id,
-                            "name": format!("#tag{}", -id),
-                            "count": count,
-                            "members": members,
-                        })
-                    }
+                .map(|(x, y, id)| {
+                    let mut v = need_json(*id, 1);
+                    v["x"] = serde_json::json!(x);
+                    v["y"] = serde_json::json!(y);
+                    v.as_object_mut().unwrap().remove("count");
+                    v
                 })
                 .collect();
             let category = admin_items::item_info_by_id(r.result.0 as u32)
@@ -759,6 +768,8 @@ fn handle_recipes() -> AdminResponse {
             serde_json::json!({
                 "name": r.name,
                 "needs": needs,
+                "shaped": r.shaped,
+                "shape": shape,
                 "result": { "item_id": r.result.0, "count": r.result.1,
                             "name": mc_registry::item_name(r.result.0 as u32) },
                 "category": category,
@@ -1526,6 +1537,9 @@ mod tests {
             .unwrap();
         assert!(tag_need["name"].as_str().unwrap().starts_with("#tag"));
         assert!(tag_need["members"].as_array().unwrap().len() > 10);
+        // P60 形状口径：stick 是竖列 2 格。
+        assert_eq!(stick["shaped"], true);
+        assert_eq!(stick["shape"].as_array().unwrap().len(), 2);
         assert!(hay["category"].is_string());
         let sessions = body_json(&route(&get("/api/craft9"), &st));
         assert_eq!(sessions["sessions"].as_array().unwrap().len(), 0);

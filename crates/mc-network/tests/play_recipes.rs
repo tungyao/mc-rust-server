@@ -66,182 +66,85 @@ async fn serve_seeded(
     spawn_server(config).await
 }
 
+/// P60 2×2 形状口径：火把（煤上棍下左列）→ 取结果 → 扣料 → 全量同步。
 #[tokio::test]
-async fn craft_iron_pickaxe_full_sync_and_inputs_consumed() {
-    let dir = std::env::temp_dir().join(format!("mc-p41-pick-{}", std::process::id()));
+async fn craft_torch_full_sync_and_inputs_consumed() {
+    let dir = std::env::temp_dir().join(format!("mc-p60-torch-{}", std::process::id()));
     let _ = std::fs::remove_dir_all(&dir);
-    let r = recipe("iron_pickaxe");
-    // P59 tag-native：铁料需求是 TAG（负数 id），背包里放具体铁锭
-    //（从纯具体配方 cauldron 取铁锭 ID，不硬编码数字）；
-    // 木棍仍是具体 ID。数量口径不变（3 铁 + 2 棍）。
-    let iron_id = recipe("cauldron").needs.iter().find(|(id, _)| *id >= 0).unwrap().0;
-    let stick_id = mc_world::drops::ITEM_STICK;
-    assert!(r.needs.iter().any(|(id, n)| *id < 0 && *n == 3));
-    assert!(r.needs.iter().any(|(id, n)| *id == stick_id && *n == 2));
-    let iron = (iron_id, 3);
-    let stick = (stick_id, 2);
+    let coal = mc_world::drops::ITEM_COAL;
+    let stick = mc_world::drops::ITEM_STICK;
+    let r = recipe("torch");
     let mut inv = PlayerInventory::new();
-    inv.set_slot(9, Some(iron));
-    inv.set_slot(10, Some(stick));
-    let addr = serve_seeded(&dir, "PickCrafter", inv).await;
-    let mut s = login_and_join(addr, "PickCrafter", 2).await;
+    inv.set_slot(9, Some((coal, 2)));
+    inv.set_slot(10, Some((stick, 5)));
+    let addr = serve_seeded(&dir, "TorchCrafter", inv).await;
+    let mut s = login_and_join(addr, "TorchCrafter", 2).await;
 
     let c = read_content(&mut s).await;
-    assert_eq!(
-        c.slots[9],
-        packets::Slot {
-            count: 3,
-            item_id: iron.0
-        }
-    );
-    assert_eq!(
-        c.slots[10],
-        packets::Slot {
-            count: 2,
-            item_id: stick.0
-        }
-    );
+    assert_eq!(c.slots[9], packets::Slot { count: 2, item_id: coal });
+    assert_eq!(c.slots[10], packets::Slot { count: 5, item_id: stick });
 
+    // 左列：煤放槽 1，棍放槽 3。
     send_click(&mut s, 1, 9, 0, 0).await;
-    let c = read_content(&mut s).await;
-    assert_eq!(c.carried.item_id, iron.0);
-    assert_eq!(c.slots[9], packets::Slot::empty());
+    let _ = read_content(&mut s).await;
     send_click(&mut s, 2, 1, 0, 0).await;
-    let c = read_content(&mut s).await;
-    assert_eq!(
-        c.slots[1],
-        packets::Slot {
-            count: 3,
-            item_id: iron.0
-        }
-    );
-
+    let _ = read_content(&mut s).await;
     send_click(&mut s, 3, 10, 0, 0).await;
+    let _ = read_content(&mut s).await;
+    send_click(&mut s, 4, 3, 0, 0).await;
     let c = read_content(&mut s).await;
-    assert_eq!(c.carried.item_id, stick.0);
-    send_click(&mut s, 4, 2, 0, 0).await;
-    let c = read_content(&mut s).await;
-    assert_eq!(
-        c.slots[2],
-        packets::Slot {
-            count: 2,
-            item_id: stick.0
-        }
-    );
+    assert_eq!(c.slots[1], packets::Slot { count: 2, item_id: coal });
+    assert_eq!(c.slots[3], packets::Slot { count: 5, item_id: stick });
 
-    // 点结果槽：铁镐进光标，合成格两槽原料被权威扣除，全量同步回客户端。
+    // 点结果槽：4 火把进光标，每格原料扣 1，全量同步回客户端。
     send_click(&mut s, 5, 0, 0, 0).await;
     let c = read_content(&mut s).await;
-    assert_eq!(
-        c.carried,
-        packets::Slot {
-            count: r.result.1,
-            item_id: r.result.0
-        }
-    );
-    assert_eq!(c.slots[1], packets::Slot::empty(), "iron must be consumed");
-    assert_eq!(
-        c.slots[2],
-        packets::Slot::empty(),
-        "sticks must be consumed"
-    );
+    assert_eq!(c.carried, packets::Slot { count: r.result.1, item_id: r.result.0 });
+    assert_eq!(c.slots[1], packets::Slot { count: 1, item_id: coal }, "torch takes 1 coal");
+    assert_eq!(c.slots[3], packets::Slot { count: 4, item_id: stick }, "torch takes 1 stick");
     assert_eq!(c.slots[9], packets::Slot::empty());
     assert_eq!(c.slots[10], packets::Slot::empty());
     drop(s);
     let _ = std::fs::remove_dir_all(&dir);
 }
 
+/// P60 书 = shapeless（3 纸 + 皮革占满 4 格，顺序无关）。
 #[tokio::test]
-async fn craft_chest_then_bed_full_sync_and_inputs_consumed() {
-    let dir = std::env::temp_dir().join(format!("mc-p41-bed-{}", std::process::id()));
+async fn craft_book_full_sync_and_inputs_consumed() {
+    let dir = std::env::temp_dir().join(format!("mc-p60-book-{}", std::process::id()));
     let _ = std::fs::remove_dir_all(&dir);
-    let chest = recipe("chest");
-    let bed = recipe("red_bed");
-    let planks = mc_world::drops::ITEM_OAK_PLANKS;
-    // P59 tag-native：木板需求是 TAG（负数 id），背包里放具体橡木木板；
-    // 羊毛仍是具体 ID（取 red_bed 的非负需求项，不硬编码数字）。
-    assert!(chest.needs.iter().any(|(id, n)| *id < 0 && *n == 8));
-    let wool = bed.needs.iter().find(|(id, _)| *id >= 0).unwrap().0;
+    let r = recipe("book");
+    // 具体 ID 从表里取（不硬编码）：出现 3 次的是纸，出现 1 次的是皮革。
+    let mut counts = std::collections::HashMap::new();
+    for (id, _) in r.needs {
+        *counts.entry(id).or_insert(0) += 1;
+    }
+    let paper = **counts.iter().find(|(_, &c)| c == 3).unwrap().0;
+    let leather = **counts.iter().find(|(_, &c)| c == 1).unwrap().0;
     let mut inv = PlayerInventory::new();
-    inv.set_slot(9, Some((planks, 8)));
-    inv.set_slot(10, Some((planks, 3)));
-    inv.set_slot(11, Some((wool, 3)));
-    let addr = serve_seeded(&dir, "BedCrafter", inv).await;
-    let mut s = login_and_join(addr, "BedCrafter", 2).await;
+    inv.set_slot(9, Some((paper, 1)));
+    inv.set_slot(10, Some((paper, 1)));
+    inv.set_slot(11, Some((paper, 1)));
+    inv.set_slot(12, Some((leather, 1)));
+    let addr = serve_seeded(&dir, "BookCrafter", inv).await;
+    let mut s = login_and_join(addr, "BookCrafter", 2).await;
 
-    let c = read_content(&mut s).await;
-    assert_eq!(
-        c.slots[9],
-        packets::Slot {
-            count: 8,
-            item_id: planks
-        }
-    );
-
-    // 箱子：8 木板单格 → 1 箱子。
-    send_click(&mut s, 1, 9, 0, 0).await;
     let _ = read_content(&mut s).await;
-    send_click(&mut s, 2, 1, 0, 0).await;
+    // 4 格逐一放满。
+    for (st, wslot, gslot) in [(1, 9, 1), (2, 10, 2), (3, 11, 3), (4, 12, 4)] {
+        send_click(&mut s, st, wslot, 0, 0).await;
+        let _ = read_content(&mut s).await;
+        send_click(&mut s, st + 10, gslot, 0, 0).await;
+        let _ = read_content(&mut s).await;
+    }
+    // 点结果槽：书进光标，4 格全空。
+    send_click(&mut s, 30, 0, 0, 0).await;
     let c = read_content(&mut s).await;
-    assert_eq!(
-        c.slots[1],
-        packets::Slot {
-            count: 8,
-            item_id: planks
-        }
-    );
-    send_click(&mut s, 3, 0, 0, 0).await;
-    let c = read_content(&mut s).await;
-    assert_eq!(
-        c.carried,
-        packets::Slot {
-            count: 1,
-            item_id: chest.result.0
-        }
-    );
-    assert_eq!(c.slots[1], packets::Slot::empty(), "chest inputs consumed");
-    // 把箱子放进空槽 12，清空光标再做床。
-    send_click(&mut s, 4, 12, 0, 0).await;
-    let c = read_content(&mut s).await;
-    assert_eq!(c.carried, packets::Slot::empty());
-    assert_eq!(c.slots[12].item_id, chest.result.0);
-
-    // 床：3 木板 + 3 红羊毛 → 1 红床，两格原料都扣掉。
-    send_click(&mut s, 5, 10, 0, 0).await;
-    let _ = read_content(&mut s).await;
-    send_click(&mut s, 6, 1, 0, 0).await;
-    let _ = read_content(&mut s).await;
-    send_click(&mut s, 7, 11, 0, 0).await;
-    let _ = read_content(&mut s).await;
-    send_click(&mut s, 8, 2, 0, 0).await;
-    let c = read_content(&mut s).await;
-    assert_eq!(
-        c.slots[1],
-        packets::Slot {
-            count: 3,
-            item_id: planks
-        }
-    );
-    assert_eq!(
-        c.slots[2],
-        packets::Slot {
-            count: 3,
-            item_id: wool
-        }
-    );
-    send_click(&mut s, 9, 0, 0, 0).await;
-    let c = read_content(&mut s).await;
-    assert_eq!(
-        c.carried,
-        packets::Slot {
-            count: 1,
-            item_id: bed.result.0
-        }
-    );
-    assert_eq!(c.slots[1], packets::Slot::empty());
+    assert_eq!(c.carried, packets::Slot { count: 1, item_id: r.result.0 });
+    assert_eq!(c.slots[1], packets::Slot::empty(), "book inputs consumed");
     assert_eq!(c.slots[2], packets::Slot::empty());
-    assert_eq!(c.slots[10], packets::Slot::empty());
-    assert_eq!(c.slots[11], packets::Slot::empty());
+    assert_eq!(c.slots[3], packets::Slot::empty());
+    assert_eq!(c.slots[4], packets::Slot::empty());
     drop(s);
     let _ = std::fs::remove_dir_all(&dir);
 }
