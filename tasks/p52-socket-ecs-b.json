@@ -1,13 +1,23 @@
 {
   "id": "p52-socket-ecs-b",
   "title": "C1 方案B：socket I/O 全移 ECS + 全量切换 + 无限队列",
-  "status": "doing",
+  "status": "done",
   "owner": "subagent-socket-b",
   "priority": "p1",
   "deps": [],
   "branch": "",
   "created": "2026-11-27T01:57:03+00:00",
-  "updated": "2026-11-27T01:57:03+00:00",
-  "detail": "",
-  "files": []
+  "updated": "2026-11-27T02:19:02+00:00",
+  "detail": "方案B全量ECS: serve只accept+交接; Bevy非阻塞register; 每连接reader/writer/logic三任务; Join/Ack/视距flush红线保持; 无限队列; /api/world socket_mode; 进程冒烟正常; 516 passed; merge见main",
+  "files": [
+    "crates/mc-network/src/socket_ecs.rs",
+    "crates/mc-network/tests/socket_ecs_e2e.rs",
+    "crates/mc-server/src/{main",
+    "config",
+    "admin",
+    "net_thread",
+    "resources",
+    "systems}.rs",
+    "docs/socket-ecs-p52.md"
+  ]
 }

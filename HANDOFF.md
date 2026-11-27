@@ -18,8 +18,9 @@
 > v2 流动水/游泳/block light/遗迹均已合入（见 §5.29）；地图生成三阶段全部落地；
 > `p47-gameplay-admin` 工具等级/3×3 工作台/游戏模式/挖掘动画 + 后台联动已合入（见 §5.31）；
 > **真机复验仍未做**；用户决策：`p32` 保持 blocked、v2 较慢可接受（不强制回退 v1）、
-> 身份采用 **UUID 稳定化 + 存档迁移**（任务 `p51-uuid-identity` 待派发）；
-> 批次 4 `p50-socket-ecs` 立项评估进行中；
+> 身份采用 **UUID 稳定化 + 存档迁移**（任务 `p51-uuid-identity` 排 socket 完成后派发）；
+> `p50` 立项评估已完成，`p52-socket-ecs-b` 方案 B 全量切换已合入（见 §5.34），
+> **真机对比待用户执行**；
 > 后台管理面板已用 Vue 3 + Naive UI 重写并**完全离线化**合入（`p34-admin-vue` / `53f1016`、
 > `p35-admin-offline` / `48e14bd`，见 §5.25）；当前无进行中的派发任务。
 
@@ -70,6 +71,7 @@ compression_threshold = -1    # 默认：禁用压缩（原行为）
 world_dir = "world"           # P17/P36：存档目录；redb 模式为 state-<seed>.redb，旧 toml 缺键按此补齐
 world_storage = "redb"        # P38：新格式（默认）；"legacy" 回退到 overrides/player .dat，旧 toml 缺键补 redb
 generator_version = 1         # P44：1=v1 永久冻结（默认，老 seed 逐字节不变）；2=v2 仅新 seed/显式开启
+socket_mode = "ecs"           # P52：默认全量 ECS 持有 socket；"net" 为紧急回退（启动期锁定，旧 toml 缺键补 ecs）
 ```
 
 P16 的 seed 示例：默认 seed 视野（radius 10）内只有树林/丘陵、没有水面（P14 高度分布下 h<63 的列约 0.2%，且不在出生视距内）；`seed=42` 出生点朝南约 40 格是沙岸+池塘，`seed=-987654321` 出生点东侧约 25 格水域更大，两者都有大量 oak 树，真机截图见 §4。
@@ -418,10 +420,10 @@ $natives = 'C:\Users\qwe\AppData\Local\Temp\mc263natives'
 
 ### 本地检查
 
-- `cargo test --workspace`：全部通过（2026-11-26 实跑 **509 passed / 0 failed**；
-  P18 当时 215，之后 P18.1–P47 又追加单测与 play_stream / play_actions / play_crops /
+- `cargo test --workspace`：全部通过（2026-11-27 实跑 **516 passed / 0 failed**；
+  P18 当时 215，之后 P18.1–P52 又追加单测与 play_stream / play_actions / play_crops /
   play_all_crops / timer_persist / play_survival / play_recipes / player_visibility /
-  fluid / play_tools / admin_e2e 集成测试）。
+  fluid / play_tools / socket_ecs_e2e / admin_e2e 集成测试）。
 - redb 生产核心真机进程冒烟（2026-11-26）：临时 `server.toml` 设 `world_storage="redb"`、
   独立端口与 world_dir，启动后日志 `redb world opened seed=... / world loaded storage=Redb`
   → `listening` → ticker/keepalive 正常，目录下生成 `state-<seed>.redb` 与 `migration-<seed>.json`，
@@ -1005,6 +1007,22 @@ $natives = 'C:\Users\qwe\AppData\Local\Temp\mc263natives'
     `p51-uuid-identity` 等 socket→ECS 完成后再派发（不并行）。实现任务见 `p52-socket-ecs-b`。
     已明确告知用户：跳过灰度阶段、全量切换与无限队列是本轮最高风险项，必须靠
     `play_stream.rs` 逐字节基线与真机清单兜底。
+    **P52 实现已合入（`p52-socket-ecs-b` / `72436e0`）**：`mc-network/src/socket_ecs.rs`
+    实现 `SocketEcsRuntime`；`serve()` 在 ecs 模式只 accept + 分配 conn_id 并交接，
+    Bevy `Update` 的非阻塞 `socket_ecs_system` 只 `try_recv + register`；每连接三个
+    ECS 持有的任务：reader（字节→Inbound）、writer（**唯一写者**，FIFO 排空 Outbound→socket）、
+    logic（复用既有登录/配置/Play 权威路径，是本人 Outbound 的唯一生产者）。
+    tokio runtime 由 `main.rs` 创建并交给 ECS 资源；`socket_mode` 启动期锁定，
+    生产默认 `ecs`、`net` 为紧急回退；`/api/world` 只读暴露 `socket_mode`。
+    三条红线：Join 八段与全部 ChunkData 逐字节不变（新 e2e 断言 ECS/net 两模式相等）、
+    `BlockUpdate→Ack(seq)` 同玩家流相邻且 Ack 绝不入 hub、视距 flush 先于方块/掉落包；
+    全服唯一 50ms 物理 ticker 仍在 `serve()` 启动一次，未恢复 P16.1 脚手架。
+    按用户选择用**无限写队列**（不丢装饰包、不踢慢客户端），风险是慢客户端无界增长/OOM；
+    监控点 `stats()`（accepted/registered/retired/queued_bytes_total）与 `active_connections()`，
+    见 `docs/socket-ecs-p52.md`。旧 509 测试一字未改；合并后 516 passed / 0 failed。
+    进程冒烟（临时端口 + `socket_mode` 缺键自动补 ecs）：日志 `socket_mode=ecs → redb world
+    opened → listening → global drop physics ticker started → keepalive`，无 panic。
+    **真机待验**：清单 §1/§3/§5/§8 的 ECS vs net 对比、慢连接 RSS、tick lag=0。
 
 ## 6. 关键文件
 
@@ -1022,6 +1040,7 @@ crates/mc-protocol/src/packets/
   data/*_777.bin             LoginPlay / PositionSync / UpdateTags 抓包
 crates/mc-network/src/
   login_route/               Play 接线目录：login.rs（登录/Join序列）+ mod.rs（play_loop）+ block_edit.rs（decide_dig/decide_place + BlockUpdate/Ack）+ crops.rs（P37 作物路由）+ craft9.rs（P47 3×3 工作台会话）+ drop_sync.rs（掉落/50ms tick/拾取/背包同步 + P19 Q扔）+ view_sync.rs（视距节流/flush）
+  socket_ecs.rs              P52 ECS socket 运行时（reader/writer/logic 三任务 + 无限 Outbound + stats）
   broadcast.rs               P21 per-player 写通道 hub（conn_id → 队列 + 位置/视距快照，BlockUpdate/Spawn/Data/Remove/TakeItem 视距广播）+ P43 玩家实体状态/known
   player_visibility.rs       P43 对外玩家 id 分配、Join/移动/视距/断线广播
   fluid_sync.rs              P46 v2 全服唯一流体 ticker + BlockUpdate 广播
@@ -1032,6 +1051,7 @@ crates/mc-network/src/
   tests/play_recipes.rs       P41 新配方放料→结果→扣料→同步 e2e
   tests/player_visibility.rs  P43 双连接玩家互见 e2e
   tests/fluid.rs              P46 流体存档/广播/游泳互见 e2e
+  tests/socket_ecs_e2e.rs     P52 ECS/net Join 逐字节、Ack 相邻无广播、断线清理 e2e
   chunk_view.rs              clamp_view_radius/view_chunk_count、per-connection 视距集合/去重/跨区块 add/remove 规划
   chunk_cache.rs             共享已编码 ChunkData 0x2E 包体缓存（Mutex+HashMap+FIFO，默认 1024；`bodies` rayon 并行批量；P17 `with_mutable` + `invalidate`）
   play_events.rs             net 线程 → ECS 的移动/KeepAlive/Disconnect/BlockEdit 事件（conn_id 实体键）
@@ -1073,6 +1093,7 @@ docs/worldgen-plan.md                  P42 地图生成器调研与分阶段路�
 docs/real-machine-checklist.md         真机复验清单（按功能分组，含配置/按键/日志/截图/失败定位）
 docs/gameplay-gaps-plan.md             P49 剩余玩法缺口调研（A/B/C 分类 + 后台联动 + 批次路线）
 docs/socket-ecs-plan.md                P50 socket→ECS 立项评估（方案 C 混合 + 灰度 + P0–P5）
+docs/socket-ecs-p52.md                 P52 方案 B 实际线程模型/风险/回退/真机待验
 ```
 
 ## 7. 测试命令

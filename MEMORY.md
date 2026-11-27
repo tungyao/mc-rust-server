@@ -125,3 +125,4 @@
 - [2026-11-27 01:54 UTC] agent=subagent-socket-ecs task=p50-socket-ecs status=done detail=docs/socket-ecs-plan.md:推荐方案C混合(net持socket+ECS权威判定+per-player有序写队列);灰度socket_mode;P0-P5阶段;风险包序/Ack;7决策点;仅调研 files=docs/socket-ecs-plan.md
 - [2026-11-27 01:57 UTC] agent=main task=p52-socket-ecs-b status=todo detail=C1 方案B：socket I/O 全移 ECS + 全量切换 + 无限队列 files=
 - [2026-11-27 01:57 UTC] agent=subagent-socket-b task=p52-socket-ecs-b status=start detail=claim files=
+- [2026-11-27 02:19 UTC] agent=subagent-socket-b task=p52-socket-ecs-b status=done detail=方案B全量ECS: serve只accept+交接; Bevy非阻塞register; 每连接reader/writer/logic三任务; Join/Ack/视距flush红线保持; 无限队列; /api/world socket_mode; 进程冒烟正常; 516 passed; merge见main files=crates/mc-network/src/socket_ecs.rs,crates/mc-network/tests/socket_ecs_e2e.rs,crates/mc-server/src/{main,config,admin,net_thread,resources,systems}.rs,docs/socket-ecs-p52.md
