@@ -1,0 +1,13 @@
+{
+  "id": "p56-full-crafting",
+  "title": "完整合成：2×2 背包 + 3×3 工作台（26.3 jar 真值对齐）",
+  "status": "doing",
+  "owner": "subagent-full-crafting",
+  "priority": "p1",
+  "deps": [],
+  "branch": "",
+  "created": "2026-11-27T07:45:08+00:00",
+  "updated": "2026-11-27T07:45:08+00:00",
+  "detail": "",
+  "files": []
+}
