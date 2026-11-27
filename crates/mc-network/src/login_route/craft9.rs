@@ -4,16 +4,19 @@
 //! 所有点击经 C2S ContainerClick(0x12) 解析结果进入这里，服务端权威修改后发全量
 //! ContainerSetContent 回滚客户端预测。
 //! P55 B6 起提供可选 GUI：`workbench_gui` 默认关（旧包流不变），开启后右键工作台
-//! 发 Open Screen(0x3c) + 全量 Content(0x12)。包 ID 是数据表真值，但 menu type=12 与
-//! 标题 NBT 形式取自 wiki 推导，**待抓包校准**（见 `CRAFTING_MENU_TYPE_ID`）。
+//! 发 Open Screen(0x3c) + 全量 Content(0x12)。P55 已按官方 26.3 客户端 jar 校准：
+//! `ClientboundOpenScreenPacket.STREAM_CODEC` 仅 CONTAINER_ID + menu VarInt + 标题组件，
+//! `MenuType.CRAFTING = 12`，裸 String Tag 标题（见 `CRAFTING_MENU_TYPE_ID`）。
+//! P56 按 jar `CraftingMenu.quickMoveStack` / `AbstractContainerMenu.doClick` 对齐
+//! SHIFT 搬运与 state id 口径。
 
 use crate::broadcast::QueuedPacket;
 use crate::drop_state::{Craft9Session, DropState};
 use mc_protocol::packets;
 use mc_world::crafting::{self, CRAFT9_RESULT_SLOT, CRAFT9_WINDOW_ID};
 
-/// P55 B6：工作台界面标题。纯文本 → Text Component 的 String Tag 裸 payload。
-/// 标题文字仅影响显示；字节布局仍**待抓包校准**（见 `CRAFTING_MENU_TYPE_ID`）。
+/// P55：工作台界面标题。纯文本 → Text Component 的 String Tag 裸 payload
+/// （26.3 jar `ClientboundOpenScreenPacket.STREAM_CODEC`，已校准）。
 pub const WORKBENCH_GUI_TITLE: &str = "Crafting";
 
 /// 窗口槽 → 玩家背包槽（10..=36 主包 9..=35；37..=45 快捷栏 36..=44）。
@@ -115,6 +118,50 @@ fn refill_one_from_inventory(ds: &DropState, conn: u64, session: &mut Craft9Sess
     false
 }
 
+/// P56 / 26.3 jar `CraftingMenu.quickMoveStack` 对窗口槽 10..=45（玩家背包）的 SHIFT：
+/// 先 `moveItemStackTo(stack, 1, 10, false)` —— 同物品先合并、再填入空合成格；剩余留在
+/// 背包槽，由调用方继续走 main<->hotbar 搬运。返回是否至少搬入一件。
+fn shift_inventory_into_grid(
+    ds: &DropState,
+    conn: u64,
+    session: &mut Craft9Session,
+    window_slot: i16,
+) -> bool {
+    let raw = match inv_slot(window_slot) {
+        Some(s) => s,
+        None => return false,
+    };
+    let Some((id, count)) = ds.with_inventory(conn, |inv| inv.get(raw as usize)).unwrap_or(None) else {
+        return false;
+    };
+    let mut left = count;
+    for cell in session.grid.iter_mut() {
+        if left <= 0 {
+            break;
+        }
+        match cell {
+            Some((cid, c)) if *cid == id && *c < mc_world::items::MAX_STACK => {
+                let take = (mc_world::items::MAX_STACK - *c).min(left);
+                *c += take;
+                left -= take;
+            }
+            None => {
+                let take = mc_world::items::MAX_STACK.min(left);
+                *cell = Some((id, take));
+                left -= take;
+            }
+            _ => {}
+        }
+    }
+    if left == count {
+        return false;
+    }
+    ds.with_inventory(conn, |inv| {
+        inv.set_slot(raw as usize, if left > 0 { Some((id, left)) } else { None });
+    });
+    true
+}
+
 /// 结果槽：取一份结果到光标（PICKUP），或 SHIFT 连续合成直到背包满/原料不够（整箱整理）。
 fn click_result(ds: &DropState, conn: u64, session: &mut Craft9Session, click: &packets::ContainerClick) {
     if click.click_type == packets::CLICK_QUICK_MOVE {
@@ -207,6 +254,10 @@ pub fn apply_click(ds: &DropState, conn: u64, click: &packets::ContainerClick) -
             }
             s if inv_slot(s).is_some() && click.click_type != packets::CLICK_THROW => {
                 let slot = inv_slot(s).unwrap();
+                if click.click_type == packets::CLICK_QUICK_MOVE {
+                    // P56/26.3 `CraftingMenu.quickMoveStack`：背包 SHIFT 优先补合成格。
+                    shift_inventory_into_grid(ds, conn, session, s);
+                }
                 ds.with_inventory(conn, |inv| {
                     inv.apply_click(slot, click.button, click.click_type);
                 });
@@ -217,14 +268,21 @@ pub fn apply_click(ds: &DropState, conn: u64, click: &packets::ContainerClick) -
     .is_some()
 }
 
-/// 组工作台全量同步包（槽 0 结果由客户端按配方表自行计算，服务端只发输入/背包）。
+/// 组工作台全量同步包（0x12）。槽 0 结果按 26.3 `CraftingMenu.slotChangedCraftingGrid`
+/// 由服务端算出；原版在格变化时单发 0x14 结果槽，我们统一用本全量包 + 新 state id
+/// 覆盖同一状态；客户端以服务端包为准，不留预测分叉。
 pub fn build_craft9_content_body(ds: &DropState, conn: u64) -> Option<Vec<u8>> {
     let session = ds.craft9_session(conn)?;
     let (slots, carried, state) = ds.with_inventory(conn, |inv| {
         (inv.to_protocol_slots(), inv.cursor_slot(), inv.next_state())
     })?;
     let mut window_slots = vec![packets::Slot::empty(); 46];
-    window_slots[0] = packets::Slot::empty();
+    // P56 / 26.3 `CraftingMenu.slotChangedCraftingGrid`：结果槽由服务端按 1..=9 合成格
+    // 权威算出并同步给客户端（原来恒发空，真实客户端看不到可点的结果）。
+    window_slots[CRAFT9_RESULT_SLOT as usize] = match crafting::match_recipe_9(session.grid) {
+        Some(recipe) => packets::Slot { item_id: recipe.result.0, count: recipe.result.1 },
+        None => packets::Slot::empty(),
+    };
     for (i, stack) in session.grid.into_iter().enumerate() {
         window_slots[1 + i] = match stack {
             Some((item_id, count)) => packets::Slot { item_id, count },
@@ -245,8 +303,32 @@ pub fn build_craft9_content_body(ds: &DropState, conn: u64) -> Option<Vec<u8>> {
     Some(body)
 }
 
-/// P55 B6：`Open Screen 0x3c` 包体（仅 window/menu/title 三个字段，无 menu 附加 NBT）。
-/// **menu_type 为 wiki 推导值，待抓包校准**；`menu_id` 可由配置覆盖做真机 A/B。
+/// P56 / 26.3 jar `CraftingMenu.slotChangedCraftingGrid` + 26.3
+/// `ClientboundContainerSetSlotPacket.STREAM_CODEC`（CONTAINER_ID + VarInt stateId +
+/// Short slot + ItemStack）：结果槽单槽同步 0x14 包体。日常点击同步统一走 0x12，
+/// 此处提供与 jar 对齐的单槽包体，供协议单测/未来按需单播，不改变既有包流。
+pub fn build_result_slot_body(ds: &DropState, conn: u64) -> Option<Vec<u8>> {
+    let result = match ds
+        .craft9_session(conn)
+        .and_then(|session| crafting::match_recipe_9(session.grid))
+    {
+        Some(recipe) => packets::Slot { item_id: recipe.result.0, count: recipe.result.1 },
+        None => packets::Slot::empty(),
+    };
+    let state = ds.with_inventory(conn, |inv| inv.next_state())?;
+    let mut body = Vec::new();
+    packets::SetContainerSlot {
+        window_id: CRAFT9_WINDOW_ID,
+        state_id: state,
+        slot: CRAFT9_RESULT_SLOT,
+        data: result,
+    }
+    .encode_body(&mut body);
+    Some(body)
+}
+
+/// P55：`Open Screen 0x3c` 包体（仅 window/menu/title 三个字段，无 menu 附加 NBT）。
+/// 26.3 jar 已校准：`MenuType.CRAFTING = 12`；`menu_id` 可由配置覆盖做真机 A/B。
 pub fn build_open_screen_body(menu_id: i32) -> Vec<u8> {
     let mut body = Vec::new();
     packets::OpenScreen {
@@ -436,6 +518,58 @@ mod tests {
         };
         assert!(!apply_click(&ds, 8, &click), "player window must stay 2×2");
         assert!(ds.craft9_session(8).unwrap().grid.iter().all(|s| s.is_none()));
+        let _ = std::fs::remove_dir_all(ds.save_dir());
+    }
+
+    /// P56 / 26.3 `CraftingMenu.quickMoveStack`：背包 SHIFT 先补 1..=9 合成格
+    /// （同物合并、再填空格），剩余留在背包槽并继续 main<->hotbar 搬运。
+    #[test]
+    fn p56_inventory_shift_fills_grid_before_other_inventory_rows() {
+        let ds = state();
+        ds.load_inventory(21, "P56Grid");
+        ds.with_inventory(21, |inv| {
+            inv.set_slot(9, Some((mc_world::drops::ITEM_WHEAT, 9)));
+        });
+        ds.open_craft9(21, 0, 64, 0);
+        let click = |slot, ty| packets::ContainerClick {
+            container_id: CRAFT9_WINDOW_ID,
+            state_id: 0,
+            slot,
+            button: 0,
+            click_type: ty,
+        };
+        // 窗口槽 10 = 背包槽 9；SHIFT 把它搬进第一个空合成格。
+        assert!(apply_click(&ds, 21, &click(10, packets::CLICK_QUICK_MOVE)));
+        assert_eq!(ds.craft9_session(21).unwrap().grid[0], Some((mc_world::drops::ITEM_WHEAT, 9)));
+        assert_eq!(ds.with_inventory(21, |inv| inv.get(9)), Some(None));
+        // 再放一组同物到背包槽 9，SHIFT 先与格内同物合并（未满 64）。
+        ds.with_inventory(21, |inv| {
+            inv.set_slot(9, Some((mc_world::drops::ITEM_WHEAT, 5)));
+        });
+        assert!(apply_click(&ds, 21, &click(10, packets::CLICK_QUICK_MOVE)));
+        assert_eq!(ds.craft9_session(21).unwrap().grid[0], Some((mc_world::drops::ITEM_WHEAT, 14)));
+        assert_eq!(ds.with_inventory(21, |inv| inv.get(9)), Some(None));
+        // 非背包窗口槽（结果/合成格）不会走这条补给路径。
+        assert_eq!(inv_slot(0), None);
+        assert_eq!(inv_slot(9), None);
+        let _ = std::fs::remove_dir_all(ds.save_dir());
+    }
+
+    /// P56 / 26.3 `ClientboundContainerSetSlotPacket.STREAM_CODEC`：
+    /// CONTAINER_ID(VarInt) + stateId(VarInt) + slot(ShortBE) + ItemStack。
+    #[test]
+    fn p56_result_slot_packet_body_matches_jar_codec() {
+        let ds = state();
+        ds.load_inventory(22, "P56Slot");
+        let body = build_result_slot_body(&ds, 22).expect("loaded inventory");
+        let (packet, used) = packets::SetContainerSlot::decode_body(&body).unwrap();
+        assert_eq!(used, body.len(), "no trailing bytes");
+        assert_eq!(packet.window_id, CRAFT9_WINDOW_ID);
+        assert_eq!(packet.state_id, 2, "load state=1, next_state=2");
+        assert_eq!(packet.slot, CRAFT9_RESULT_SLOT);
+        assert_eq!(packet.data, packets::Slot::empty());
+        // window=1 / state=2 / slot=0x0000 / empty stack=0x00。
+        assert_eq!(&body[..4], &[1, 2, 0, 0]);
         let _ = std::fs::remove_dir_all(ds.save_dir());
     }
 }

@@ -1206,10 +1206,34 @@ async fn play_loop<S: AsyncRead + AsyncWrite + Unpin>(
                                 profile.uuid, click.container_id
                             );
                         } else if click.slot == mc_world::crafting::RESULT_SLOT as i16 {
-                            // P40：结果槽由服务端权威判定配方；槽 0 永远不能手动放东西。
+                            // P56 / 26.3 jar `InventoryMenu.RESULT_SLOT=0`、`ResultSlot.mayPlace()==false`：
+                            // 结果槽由服务端权威判定配方，只能 PICKUP / SHIFT / SWAP；其它点击
+                            // （含 THROW / PICKUP_ALL）一律无操作，永远不能手放东西进槽 0。
+                            if let Some(ds) = &opts.drops {
+                                ds.with_inventory(opts.conn_id, |inv| match click.click_type {
+                                    packets::CLICK_QUICK_MOVE => {
+                                        // jar `AbstractContainerMenu.doClick` QUICK_MOVE 循环：
+                                        // 结果入包后重算，直到原料耗尽/背包满。
+                                        inv.craft_result_quick_move();
+                                    }
+                                    packets::CLICK_SWAP => {
+                                        // jar SWAP 分支：button 0..=8 空快捷栏 / 40 副手。
+                                        inv.craft_result_swap(click.button);
+                                    }
+                                    packets::CLICK_PICKUP => {
+                                        inv.craft_result(click.button);
+                                    }
+                                    _ => {}
+                                });
+                            }
+                        } else if click.click_type == packets::CLICK_QUICK_MOVE
+                            && (1..=4).contains(&click.slot)
+                        {
+                            // P56 / 26.3 jar `InventoryMenu.quickMoveStack`：合成格 1..=4 的
+                            // SHIFT 调 `moveItemStackTo(stack, 9, 45, false)` 搬进背包。
                             if let Some(ds) = &opts.drops {
                                 ds.with_inventory(opts.conn_id, |inv| {
-                                    inv.craft_result(click.button);
+                                    inv.quick_move_grid_slot(click.slot);
                                 });
                             }
                         } else if let Some(ds) = &opts.drops {

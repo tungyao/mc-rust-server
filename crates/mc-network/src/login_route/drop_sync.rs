@@ -334,7 +334,11 @@ pub(crate) async fn send_full_inventory<S: AsyncRead + AsyncWrite + Unpin>(
 /// 判定 delivered。背包锁临界区内一次拷贝 + 组包，`next_state` 单调递增。
 pub fn build_full_inventory_body(drops: &DropState, conn_id: u64) -> Option<Vec<u8>> {
     let (slots, carried, state) = drops.with_inventory(conn_id, |inv| {
-        (inv.to_protocol_slots(), inv.cursor_slot(), inv.next_state())
+        let mut slots = inv.to_protocol_slots();
+        // P56 / 26.3 `InventoryMenu.slotsChanged` → `CraftingMenu.slotChangedCraftingGrid`：
+        // 槽 0 由服务端按 1..=4 合成格权威算出（客户端不会自己填），不是手放的。
+        slots[mc_world::crafting::RESULT_SLOT] = inv.craft_result_protocol_slot();
+        (slots, inv.cursor_slot(), inv.next_state())
     })?;
     let mut body = Vec::new();
     packets::SetContainerContent {

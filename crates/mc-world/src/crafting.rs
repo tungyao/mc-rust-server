@@ -1041,4 +1041,24 @@ mod tests {
         let odd = [Some((OAK_PLANKS, 3)), Some((OAK_PLANKS, 1)), None, None];
         assert_eq!(match_recipe(odd).unwrap().name, "crafting_table");
     }
+
+    /// P56：2×2 与 3×3 必须共用同一张配方表（同一 recipe / 同一 ID），不得分化。
+    #[test]
+    fn p56_both_grids_share_one_recipe_table() {
+        // 3 小麦 → 面包：2×2 单格与 3×3 单格都命中同一条配方、同一结果。
+        let g4 = [Some((WHEAT, 3)), None, None, None];
+        let mut g9 = [None; GRID9_SIZE];
+        g9[4] = Some((WHEAT, 3));
+        let r4 = match_recipe(g4).expect("2×2 bread");
+        let r9 = match_recipe_9(g9).expect("3×3 bread");
+        assert_eq!(r4.name, "bread");
+        assert_eq!(r9.name, r4.name);
+        assert_eq!(r4.result, r9.result);
+        assert_eq!(r4.needs, r9.needs);
+        // 9 小麦 → 干草捆在两种网格里都命中同一条（2×2 是既有“单格堆叠”口径）。
+        let mut hay9 = [None; GRID9_SIZE];
+        hay9.iter_mut().for_each(|s| *s = Some((WHEAT, 1)));
+        assert_eq!(match_recipe_9(hay9).unwrap().name, "hay_block");
+        assert_eq!(match_recipe([Some((WHEAT, 9)), None, None, None]).unwrap().name, "hay_block");
+    }
 }
