@@ -828,6 +828,30 @@ impl WorldStore {
         }
     }
 
+    /// P51：players 表的全部键（迁移扫描用；只读快照）。
+    pub fn player_keys(&self) -> Result<Vec<String>, StoreError> {
+        let tx = self.db.begin_read()?;
+        let t = tx.open_table(PLAYERS)?;
+        let mut out = Vec::new();
+        for entry in t.iter()? {
+            let (key, _) = entry?;
+            out.push(key.value().to_string());
+        }
+        out.sort();
+        Ok(out)
+    }
+
+    /// P51：把一个 players 记录复制到新键（**保留旧键做兜底**，幂等）。
+    /// 返回 false = 新键已存在，未做任何写入。
+    pub fn copy_player_key(&self, old: &str, new: &str) -> Result<bool, StoreError> {
+        if old == new || self.load_player(new)?.is_some() {
+            return Ok(false);
+        }
+        let Some(inv) = self.load_player(old)? else { return Ok(false) };
+        self.save_player(new, &inv)?;
+        Ok(true)
+    }
+
     /// 写成长计时（作物/树苗/树叶观察），让 §5.18–20 的跨重启计时可恢复。
     pub fn set_timer(
         &self,
@@ -1068,7 +1092,7 @@ fn rename_backup(path: &Path) -> std::io::Result<()> {
 }
 
 /// 扫描 `player-<user>-<seed>.dat`（只认当前 seed；用户名可能含 '-'，取中间全部）。
-fn legacy_players(dir: &Path, seed: i64) -> Vec<(String, PathBuf)> {
+pub(crate) fn legacy_players(dir: &Path, seed: i64) -> Vec<(String, PathBuf)> {
     let prefix = "player-";
     let suffix = format!("-{seed}.dat");
     let mut out = Vec::new();

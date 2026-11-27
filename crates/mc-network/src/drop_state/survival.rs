@@ -144,7 +144,7 @@ impl DropState {
         if let Some(tag) = tag {
             let invs = self.lock_invs();
             if let Some(inv) = invs.get(&conn_id) {
-                self.persist_inventory(&tag, inv);
+                self.persist_inventory(conn_id, &tag, inv);
             }
         }
         let spawn = world.spawn_pos();

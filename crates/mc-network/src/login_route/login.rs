@@ -190,7 +190,9 @@ pub async fn handle_login_with_options<S: AsyncRead + AsyncWrite + Unpin>(
         use tokio::io::AsyncWriteExt;
         stream.write_all(&sc).await?;
     }
-    let uuid = packets::offline_uuid(&start.name);
+    // P51：离线身份改为用户名确定性 UUID（原版 OfflinePlayer:name 口径），
+    // 不再使用每次随机 v4；客户端 LoginStart 携带的 uuid 依旧忽略。
+    let uuid = packets::stable_offline_uuid(&start.name);
     let profile = mc_core::PlayerProfile { uuid, username: start.name.clone() };
     let mut body = Vec::new();
     packets::LoginSuccess::offline(uuid, profile.username.clone()).encode_body(&mut body);
@@ -430,16 +432,17 @@ async fn enter_play_inner<S: AsyncRead + AsyncWrite + Unpin>(
     send_join_inventory(stream, profile, opts).await;
     // P21 广播队列：Join 序列完成后注册，保证接收方已持有完整视距区块，
     // 广播包不会排在区块包前面；初始位置取出生点，移动包随后更新。
-    // P25：带上用户名/地址，管理面板 `/api/online` 直接读快照。
+    // P25/P51：带上用户名/地址与稳定 UUID，管理面板 `/api/online` 直接读快照。
     let outbox = opts.hub.as_ref().map(|hub| {
         let (tx, rx) = crossbeam_channel::unbounded::<QueuedPacket>();
-        hub.register_with_name(
+        hub.register_with_uuid(
             opts.conn_id,
             tx,
             radius,
             (spawn.0 as f64 + 0.5, spawn.1 as f64, spawn.2 as f64 + 0.5),
             profile.username.clone(),
             addr.to_string(),
+            profile.uuid.to_string(),
         );
         if opts.player_visibility {
             // P43：对外实体 id 与客户端自身 id=1 严格分离；自己永远不 Spawn。
@@ -469,7 +472,8 @@ async fn send_join_inventory<S: AsyncRead + AsyncWrite + Unpin>(
     opts: &PlayOptions,
 ) {
     let Some(drops) = &opts.drops else { return };
-    drops.load_inventory(opts.conn_id, &user_tag(profile));
+    // P51：稳定 UUID 为存档主键，用户名仅作兼容镜像键；随机 v4 不再影响读盘。
+    drops.load_inventory_with_uuid(opts.conn_id, &user_tag(profile), &profile.uuid.to_string());
     if let Err(e) = send_full_inventory(stream, opts, drops).await {
         debug!("play uuid={} join inventory send failed ({e})", profile.uuid);
     }

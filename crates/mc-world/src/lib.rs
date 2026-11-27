@@ -13,6 +13,7 @@ pub mod worldgen;
 pub mod items;
 pub mod inventory;
 pub mod tools;
+pub mod uuid_migration; // P51：玩家存档 username → 稳定 UUID 键迁移
 pub mod xp;
 
 pub use crops::{

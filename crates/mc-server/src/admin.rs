@@ -226,14 +226,33 @@ fn query_param(query: &str, key: &str) -> Option<String> {
     })
 }
 
-/// 由 `username`（精确匹配，大小写敏感）或 `conn_id` 解析在线连接。
+/// 由 `username`（精确匹配，大小写敏感）/ `conn_id` / `uuid`（P51，大小写无关）
+/// 解析在线连接。三者按 uuid → username → conn_id 优先级，旧字段一个不删。
 /// 先快照后丢锁（计划 §6.2），返回 `(conn_id, username)`。
 fn resolve_conn(
     state: &AdminState,
     username: Option<&str>,
     conn_id: Option<u64>,
+    uuid: Option<&str>,
 ) -> Result<(u64, String), String> {
-    if let Some(name) = username {
+    let snapshot_name = |c: u64| {
+        state
+            .hub
+            .snapshot()
+            .into_iter()
+            .find(|e| e.conn_id == c)
+            .map(|e| e.username)
+            .unwrap_or_default()
+    };
+    if let Some(u) = uuid {
+        if u.trim().is_empty() {
+            return Err("uuid must not be empty".to_string());
+        }
+        match state.hub.find_conn_by_uuid(u) {
+            Some(c) => Ok((c, snapshot_name(c))),
+            None => Err(format!("offline uuid: {u}")),
+        }
+    } else if let Some(name) = username {
         if name.is_empty() {
             return Err("username must not be empty".to_string());
         }
@@ -245,16 +264,9 @@ fn resolve_conn(
         if !state.hub.contains(c) {
             return Err(format!("offline conn {c}"));
         }
-        let name = state
-            .hub
-            .snapshot()
-            .into_iter()
-            .find(|e| e.conn_id == c)
-            .map(|e| e.username)
-            .unwrap_or_default();
-        Ok((c, name))
+        Ok((c, snapshot_name(c)))
     } else {
-        Err("username or conn_id required".to_string())
+        Err("uuid, username or conn_id required".to_string())
     }
 }
 
@@ -280,6 +292,8 @@ fn resolve_item(s: &str) -> Result<i32, String> {
 struct GiveReq {
     username: Option<String>,
     conn_id: Option<u64>,
+    /// P51：稳定 UUID（与 username/conn_id 二选一，优先）。
+    uuid: Option<String>,
     item: Option<String>,
     /// P29 新增：数字 id 直发（与 `item` 二选一，`item` 优先；旧字段不动）。
     item_id: Option<i32>,
@@ -290,6 +304,7 @@ struct GiveReq {
 struct KickReq {
     username: Option<String>,
     conn_id: Option<u64>,
+    uuid: Option<String>,
 }
 
 /// P47：工具附魔开关（`none` / `fortune` / `silk_touch`），按连接设置，仅当前会话。
@@ -298,6 +313,7 @@ struct KickReq {
 struct GamemodeReq {
     username: Option<String>,
     conn_id: Option<u64>,
+    uuid: Option<String>,
     gamemode: Option<String>,
 }
 
@@ -313,7 +329,7 @@ fn handle_gamemode(state: &AdminState, body: &[u8]) -> AdminResponse {
         },
         None => return AdminResponse::err(400, "gamemode required"),
     };
-    let (conn, user) = match resolve_conn(state, req.username.as_deref(), req.conn_id) {
+    let (conn, user) = match resolve_conn(state, req.username.as_deref(), req.conn_id, req.uuid.as_deref()) {
         Ok(v) => v,
         Err(e) => return AdminResponse::err(400, e),
     };
@@ -330,6 +346,7 @@ fn handle_gamemode(state: &AdminState, body: &[u8]) -> AdminResponse {
 struct ToolEnchantReq {
     username: Option<String>,
     conn_id: Option<u64>,
+    uuid: Option<String>,
     enchant: Option<String>,
 }
 
@@ -392,7 +409,7 @@ fn handle_tool_enchant(state: &AdminState, body: &[u8]) -> AdminResponse {
         },
         None => return AdminResponse::err(400, "enchant required"),
     };
-    let (conn, user) = match resolve_conn(state, req.username.as_deref(), req.conn_id) {
+    let (conn, user) = match resolve_conn(state, req.username.as_deref(), req.conn_id, req.uuid.as_deref()) {
         Ok(v) => v,
         Err(e) => return AdminResponse::err(400, e),
     };
@@ -413,6 +430,8 @@ fn handle_online(state: &AdminState) -> AdminResponse {
             serde_json::json!({
                 "conn_id": e.conn_id,
                 "username": e.username,
+                // P51：旧字段一个不删，只增稳定 UUID。
+                "uuid": e.uuid,
                 "addr": e.addr,
                 "pos": [e.pos.0, e.pos.1, e.pos.2],
                 "online_secs": e.online_secs,
@@ -469,7 +488,7 @@ fn handle_give(state: &AdminState, body: &[u8]) -> AdminResponse {
         }
         (None, None) => return AdminResponse::err(400, "item required"),
     };
-    let (conn, user) = match resolve_conn(state, req.username.as_deref(), req.conn_id) {
+    let (conn, user) = match resolve_conn(state, req.username.as_deref(), req.conn_id, req.uuid.as_deref()) {
         Ok(v) => v,
         Err(e) => return AdminResponse::err(400, e),
     };
@@ -498,7 +517,8 @@ fn handle_give(state: &AdminState, body: &[u8]) -> AdminResponse {
 fn handle_inventory(state: &AdminState, query: &str) -> AdminResponse {
     let username = query_param(query, "username");
     let conn_id = query_param(query, "conn_id").and_then(|s| s.parse::<u64>().ok());
-    let (conn, user) = match resolve_conn(state, username.as_deref(), conn_id) {
+    let uuid = query_param(query, "uuid");
+    let (conn, user) = match resolve_conn(state, username.as_deref(), conn_id, uuid.as_deref()) {
         Ok(v) => v,
         Err(e) => return AdminResponse::err(400, e),
     };
@@ -550,7 +570,7 @@ fn handle_kick(state: &AdminState, body: &[u8]) -> AdminResponse {
         Ok(r) => r,
         Err(_) => return AdminResponse::err(400, "bad json"),
     };
-    let (conn, user) = match resolve_conn(state, req.username.as_deref(), req.conn_id) {
+    let (conn, user) = match resolve_conn(state, req.username.as_deref(), req.conn_id, req.uuid.as_deref()) {
         Ok(v) => v,
         Err(e) => return AdminResponse::err(400, e),
     };
@@ -1077,6 +1097,69 @@ mod tests {
         assert_eq!(d["name"], "minecraft:dirt");
         assert_eq!(d["name_zh"], "泥土");
         assert_eq!(d["category"], "方块");
+        let _ = std::fs::remove_dir_all(st.drops.save_dir());
+    }
+
+    /// P51：所有按玩家定位的端点都接受 uuid；旧 username/conn_id 字段继续可用。
+    #[test]
+    fn endpoints_resolve_player_by_uuid() {
+        let st = test_state();
+        let name = "UuidUser";
+        let uuid = mc_protocol::packets::stable_offline_uuid(name).to_string();
+        let (tx, rx) = crossbeam_channel::unbounded();
+        st.hub.register_with_uuid(
+            71,
+            tx,
+            2,
+            (0.0, 64.0, 0.0),
+            name.into(),
+            "uuid-addr".into(),
+            uuid.clone(),
+        );
+        st.drops.load_inventory(71, name);
+        // /api/online 增 uuid 字段，旧字段不删。
+        let online = body_json(&route(&get("/api/online"), &st));
+        assert_eq!(online["online"][0]["uuid"], uuid);
+        assert_eq!(online["online"][0]["username"], name);
+        // give by uuid（大小写/无连字符归一）→ 客户端收到全量背包。
+        let compact = uuid.replace('-', "").to_uppercase();
+        let r = route(
+            &post("/api/give", &format!(r#"{{"uuid":"{compact}","item":"stone","count":3}}"#)),
+            &st,
+        );
+        assert_eq!(r.status, 200);
+        assert!(rx.try_recv().is_ok());
+        // inventory / gamemode / tool-enchant / kick 都按 uuid 定位。
+        let inv = body_json(&route(&get(&format!("/api/inventory?uuid={uuid}")), &st));
+        assert_eq!(inv["conn_id"], 71);
+        assert_eq!(inv["username"], name);
+        let r = route(&post("/api/gamemode", &format!(r#"{{"uuid":"{uuid}","gamemode":"creative"}}"#)), &st);
+        assert_eq!(r.status, 200);
+        assert_eq!(body_json(&r)["username"], name);
+        let r = route(
+            &post("/api/tool-enchant", &format!(r#"{{"uuid":"{uuid}","enchant":"fortune"}}"#)),
+            &st,
+        );
+        assert_eq!(r.status, 200);
+        assert_eq!(st.drops.tool_enchant(71), mc_world::tools::ToolEnchant::Fortune);
+        let (ktx, krx) = crossbeam_channel::unbounded();
+        st.hub.register_with_uuid(
+            72,
+            ktx,
+            2,
+            (0.0, 64.0, 0.0),
+            "KickByUuid".into(),
+            "x".into(),
+            mc_protocol::packets::stable_offline_uuid("KickByUuid").to_string(),
+        );
+        let kick_uuid = mc_protocol::packets::stable_offline_uuid("KickByUuid").to_string();
+        let r = route(&post("/api/kick", &format!(r#"{{"uuid":"{kick_uuid}"}}"#)), &st);
+        assert_eq!(r.status, 200);
+        assert_eq!(body_json(&r)["kicked"], true);
+        assert_eq!(krx.try_recv().unwrap().id, mc_network::ADMIN_KICK_PACKET_ID);
+        // 未知 uuid 400；旧用户名/conn_id 仍生效。
+        assert_eq!(route(&post("/api/kick", r#"{"uuid":"00000000-0000-0000-0000-000000000000"}"#), &st).status, 400);
+        assert_eq!(route(&post("/api/gamemode", r#"{"username":"UuidUser","gamemode":"survival"}"#), &st).status, 200);
         let _ = std::fs::remove_dir_all(st.drops.save_dir());
     }
 }

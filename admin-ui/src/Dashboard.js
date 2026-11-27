@@ -21,12 +21,13 @@ const dashboardTemplate = `
     <n-card size="small" title="在线玩家（2s 轮询）">
       <n-table :bordered="true" :single-line="false" size="small">
         <thead>
-          <tr><th>conn</th><th>用户名</th><th>地址</th><th>位置</th><th>在线(s)</th><th>模式</th><th>操作</th></tr>
+          <tr><th>conn</th><th>用户名</th><th>UUID</th><th>地址</th><th>位置</th><th>在线(s)</th><th>模式</th><th>操作</th></tr>
         </thead>
         <tbody>
           <tr v-for="p in online" :key="p.conn_id">
             <td>{{ p.conn_id }}</td>
             <td>{{ p.username }}</td>
+            <td :title="p.uuid || '—'"><code>{{ shortUuid(p) }}</code></td>
             <td>{{ p.addr }}</td>
             <td>{{ fmtPos(p.pos) }}</td>
             <td>{{ p.online_secs }}</td>
@@ -37,7 +38,7 @@ const dashboardTemplate = `
             </td>
             <td><n-button size="tiny" type="error" secondary @click="kick(p)">踢人</n-button></td>
           </tr>
-          <tr v-if="!online.length"><td colspan="7" class="muted">当前无在线玩家</td></tr>
+          <tr v-if="!online.length"><td colspan="8" class="muted">当前无在线玩家</td></tr>
         </tbody>
       </n-table>
       <template #footer><span class="muted">在线 {{ online.length }} 人；下方“发放 / 查看背包”的玩家列表取自这里。</span></template>
@@ -181,8 +182,17 @@ export const Dashboard = {
     const invData = ref(null);
     const invError = ref('');
 
+    // P51：身份以稳定 UUID 为准；旧服条目没有 uuid 时回退用户名（兼容旧 API）。
+    const playerId = p => (p && p.uuid) || (p && p.username) || '';
+    const shortUuid = p => {
+      const id = playerId(p);
+      return id ? id.slice(0, 8) : '—';
+    };
     const userOptions = computed(() =>
-      online.value.map(p => ({ label: p.username, value: p.username })));
+      online.value.map(p => ({
+        label: p.uuid ? `${p.username} · ${shortUuid(p)}` : p.username,
+        value: playerId(p),
+      })));
     const categoryOptions = computed(() => {
       const cats = [...new Set(catalog.value.map(i => i.category))].sort();
       return [{ label: '全部', value: '' }, ...cats.map(c => ({ label: c, value: c }))];
@@ -286,7 +296,7 @@ export const Dashboard = {
     async function setMode(p, mode) {
       modeBusy.value = p.conn_id;
       try {
-        const r = await jpost('/api/gamemode', { conn_id: p.conn_id, gamemode: mode });
+        const r = await jpost('/api/gamemode', { uuid: playerId(p), gamemode: mode });
         if (r.status !== 200 || !r.body.ok) message.error('切换失败：' + JSON.stringify(r.body));
         else message.success(`${p.username} → ${mode}`);
       } catch (e) {
@@ -324,7 +334,7 @@ export const Dashboard = {
         return;
       }
       try {
-        const r = await jpost('/api/give', { username: toolUser.value, item: selectedTool.value, count: 1 });
+        const r = await jpost('/api/give', { uuid: toolUser.value, item: selectedTool.value, count: 1 });
         toolMsg.value = 'HTTP ' + r.status + ' ' + JSON.stringify(r.body);
         if (r.status === 200 && r.body.ok) message.success('已发放 ' + selectedTool.value);
         else message.error('发放失败：' + JSON.stringify(r.body));
@@ -340,7 +350,7 @@ export const Dashboard = {
       }
       try {
         const r = await jpost('/api/tool-enchant', {
-          username: toolUser.value,
+          uuid: toolUser.value,
           enchant: toolEnchant.value,
         });
         toolMsg.value = 'HTTP ' + r.status + ' ' + JSON.stringify(r.body);
@@ -393,7 +403,7 @@ export const Dashboard = {
       }
       try {
         const r = await jpost('/api/give', {
-          username: giveUser.value,
+          uuid: giveUser.value,
           item: selectedItem.value,
           count: Number(giveCount.value),
         });
@@ -408,7 +418,7 @@ export const Dashboard = {
     async function kick(p) {
       if (!window.confirm('踢掉 ' + p.username + '？')) return;
       try {
-        const r = await jpost('/api/kick', { username: p.username });
+        const r = await jpost('/api/kick', { uuid: playerId(p) });
         message.info('HTTP ' + r.status + ' ' + JSON.stringify(r.body));
         await refreshOnline();
       } catch (e) {
@@ -423,7 +433,7 @@ export const Dashboard = {
       invError.value = '';
       invData.value = null;
       try {
-        invData.value = await jget('/api/inventory?username=' + encodeURIComponent(invUser.value));
+        invData.value = await jget('/api/inventory?uuid=' + encodeURIComponent(invUser.value));
       } catch (e) {
         invError.value = 'fetch failed: ' + e;
       }
@@ -442,7 +452,7 @@ export const Dashboard = {
     onBeforeUnmount(() => timers.forEach(clearInterval));
 
     return {
-      worldText, online, saving, saveMsg, fmtPos, kick, saveNow,
+      worldText, online, saving, saveMsg, fmtPos, shortUuid, kick, saveNow,
       userOptions, giveUser, giveCount, giveCat, giveQuery, categoryOptions,
       selectedItem, filteredItems, visibleItems, giveHint, giveMsg, giveItem,
       invUser, invCat, invQuery, invSlots, invEmptySlots, invHint, showInv,

@@ -10,5 +10,6 @@ mc-protocol = { workspace = true }
 mc-registry = { workspace = true }
 thiserror.workspace = true
 serde.workspace = true
+serde_json.workspace = true
 rayon.workspace = true
 redb.workspace = true

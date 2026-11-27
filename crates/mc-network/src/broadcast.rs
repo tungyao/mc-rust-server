@@ -68,8 +68,10 @@ struct HubConn {
     radius: i32,
     gamemode: GameMode,
     pos: (f64, f64, f64),
-    /// P25 管理面板：Join 完成时的用户名（离线模式大小写精确匹配即身份）。
+    /// P25 管理面板：Join 完成时的用户名（大小写精确匹配即显示名）。
     username: String,
+    /// P51：稳定身份 UUID 字符串（离线用户名派生；旧 `register` 入口为空串）。
+    uuid: String,
     /// P25 管理面板：对端地址（`SocketAddr` 字符串形式，仅展示/诊断用）。
     addr: String,
     /// P25 管理面板：注册时刻（`snapshot` 由此算在线时长）。
@@ -81,6 +83,8 @@ struct HubConn {
 pub struct OnlineEntry {
     pub conn_id: u64,
     pub username: String,
+    /// P51：稳定 UUID（规范小写字符串）；旧注册入口为空串。
+    pub uuid: String,
     pub addr: String,
     pub pos: (f64, f64, f64),
     pub radius: i32,
@@ -160,6 +164,7 @@ impl BroadcastHub {
     }
 
     /// P25：带用户名/地址的注册（Play Join 完成后调用；旧 `register` 保留给旧单测）。
+    /// 无 UUID 信息，快照的 `uuid` 为空串（旧调用方语义不变）。
     pub fn register_with_name(
         &self,
         conn_id: u64,
@@ -168,6 +173,20 @@ impl BroadcastHub {
         pos: (f64, f64, f64),
         username: String,
         addr: String,
+    ) {
+        self.register_with_uuid(conn_id, tx, radius, pos, username, addr, String::new());
+    }
+
+    /// P51：带稳定 UUID 的注册（生产入口使用；用户名仍保留展示/兼容）。
+    pub fn register_with_uuid(
+        &self,
+        conn_id: u64,
+        tx: crossbeam_channel::Sender<QueuedPacket>,
+        radius: i32,
+        pos: (f64, f64, f64),
+        username: String,
+        addr: String,
+        uuid: String,
     ) {
         self.conns
             .write()
@@ -180,6 +199,7 @@ impl BroadcastHub {
                     pos,
                     gamemode: GameMode::Survival,
                     username,
+                    uuid,
                     addr,
                     since: Instant::now(),
                 },
@@ -197,6 +217,7 @@ impl BroadcastHub {
             .map(|(id, c)| OnlineEntry {
                 conn_id: *id,
                 username: c.username.clone(),
+                uuid: c.uuid.clone(),
                 addr: c.addr.clone(),
                 pos: c.pos,
                 radius: c.radius,
@@ -215,6 +236,19 @@ impl BroadcastHub {
             .unwrap_or_else(|p| p.into_inner())
             .iter()
             .filter(|(_, c)| c.username == username)
+            .map(|(id, _)| *id)
+            .max()
+    }
+
+    /// P51：按稳定 UUID 查在线连接（大小写/连字符归一，按 UUID 值比较）。
+    /// 旧注册入口的 UUID 为空串，不会被误匹配。同时在线同一身份取最新 conn_id。
+    pub fn find_conn_by_uuid(&self, uuid: &str) -> Option<u64> {
+        let wanted = uuid::Uuid::parse_str(uuid.trim()).ok()?;
+        self.conns
+            .read()
+            .unwrap_or_else(|p| p.into_inner())
+            .iter()
+            .filter(|(_, c)| uuid::Uuid::parse_str(&c.uuid).ok() == Some(wanted))
             .map(|(id, _)| *id)
             .max()
     }
@@ -477,6 +511,37 @@ mod tests {
         hub.unregister(7);
         assert!(hub.snapshot().iter().all(|e| e.conn_id != 7));
         assert_eq!(hub.find_conn_by_name("Steve"), None);
+    }
+
+    /// P51：UUID 注册/快照/查找（旧用户名入口仍返回空 uuid）。
+    #[test]
+    fn register_with_uuid_snapshot_and_find_by_uuid() {
+        let hub = BroadcastHub::new();
+        let (atx, _arx) = crossbeam_channel::unbounded();
+        let (btx, _brx) = crossbeam_channel::unbounded();
+        let a_uuid = mc_protocol::packets::stable_offline_uuid("Alpha").to_string();
+        let b_uuid = mc_protocol::packets::stable_offline_uuid("Beta").to_string();
+        hub.register_with_uuid(
+            3, atx, 2, (0.0, 64.0, 0.0), "Alpha".into(), "addr-a".into(), a_uuid.clone(),
+        );
+        hub.register_with_uuid(
+            4, btx, 2, (0.0, 64.0, 0.0), "Beta".into(), "addr-b".into(), b_uuid.clone(),
+        );
+        let snap = hub.snapshot();
+        assert_eq!(snap.iter().find(|e| e.conn_id == 3).unwrap().uuid, a_uuid);
+        assert_eq!(snap.iter().find(|e| e.conn_id == 4).unwrap().uuid, b_uuid);
+        assert_eq!(hub.find_conn_by_uuid(&a_uuid), Some(3));
+        assert_eq!(hub.find_conn_by_uuid(&b_uuid), Some(4));
+        assert_eq!(hub.find_conn_by_uuid(&a_uuid.to_uppercase()), Some(3), "UUID 大小写无关");
+        assert_eq!(hub.find_conn_by_uuid("not-a-uuid"), None);
+        assert_eq!(hub.find_conn_by_uuid(""), None);
+        hub.unregister(3);
+        assert_eq!(hub.find_conn_by_uuid(&a_uuid), None);
+        // 旧入口没有 uuid，不会被查到，但旧字段保持可用。
+        let (ctx, _crx) = crossbeam_channel::unbounded();
+        hub.register_with_name(5, ctx, 2, (0.0, 64.0, 0.0), "Legacy".into(), "addr-c".into());
+        assert!(hub.snapshot().iter().find(|e| e.conn_id == 5).unwrap().uuid.is_empty());
+        assert_eq!(hub.find_conn_by_name("Legacy"), Some(5));
     }
 
     #[test]
