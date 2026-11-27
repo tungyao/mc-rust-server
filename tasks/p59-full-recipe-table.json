@@ -1,0 +1,23 @@
+{
+  "id": "p59-full-recipe-table",
+  "title": "vanilla 26.3 全量配方表（1185条，tag原生）+ SHIFT锁定配方",
+  "status": "done",
+  "owner": "main",
+  "priority": "p0",
+  "deps": [],
+  "branch": "",
+  "created": "2026-11-27T14:00:00+00:00",
+  "updated": "2026-11-27T14:00:00+00:00",
+  "detail": "data/777/full/recipes+tags_item生成1185条tag原生表（checker 0缺0重）；统一子集+指纹裁决（去exact优先）；72歧义组文档化回退；craft9 SHIFT锁定配方防可逆来回倒腾；/api/recipes tag展示；play_recipes/admin_e2e p59口径；workspace全绿",
+  "files": [
+    "crates/mc-world/src/crafting.rs",
+    "crates/mc-network/src/login_route/craft9.rs",
+    "crates/mc-network/tests/play_recipes.rs",
+    "crates/mc-server/src/admin.rs",
+    "crates/mc-server/tests/admin_e2e.rs",
+    "scripts/gen_recipes.py",
+    "scripts/check_recipes.py",
+    "data/777/full/recipes",
+    "data/777/full/tags_item"
+  ]
+}

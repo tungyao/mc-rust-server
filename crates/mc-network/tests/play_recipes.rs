@@ -71,17 +71,15 @@ async fn craft_iron_pickaxe_full_sync_and_inputs_consumed() {
     let dir = std::env::temp_dir().join(format!("mc-p41-pick-{}", std::process::id()));
     let _ = std::fs::remove_dir_all(&dir);
     let r = recipe("iron_pickaxe");
-    let iron = *r
-        .needs
-        .iter()
-        .find(|(id, _)| *id != mc_world::drops::ITEM_STICK)
-        .unwrap();
-    let stick = *r
-        .needs
-        .iter()
-        .find(|(id, _)| *id == mc_world::drops::ITEM_STICK)
-        .unwrap();
-    assert_eq!((iron.1, stick.1), (3, 2));
+    // P59 tag-native：铁料需求是 TAG（负数 id），背包里放具体铁锭
+    //（从纯具体配方 cauldron 取铁锭 ID，不硬编码数字）；
+    // 木棍仍是具体 ID。数量口径不变（3 铁 + 2 棍）。
+    let iron_id = recipe("cauldron").needs.iter().find(|(id, _)| *id >= 0).unwrap().0;
+    let stick_id = mc_world::drops::ITEM_STICK;
+    assert!(r.needs.iter().any(|(id, n)| *id < 0 && *n == 3));
+    assert!(r.needs.iter().any(|(id, n)| *id == stick_id && *n == 2));
+    let iron = (iron_id, 3);
+    let stick = (stick_id, 2);
     let mut inv = PlayerInventory::new();
     inv.set_slot(9, Some(iron));
     inv.set_slot(10, Some(stick));
@@ -157,12 +155,15 @@ async fn craft_iron_pickaxe_full_sync_and_inputs_consumed() {
 async fn craft_chest_then_bed_full_sync_and_inputs_consumed() {
     let dir = std::env::temp_dir().join(format!("mc-p41-bed-{}", std::process::id()));
     let _ = std::fs::remove_dir_all(&dir);
-    let chest = recipe("oak_chest");
+    let chest = recipe("chest");
     let bed = recipe("red_bed");
     let planks = mc_world::drops::ITEM_OAK_PLANKS;
-    let wool = bed.needs.iter().find(|(id, _)| *id != planks).unwrap().0;
+    // P59 tag-native：木板需求是 TAG（负数 id），背包里放具体橡木木板；
+    // 羊毛仍是具体 ID（取 red_bed 的非负需求项，不硬编码数字）。
+    assert!(chest.needs.iter().any(|(id, n)| *id < 0 && *n == 8));
+    let wool = bed.needs.iter().find(|(id, _)| *id >= 0).unwrap().0;
     let mut inv = PlayerInventory::new();
-    inv.set_slot(9, Some(chest.needs[0]));
+    inv.set_slot(9, Some((planks, 8)));
     inv.set_slot(10, Some((planks, 3)));
     inv.set_slot(11, Some((wool, 3)));
     let addr = serve_seeded(&dir, "BedCrafter", inv).await;

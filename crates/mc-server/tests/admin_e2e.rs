@@ -440,7 +440,7 @@ async fn admin_tools_recipes_gamemode_and_enchant_flow() {
     assert_eq!(online["online"][0]["gamemode"], "survival");
     assert_eq!(online["online"][0]["tool_enchant"], "none");
 
-    // 新增只读端点：工具档位/可挖表 + 283 条配方 + 会话快照。
+    // 新增只读端点：工具档位/可挖表 + 1185 条配方（P59 全量）+ 会话快照。
     let (st, b) = http(env.admin, "GET", "/api/tools", "").await;
     assert_eq!(st, 200);
     let tools = j(&b);
@@ -449,7 +449,7 @@ async fn admin_tools_recipes_gamemode_and_enchant_flow() {
     assert!(tools["blocks"].as_array().unwrap().len() >= 11);
     let (st, b) = http(env.admin, "GET", "/api/recipes", "").await;
     assert_eq!(st, 200);
-    assert_eq!(j(&b)["count"], 283);
+    assert_eq!(j(&b)["count"], 1185);
     let (st, b) = http(env.admin, "GET", "/api/craft9", "").await;
     assert_eq!(st, 200);
     assert_eq!(j(&b)["sessions"].as_array().unwrap().len(), 0);

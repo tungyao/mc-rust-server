@@ -86,6 +86,19 @@ fn pickup(slot: &mut Option<(i32, i32)>, cursor: &mut Option<(i32, i32)>, button
 /// SHIFT 整箱整理：从背包补一格原料到空合成格（只搬配方表内物品，不搬产物/杂项）。
 /// 一次只补一格，调用方每合成一次调一次，直到背包没有可用原料。
 fn refill_one_from_inventory(ds: &DropState, conn: u64, session: &mut Craft9Session) -> bool {
+    refill_one_matching(ds, conn, session, |id| {
+        crafting::RECIPES.iter().any(|r| crafting::recipe_accepts_ingredient(r, id))
+    })
+}
+
+/// 只补锁定配方的料（可逆配方/无关石头不再混进来）。
+/// `accept` 对背包每个物品栈做判断；grid 第一个空槽填入（单槽最多 9 个）。
+fn refill_one_matching(
+    ds: &DropState,
+    conn: u64,
+    session: &mut Craft9Session,
+    accept: impl Fn(i32) -> bool,
+) -> bool {
     for idx in 0..mc_world::crafting::GRID9_SIZE {
         if session.grid[idx].is_some() {
             continue;
@@ -93,10 +106,7 @@ fn refill_one_from_inventory(ds: &DropState, conn: u64, session: &mut Craft9Sess
         let filled = ds.with_inventory(conn, |inv| {
             for slot in mc_world::inventory::MAIN_START..=45 {
                 let Some((id, count)) = inv.get(slot as usize) else { continue };
-                let used_in_recipe = crafting::RECIPES
-                    .iter()
-                    .any(|r| r.needs.iter().any(|(need, _)| *need == id));
-                if !used_in_recipe {
+                if !accept(id) {
                     continue;
                 }
                 let take = count.min(9);
@@ -163,18 +173,29 @@ fn shift_inventory_into_grid(
 /// 结果槽：取一份结果到光标（PICKUP），或 SHIFT 连续合成直到背包满/原料不够（整箱整理）。
 fn click_result(ds: &DropState, conn: u64, session: &mut Craft9Session, click: &packets::ContainerClick) {
     if click.click_type == packets::CLICK_QUICK_MOVE {
-        // 空工作台按 SHIFT 时先从背包补料；每次都先确认能完整放下再扣原料，绝不吞物品。
-        refill_one_from_inventory(ds, conn, session);
+        // SHIFT 连点只重复当前锁定的配方（原版口径：只做当前展示的结果），
+        // 避免可逆配方（如干草块 ↔ 小麦）在“任意配方”循环里来回倒腾。
+        // 格子已有配方直接锁定；空格才从背包补一件料再锁定；之后只补该配方的料。
+        let locked = match crafting::match_recipe_9(session.grid) {
+            Some(r) => Some(r),
+            None => {
+                refill_one_from_inventory(ds, conn, session);
+                crafting::match_recipe_9(session.grid)
+            }
+        };
+        let Some(recipe) = locked else { return };
+        // 借表序指针的 'static 配方做循环锚点（Recipe: Copy 足够轻量也可直接复制引用）。
+        let target_name = recipe.name;
         loop {
             let mut grid = session.grid;
             let done = ds.with_inventory(conn, |inv| {
-                let Some(recipe) = crafting::match_recipe_9(grid) else { return None };
-                let (id, count) = recipe.result;
+                let want = crafting::RECIPES.iter().find(|r| r.name == target_name)?;
+                let (id, count) = want.result;
                 let free = inv.free_slots_for(id, count);
                 if free < count {
                     return None;
                 }
-                if !crafting::consume_grid9(&mut grid, recipe) {
+                if !crafting::consume_grid9(&mut grid, want) {
                     return None;
                 }
                 assert_eq!(inv.add_item(id, count), 0, "pre-checked capacity must fit");
@@ -182,9 +203,11 @@ fn click_result(ds: &DropState, conn: u64, session: &mut Craft9Session, click: &
             });
             if done.flatten().is_some() {
                 session.grid = grid;
-                if !refill_one_from_inventory(ds, conn, session) {
-                    break;
-                }
+                // 只补锁定配方的料；补不上时下一次 consume 失败自然停，
+                // 物品留在格子里（不丢失），与单次合成一致。
+                let _ = refill_one_matching(ds, conn, session, |id| {
+                    crafting::recipe_accepts_ingredient(recipe, id)
+                });
             } else {
                 break;
             }

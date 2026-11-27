@@ -140,3 +140,9 @@
 - [2026-11-27 07:45 UTC] agent=main task=p56-full-crafting status=todo detail=完整合成：2×2 背包 + 3×3 工作台（26.3 jar 真值对齐） files=
 - [2026-11-27 07:45 UTC] agent=subagent-full-crafting task=p56-full-crafting status=start detail=claim files=
 - [2026-11-27 08:06 UTC] agent=subagent-full-crafting task=p56-full-crafting status=done detail=jar逆向对齐2x2背包+3x3工作台:结果槽服务端权威/SHIFT连续合成/SWAP/state id回绕/背包补格;283配方共享;配方书未做(codec缺失);588 passed;merge见main files=crates/mc-world/src/{inventory,crafting}.rs,crates/mc-network/src/login_route/{mod,craft9,drop_sync}.rs,crates/mc-network/tests/p56_crafting_e2e.rs
+- [2026-11-27 13:15 UTC] agent=main task=p57-hardcode-basics status=todo detail=基本功能写死：工作台常开+去后台控制+玩法全开 files=
+- [2026-11-27 13:15 UTC] agent=main task=p57-hardcode-basics status=start detail=claim files=
+- [2026-11-27 13:15 UTC] agent=main task=p57-hardcode-basics status=done detail=open_screen标题改无名tag（真机10bytes extra）；工作台GUI写死常开；删除后台workbench-gui/screen-open控制面+面板卡片；P53/P54玩法写死全开（仅A3 throttle可配）；588 passed files=mc-protocol/play_entity.rs,mc-server/admin.rs+config.rs+main.rs,mc-network/config.rs+login.rs+handshake_route+craft9.rs,admin-ui/Dashboard.js,server.toml
+- [2026-11-27 13:31 UTC] agent=main task=p58-subset-crafting status=todo detail=合成子集语义：多件同种可合成，多的留下 files=
+- [2026-11-27 13:31 UTC] agent=main task=p58-subset-crafting status=start detail=claim files=
+- [2026-11-27 13:31 UTC] agent=main task=p58-subset-crafting status=done detail=match精确优先+子集兜底（够料无杂物即命中）；歧义槽型>总量降序>表序；588 passed files=mc-world/crafting.rs,mc-world/inventory.rs

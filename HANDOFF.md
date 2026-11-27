@@ -1349,10 +1349,35 @@ bash scripts/check_budget.sh     # Windows 可用 C:\Program Files\Git\bin\bash.
 `cargo test --workspace` **588 passed / 0 failed**。
 真机待验：整组原木/木板放格子应出结果且只扣一份，SHIFT 连做耗尽为止。
 
+### 5.43 P59 全量配方表（2026-11-28 晨，vanilla 26.3 真值）
+
+- `data/777/full/recipes`（2042 文件）+ `tags_item`（236）为数据源；
+  `scripts/gen_recipes.py` 生成 GEN-CONSTS/GEN-TAGS/GEN-TABLE，
+  `scripts/check_recipes.py` 独立复核：**1185 条 vanilla 全覆盖，0 重复 0 缺失**。
+- 匹配器 tag-native：负数 need id 索引 `CRAFT_TAGS`（tag 成员归属折叠后比较），
+  逐木种具体副本删除，vanilla 原文件逐字保留。统一子集语义（去掉 P58 的 exact
+  优先门，已证明与旧行为等价：严格子集候选永远匹配不上指纹）。
+- 72 个歧义组：规范槽型 + 总量降序 + 表序回退（确定性）；不可拆分对
+  （门/楼梯 3+3、头盔/矿车、马铠/护腿）按表序 fallback 并在测试中 pin 住。
+- 真 bug 修复两处：① 生成表 `oak_fence_gate` 木棍数按 vanilla 真值 4（旧测试
+  按 2 写）；② `click_result` SHIFT 循环锁定配方——全量表含可逆配方
+  （干草块 ↔ 小麦），"任意配方"循环会来回倒腾归零；现锁定首次命中的配方、
+  只补该配方的料（`recipe_accepts_ingredient`，tag 感知，顺带修了旧
+  `used_in_recipe` 对 tag 料视而不见的问题）。
+- `/api/recipes` 增 tag 展示（`#tagN` + members），e2e/单测按 P59 口径更新
+  （`oak_chest`→`chest`、铁镐 tag 料取具体铁锭、`admin` 283→1185）。
+  `cargo test --workspace` 全绿。
+- 真机待验：混合木板→木棍（橡木+云杉混搭）、tag 工具（铁/钻石镐）、楼梯台阶形
+  1+2+3、SHIFT 干草捆连做 9 个不断在小麦间横跳、箱子 8 木板单格。
+
 ## 8. Git 状态 / 提交注意
 
-- **P57（本轮未提交）**：`open_screen` 标题无名 tag 修复 + 工作台写死常开 + 后台控制面删除 +
-  玩法开关写死（见 §5.40），`cargo test --workspace` 588 passed / 0 failed，已在真机服上运行待复验。
+- **P59（本轮待提交）**：vanilla 26.3 全量 1185 条 tag 原生表 + SHIFT 锁定配方 +
+  `/api/recipes` tag 展示 + e2e 口径更新（见 §5.43），`cargo test --workspace`
+  全绿，checker 1185/0/0，`scripts/gen_recipes.py --check` 一致。数据与脚本
+  一并提交（`data/777/full/recipes`、`tags_item`、`scripts/*.py`）；不提交：
+  `world/`、`server_smoke.log`、`mc-test-client-2/`、散文件
+  （`dbg*.py`、`groups*.txt`、`pairdump*.txt`、`scripts/__pycache__/`）。
 - 当前分支 `main` @ `862c69e`（P56 完整合成；588 passed）；P19–P56 均已合入并 push，历史提交见
   `git log` / `tasks/events.jsonl`；任务真相源是 `tasks/*.json` + `events.jsonl`（见 `tasks/README.md`）。
   近期关键提交：P52 `72436e0`、P51 `826f5b3`、P53 `51ba63f`、P54 `93a8996`、P55 `90323e9` +

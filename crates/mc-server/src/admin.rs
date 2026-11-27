@@ -712,8 +712,10 @@ fn handle_items() -> AdminResponse {
     AdminResponse::raw(200, admin_items::items_catalog_json().to_vec())
 }
 
-/// P47 配方浏览：全部 283 条，输入/输出均带注册名 + ID + 分类；
+/// P47 配方浏览：全部 1185 条（P59 全量），输入/输出均带注册名 + ID + 分类；
 /// ID 来自同一张生成表，面板只展示、不自行拼数字。
+/// P59 tag-native：负数 need id 是 CRAFT_TAGS 索引，name 记 `#tag{idx}` 并附成员名，
+/// 避免旧 `item_name(huge u32) = null` 的不可读展示。
 fn handle_recipes() -> AdminResponse {
     let recipes: Vec<serde_json::Value> = mc_world::crafting::RECIPES
         .iter()
@@ -722,11 +724,33 @@ fn handle_recipes() -> AdminResponse {
                 .needs
                 .iter()
                 .map(|(id, count)| {
-                    serde_json::json!({
-                        "item_id": id,
-                        "name": mc_registry::item_name(*id as u32),
-                        "count": count,
-                    })
+                    if *id >= 0 {
+                        serde_json::json!({
+                            "item_id": id,
+                            "name": mc_registry::item_name(*id as u32),
+                            "count": count,
+                        })
+                    } else {
+                        let members: Vec<serde_json::Value> =
+                            mc_world::crafting::CRAFT_TAGS
+                                .get((-id - 1) as usize)
+                                .copied()
+                                .unwrap_or(&[])
+                                .iter()
+                                .map(|m| {
+                                    serde_json::json!({
+                                        "item_id": m,
+                                        "name": mc_registry::item_name(*m as u32),
+                                    })
+                                })
+                                .collect();
+                        serde_json::json!({
+                            "item_id": id,
+                            "name": format!("#tag{}", -id),
+                            "count": count,
+                            "members": members,
+                        })
+                    }
                 })
                 .collect();
             let category = admin_items::item_info_by_id(r.result.0 as u32)
@@ -1486,12 +1510,22 @@ mod tests {
         assert_eq!(r.status, 200);
         let v = body_json(&r);
         assert_eq!(v["count"], mc_world::crafting::RECIPES.len() as i64);
-        assert_eq!(v["count"], 283);
+        assert_eq!(v["count"], 1185);
         let recipes = v["recipes"].as_array().unwrap();
         let hay = recipes.iter().find(|x| x["name"] == "hay_block").unwrap();
         assert_eq!(hay["result"]["item_id"], mc_registry::item_id("minecraft:hay_block").unwrap() as i64);
         assert_eq!(hay["needs"][0]["item_id"], mc_registry::item_id("minecraft:wheat").unwrap() as i64);
         assert!(hay["needs"][0]["name"].is_string());
+        // tag 需求展示口径：stick 是 TAG（木板），name 为 #tagN 并附成员名。
+        let stick = recipes.iter().find(|x| x["name"] == "stick").unwrap();
+        let tag_need = stick["needs"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|n| n["item_id"].as_i64().unwrap_or(0) < 0)
+            .unwrap();
+        assert!(tag_need["name"].as_str().unwrap().starts_with("#tag"));
+        assert!(tag_need["members"].as_array().unwrap().len() > 10);
         assert!(hay["category"].is_string());
         let sessions = body_json(&route(&get("/api/craft9"), &st));
         assert_eq!(sessions["sessions"].as_array().unwrap().len(), 0);
