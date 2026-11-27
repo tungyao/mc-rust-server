@@ -1,0 +1,15 @@
+{
+  "id": "p49-gameplay-gaps",
+  "title": "研究接下来的玩法缺口（含后台联动要求）",
+  "status": "done",
+  "owner": "subagent-gap-research",
+  "priority": "p1",
+  "deps": [],
+  "branch": "",
+  "created": "2026-11-27T01:36:22+00:00",
+  "updated": "2026-11-27T01:41:48+00:00",
+  "detail": "docs/gameplay-gaps-plan.md:28项缺口A/B/C分类+每缺口包来源/状态/ticker/存档/后台API联动+批次0-4+12决策点;仅文档",
+  "files": [
+    "docs/gameplay-gaps-plan.md"
+  ]
+}

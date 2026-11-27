@@ -972,6 +972,15 @@ $natives = 'C:\Users\qwe\AppData\Local\Temp\mc263natives'
     仓库内脚本 e2e 不能替代。重点风险：v2 441 块 Join 本地估算 1060ms 超 700ms 红线、
     v2 biome 容器/非均匀 light 无 vanilla 抓包对照、P47 `open_screen`/飞行/0x47/0x54 未做。
 
+33. **P49 剩余玩法缺口调研（已完成，仅文档）**：`docs/gameplay-gaps-plan.md` 把剩余 28 项缺口
+    分 A 类（无需抓包：经验球合并/吸引、饥饿细节、广播限流、后台设置持久化、journal 运维、
+    时间/天气、统计计数、工作台会话落盘）、B 类（必须抓 777 包：聊天 `0x09`/`0x42`/`0x7c`、
+    `player_info_update 0x47`、`Respawn 0x54`、飞行 `0x41`、创造槽 `0x39`、声音/粒子）、
+    C 类（需 socket→ECS 大改：AI/红石/载具/命令）。每项含包 ID 来源、状态归属、
+    tick 归属（必须全服唯一 ticker）、存档位置与**具体后台 API/面板联动点**。
+    推荐：批次 0 = 真机复验门禁（不写代码）→ 批次 1 = A 类 8 项 → 批次 2 = 社交三件套
+    → 批次 3 = 创造/容器/反馈 → 批次 4 = 大架构评估。明确不建议做与 12 个待决策点见文档 §5。
+
 ## 6. 关键文件
 
 ```
@@ -1037,6 +1046,7 @@ docs/registries-777.md                 注册表清单
 docs/world-storage-plan.md             P36 新世界存储格式方案（redb，不做 Anvil 兼容）
 docs/worldgen-plan.md                  P42 地图生成器调研与分阶段路线图（未改代码）
 docs/real-machine-checklist.md         真机复验清单（按功能分组，含配置/按键/日志/截图/失败定位）
+docs/gameplay-gaps-plan.md             P49 剩余玩法缺口调研（A/B/C 分类 + 后台联动 + 批次路线）
 ```
 
 ## 7. 测试命令
