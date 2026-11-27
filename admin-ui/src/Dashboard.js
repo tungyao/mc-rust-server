@@ -21,7 +21,7 @@ const dashboardTemplate = `
     <n-card size="small" title="在线玩家（2s 轮询）">
       <n-table :bordered="true" :single-line="false" size="small">
         <thead>
-          <tr><th>conn</th><th>用户名</th><th>UUID</th><th>地址</th><th>位置</th><th>在线(s)</th><th>模式</th><th>操作</th></tr>
+          <tr><th>conn</th><th>用户名</th><th>UUID</th><th>地址</th><th>位置</th><th>在线(s)</th><th>经验</th><th>生命/饥饿/饱和</th><th>模式</th><th>操作</th></tr>
         </thead>
         <tbody>
           <tr v-for="p in online" :key="p.conn_id">
@@ -31,6 +31,8 @@ const dashboardTemplate = `
             <td>{{ p.addr }}</td>
             <td>{{ fmtPos(p.pos) }}</td>
             <td>{{ p.online_secs }}</td>
+            <td>{{ p.xp ?? 0 }}</td>
+            <td>{{ fmtSurvival(p) }}</td>
             <td>
               <n-select :value="p.gamemode || 'survival'" :options="gamemodeOptions" size="tiny"
                         style="width: 100px" :loading="modeBusy === p.conn_id"
@@ -38,10 +40,70 @@ const dashboardTemplate = `
             </td>
             <td><n-button size="tiny" type="error" secondary @click="kick(p)">踢人</n-button></td>
           </tr>
-          <tr v-if="!online.length"><td colspan="8" class="muted">当前无在线玩家</td></tr>
+          <tr v-if="!online.length"><td colspan="10" class="muted">当前无在线玩家</td></tr>
         </tbody>
       </n-table>
-      <template #footer><span class="muted">在线 {{ online.length }} 人；下方“发放 / 查看背包”的玩家列表取自这里。</span></template>
+      <template #footer>
+        <span class="muted">在线 {{ online.length }} 人；模式和附魔改后即落盘，重连后仍生效。下方发放/查看背包的玩家列表取自这里。</span>
+      </template>
+    </n-card>
+
+    <n-card size="small" title="经验发放（P53）">
+      <div class="row">
+        <span class="label">玩家</span>
+        <n-select v-model:value="xpUser" :options="userOptions" filterable clearable
+                  placeholder="选择在线玩家" size="small" style="width: 220px" />
+        <span class="label">经验值</span>
+        <n-input-number v-model:value="xpAmount" :min="1" :max="2147483647" size="small" style="width: 160px" />
+        <n-button type="primary" size="small" :disabled="!xpUser" @click="grantXp">发放经验</n-button>
+        <span class="muted">{{ xpMsg }}</span>
+      </div>
+    </n-card>
+
+    <n-card size="small" title="生存状态（P53，只读 + 调试）">
+      <n-table :bordered="true" :single-line="false" size="small">
+        <thead><tr><th>玩家</th><th>生命</th><th>饥饿</th><th>饱和</th><th>疲劳</th></tr></thead>
+        <tbody>
+          <tr v-for="p in online" :key="'surv-' + p.conn_id">
+            <td>{{ p.username }}</td>
+            <td>{{ p.health ?? 20 }}</td><td>{{ p.food ?? 20 }}</td>
+            <td>{{ p.saturation ?? 5 }}</td><td>{{ fmtNum(p.exhaustion) }}</td>
+          </tr>
+          <tr v-if="!online.length"><td colspan="5" class="muted">当前无在线玩家</td></tr>
+        </tbody>
+      </n-table>
+      <div class="row">
+        <span class="label">调试</span>
+        <n-select v-model:value="foodUser" :options="userOptions" filterable clearable
+                  placeholder="选择在线玩家" size="small" style="width: 200px" />
+        <span class="label">饥饿</span>
+        <n-input-number v-model:value="foodValue" :min="0" :max="20" size="small" style="width: 120px" />
+        <span class="label">饱和</span>
+        <n-input-number v-model:value="satValue" :min="0" :max="5" :step="0.5" size="small" style="width: 120px" />
+        <n-button size="small" :disabled="!foodUser" @click="setFood">设置</n-button>
+        <span class="muted">{{ foodMsg }}</span>
+      </div>
+    </n-card>
+
+    <n-card size="small" title="统计（P53，仅服务端本地累积）">
+      <div class="row">
+        <span class="label">玩家</span>
+        <n-select v-model:value="statUser" :options="userOptions" filterable clearable
+                  placeholder="选择在线玩家" size="small" style="width: 220px" />
+        <span class="label">起</span><n-input v-model:value="statFrom" placeholder="YYYY-MM-DD" size="small" style="width: 140px" />
+        <span class="label">止</span><n-input v-model:value="statTo" placeholder="YYYY-MM-DD" size="small" style="width: 140px" />
+        <n-button size="small" :disabled="!statUser" @click="loadStats">查询</n-button>
+        <span class="muted">{{ statMsg }}</span>
+      </div>
+      <n-table :bordered="true" :single-line="false" size="small">
+        <thead><tr><th>统计项</th><th>stat_id</th><th>日期(天)</th><th>次数</th></tr></thead>
+        <tbody>
+          <tr v-for="r in statRows" :key="r.stat_id + '-' + r.day">
+            <td>{{ r.stat }}</td><td>{{ r.stat_id }}</td><td>{{ r.day }}</td><td>{{ r.count }}</td>
+          </tr>
+          <tr v-if="!statRows.length"><td colspan="4" class="muted">尚无统计记录（不推送客户端）</td></tr>
+        </tbody>
+      </n-table>
     </n-card>
 
     <n-card size="small" title="发放物品">
@@ -253,6 +315,20 @@ export const Dashboard = {
     const selectedRecipe = ref('');
     const craft9 = ref(null);
 
+    // P53：经验发放 / 生存调试 / 本地统计（在线玩家身份仍以稳定 UUID 为准）。
+    const xpUser = ref(null);
+    const xpAmount = ref(1);
+    const xpMsg = ref('');
+    const foodUser = ref(null);
+    const foodValue = ref(20);
+    const satValue = ref(5);
+    const foodMsg = ref('');
+    const statUser = ref(null);
+    const statFrom = ref('');
+    const statTo = ref('');
+    const statRows = ref([]);
+    const statMsg = ref('');
+
     const tierOptions = computed(() => (toolCatalog.value?.tiers || []).map(t =>
       ({ label: `${t.tier} · ${t.name}`, value: t.tier })));
     const toolOptions = computed(() => (toolCatalog.value?.tools || [])
@@ -291,6 +367,12 @@ export const Dashboard = {
 
     function fmtPos(pos) {
       return (pos || []).map(v => Number(v).toFixed(1)).join(',');
+    }
+    function fmtNum(v) {
+      return Number(v ?? 0).toFixed(2);
+    }
+    function fmtSurvival(p) {
+      return `${p.health ?? 20} / ${p.food ?? 20} / ${fmtNum(p.saturation)}`;
     }
 
     async function setMode(p, mode) {
@@ -360,6 +442,40 @@ export const Dashboard = {
         toolMsg.value = 'tool-enchant failed: ' + e;
         message.error(toolMsg.value);
       }
+    }
+
+    async function grantXp() {
+      if (!xpUser.value) { message.warning('请选择在线玩家'); return; }
+      try {
+        const r = await jpost('/api/xp', { uuid: xpUser.value, amount: Number(xpAmount.value) });
+        xpMsg.value = 'HTTP ' + r.status + ' ' + JSON.stringify(r.body);
+        if (r.status === 200 && r.body.ok) message.success('经验已发放，总经验 ' + r.body.total_xp);
+        else message.error('发放失败：' + JSON.stringify(r.body));
+      } catch (e) { xpMsg.value = 'xp failed: ' + e; message.error(xpMsg.value); }
+      await refreshOnline();
+    }
+    async function setFood() {
+      if (!foodUser.value) { message.warning('请选择在线玩家'); return; }
+      try {
+        const r = await jpost('/api/set-food', {
+          uuid: foodUser.value, food: Number(foodValue.value), saturation: Number(satValue.value),
+        });
+        foodMsg.value = 'HTTP ' + r.status + ' ' + JSON.stringify(r.body);
+        if (r.status === 200 && r.body.ok) message.success('生存状态已设置');
+        else message.error('设置失败：' + JSON.stringify(r.body));
+      } catch (e) { foodMsg.value = 'set-food failed: ' + e; message.error(foodMsg.value); }
+      await refreshOnline();
+    }
+    async function loadStats() {
+      if (!statUser.value) { message.warning('请选择玩家'); return; }
+      let q = '/api/stats?uuid=' + encodeURIComponent(statUser.value);
+      if (statFrom.value) q += '&from=' + encodeURIComponent(statFrom.value);
+      if (statTo.value) q += '&to=' + encodeURIComponent(statTo.value);
+      try {
+        const r = await jget(q);
+        statRows.value = r.ok ? (r.stats || []) : [];
+        statMsg.value = r.ok ? `共 ${statRows.value.length} 项` : JSON.stringify(r);
+      } catch (e) { statMsg.value = 'stats failed: ' + e; }
     }
 
     async function refreshWorld() {
@@ -452,7 +568,7 @@ export const Dashboard = {
     onBeforeUnmount(() => timers.forEach(clearInterval));
 
     return {
-      worldText, online, saving, saveMsg, fmtPos, shortUuid, kick, saveNow,
+      worldText, online, saving, saveMsg, fmtPos, fmtNum, fmtSurvival, shortUuid, kick, saveNow,
       userOptions, giveUser, giveCount, giveCat, giveQuery, categoryOptions,
       selectedItem, filteredItems, visibleItems, giveHint, giveMsg, giveItem,
       invUser, invCat, invQuery, invSlots, invEmptySlots, invHint, showInv,
@@ -461,6 +577,9 @@ export const Dashboard = {
       enchantOptions, toolMsg, toolBlocks, giveTool, applyToolEnchant,
       recipeCat, recipeCatOptions, recipeQuery, recipes, filteredRecipes,
       visibleRecipes, recipeHint, selectedRecipe, selectedRecipeDetail, craft9Text,
+      xpUser, xpAmount, xpMsg, grantXp,
+      foodUser, foodValue, satValue, foodMsg, setFood,
+      statUser, statFrom, statTo, statRows, statMsg, loadStats,
     };
   },
 };

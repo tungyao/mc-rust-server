@@ -28,6 +28,12 @@ fn main() {
         }
     };
     let bind = cfg.bind.clone();
+    // P53：四项玩法开关（生产默认全开，server.toml 可单独关闭）。
+    let features = config::load_feature_toggles("server.toml");
+    info!(
+        "p53 features xp_merge={} hunger_detail={} settings_persist={} stats={}",
+        features.xp_merge, features.hunger_detail, features.settings_persist, features.stats
+    );
     // P52：socket 归属启动期锁定（默认 ecs，server.toml 可回退 net）。
     let socket_mode = config::load_socket_mode("server.toml");
     info!("socket_mode={} (ecs=full ECS ownership, net=emergency fallback)", socket_mode.as_str());
@@ -152,7 +158,12 @@ fn main() {
         // P47：生产入口开启工具等级/时运/精准采集（旧 e2e 默认关闭，掉落口径不变）。
         .with_tool_rules(true)
         // P52：生产默认 ecs；net 仅在 server.toml 显式配置时作为紧急回退。
-        .with_socket_mode(socket_mode);
+        .with_socket_mode(socket_mode)
+        // P53：生产默认全开；旧 e2e 入口的 NetConfig::default() 仍全关（包流不变）。
+        .with_xp_merge(features.xp_merge)
+        .with_hunger_detail(features.hunger_detail)
+        .with_settings_persist(features.settings_persist)
+        .with_stats(features.stats);
     info!(
         "config view_distance={} effective_view_radius={} seed={} compression_threshold={}",
         cfg.view_distance, cfg.effective_view_distance(), cfg.seed, cfg.compression_threshold

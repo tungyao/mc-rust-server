@@ -5,7 +5,9 @@
 //! - 物理口径沿用 P18 掉落物：拾取延迟 10 ticks、拾取半径 1.5 格、重力 0.04/
 //!   阻尼 0.98、6000 ticks despawn、支撑面静息/被挖空重算、切比雪夫视距过滤。
 //!   物理只由全服唯一 50ms ticker 推进（P18.1 R1：连接侧绝不 tick）。
-//! - 经验球不合并（原版同值会合并，这里最小实现只做「一矿一球」；见 HANDOFF/提交说明）。
+//! - P53 A1：7.25 格吸引 + 邻近合并（总经验值严格守恒）为**纯逻辑**，只由全服
+//!   唯一 50ms ticker 调用 [`XpOrbEntities::attract_toward`] /
+//!   [`XpOrbEntities::merge_group`]；连接侧绝不推进时间。
 //! - 等级曲线用原版公式（见 wiki Experience#Leveling up）：`xp_for_level` 是达到该
 //!   等级所需的**总经验**，`level_for_xp` 为其整数逆，`xp_progress` 是当前等级进度 0..1。
 
@@ -77,6 +79,15 @@ pub struct XpOrb {
     pub moved: bool,
 }
 
+/// P53 A1：玩家吸引半径（原版 7.25 格，3D 距离，脚位置口径）。
+pub const XP_ATTRACT_RADIUS: f64 = 7.25;
+/// 每 tick 朝玩家靠近的距离（50ms 一跳，约 12 格/秒）。
+pub const XP_ATTRACT_SPEED: f64 = 0.6;
+/// 邻近合并的距离阈值（球心间距；同格地面球即合并）。
+pub const XP_MERGE_DISTANCE: f64 = 0.6;
+/// 单组合并的球数上限（防止一次矿脉把无限实体并成一坨）。
+pub const XP_MERGE_MAX_ORBS: usize = 16;
+
 fn chunk_of_pos(x: f64, z: f64) -> ChunkPos {
     ChunkPos((x.floor() as i32).div_euclid(16), (z.floor() as i32).div_euclid(16))
 }
@@ -84,6 +95,15 @@ fn chunk_of_pos(x: f64, z: f64) -> ChunkPos {
 fn dist(a: (f64, f64, f64), b: (f64, f64, f64)) -> f64 {
     let (dx, dy, dz) = (a.0 - b.0, a.1 - b.1, a.2 - b.2);
     (dx * dx + dy * dy + dz * dz).sqrt()
+}
+
+/// 合并结果（新实体取代整组；总经验值严格守恒，多出来的经验一个不丢）。
+#[derive(Debug, Clone, PartialEq)]
+pub struct XpMerge {
+    pub removed: Vec<i32>,
+    pub id: i32,
+    pub amount: i32,
+    pub pos: (f64, f64, f64),
 }
 
 /// 经验球实体集合（单世界实例；多连接共享，entity_id 全局唯一由调用方保证）。
@@ -194,6 +214,122 @@ impl XpOrbEntities {
             o.moved = false;
         }
         (moved, dead)
+    }
+
+    /// P53 A1：7.25 格内的地面球朝最近玩家移动（纯逻辑；只由全服唯一 ticker 调用）。
+    /// 返回本 tick 移动过的实体 id，调用方据此经 hub 发 `0x23` 位置同步。
+    /// 半径外的球逐字节不动；到达拾取半径内后仍由连接侧按 1.5 格拾取。
+    pub fn attract_toward(
+        &mut self,
+        players: &[(f64, f64, f64)],
+        radius: f64,
+        speed: f64,
+    ) -> Vec<i32> {
+        if players.is_empty() || radius <= 0.0 || speed <= 0.0 {
+            return Vec::new();
+        }
+        let mut moved = Vec::new();
+        for o in self.orbs.iter_mut() {
+            let nearest = players
+                .iter()
+                .map(|p| (dist(o.pos, *p), *p))
+                .filter(|(d, _)| *d <= radius)
+                .min_by(|a, b| a.0.total_cmp(&b.0))
+                .map(|(_, p)| p);
+            let Some(target) = nearest else { continue };
+            let d = dist(o.pos, target);
+            if d <= f64::EPSILON {
+                continue;
+            }
+            let step = speed.min(d);
+            let k = step / d;
+            let dir = ((target.0 - o.pos.0) / d, (target.1 - o.pos.1) / d, (target.2 - o.pos.2) / d);
+            o.pos.0 += (target.0 - o.pos.0) * k;
+            o.pos.1 += (target.1 - o.pos.1) * k;
+            o.pos.2 += (target.2 - o.pos.2) * k;
+            o.vel = (dir.0 * speed, 0.0, dir.2 * speed);
+            o.chunk = chunk_of_pos(o.pos.0, o.pos.2);
+            // 被吸引时脱离静息，避免下一步物理立刻把 y 拉回 rest_y。
+            o.on_ground = false;
+            // 不复用 physics tick 的 moved 标志（那是同步后清零的一次性标记），
+            // 只返回 id 列表；半径外的实体逐字段不动。
+            moved.push(o.id);
+        }
+        moved
+    }
+
+    /// P53 A1：贪心分组邻近球（球心间距 <= `distance`、每组最多 `max_group` 个）。
+    /// 只返回长度 >=2 的组；顺序稳定（按实体创建顺序），便于 e2e 断言与守恒验证。
+    pub fn merge_groups(&self, distance: f64, max_group: usize) -> Vec<Vec<i32>> {
+        if max_group < 2 || distance <= 0.0 {
+            return Vec::new();
+        }
+        let mut visited = vec![false; self.orbs.len()];
+        let mut groups = Vec::new();
+        for i in 0..self.orbs.len() {
+            if visited[i] {
+                continue;
+            }
+            visited[i] = true;
+            let mut group = vec![self.orbs[i].id];
+            // 以组内任一成员为中心都能连上即入组（贪心，不做全局最优）。
+            let mut j = 0;
+            while j < group.len() {
+                let anchor = self.orbs.iter().find(|o| o.id == group[j]).unwrap().pos;
+                for k in 0..self.orbs.len() {
+                    if visited[k] || group.len() >= max_group {
+                        continue;
+                    }
+                    if dist(anchor, self.orbs[k].pos) <= distance {
+                        visited[k] = true;
+                        group.push(self.orbs[k].id);
+                    }
+                }
+                j += 1;
+            }
+            if group.len() >= 2 {
+                groups.push(group);
+            }
+        }
+        groups
+    }
+
+    /// P53 A1：把 `ids` 合成一个**新 id** 的实体（保留锚点的位置/物理/拾取延迟）。
+    /// 任何溢出/重复 id/不存在的成员都直接放弃（返回 None），绝不出错地吞经验。
+    pub fn merge_group(&mut self, ids: &[i32], new_id: i32) -> Option<XpMerge> {
+        if ids.len() < 2 || self.orbs.iter().any(|o| o.id == new_id) {
+            return None;
+        }
+        let mut amount = 0i64;
+        for id in ids {
+            let o = self.orbs.iter().find(|o| o.id == *id)?;
+            amount += o.amount as i64;
+        }
+        let amount = i32::try_from(amount).ok()?;
+        let anchor = self.orbs.iter().find(|o| o.id == ids[0])?.clone();
+        for id in ids {
+            self.remove(*id)?;
+        }
+        self.orbs.push(XpOrb {
+            id: new_id,
+            uuid: items::uuid_for_entity(new_id),
+            amount,
+            pos: anchor.pos,
+            vel: anchor.vel,
+            age: anchor.age,
+            pickup_delay: anchor.pickup_delay,
+            rest_y: anchor.rest_y,
+            support: anchor.support,
+            on_ground: anchor.on_ground,
+            chunk: chunk_of_pos(anchor.pos.0, anchor.pos.2),
+            moved: true,
+        });
+        Some(XpMerge { removed: ids.to_vec(), id: new_id, amount, pos: anchor.pos })
+    }
+
+    /// P53 A1：同步快照（位置 + 经验值）；连接侧按此补发 `0x23`/`0x4E`（不推进物理）。
+    pub fn snapshots(&self) -> Vec<(i32, (f64, f64, f64), i32)> {
+        self.orbs.iter().map(|o| (o.id, o.pos, o.amount)).collect()
     }
 
     /// 静息在支撑方块上、但支撑已被挖空的实体（与物品实体同口径）。
@@ -366,5 +502,53 @@ mod tests {
         let mut both = orbs.in_view(ChunkPos(3, 3), 3);
         both.sort();
         assert_eq!(both, vec![1001, 1002]);
+    }
+
+    /// P53 A1：吸引半径严格 7.25 格，半径外的球逐字节不动。
+    #[test]
+    fn attraction_only_inside_7_25_blocks() {
+        let mut orbs = XpOrbEntities::new();
+        orbs.spawn(1, 1, 1.5, 69.0, 0.5, 69.0).unwrap();
+        orbs.spawn(2, 1, 0.5 + XP_ATTRACT_RADIUS, 69.0, 0.5, 69.0).unwrap();
+        orbs.spawn(3, 1, 0.5 + XP_ATTRACT_RADIUS + 0.01, 69.0, 0.5, 69.0).unwrap();
+        let before = orbs.get(3).unwrap().clone();
+        let moved = orbs.attract_toward(&[(0.5, 69.0, 0.5)], XP_ATTRACT_RADIUS, XP_ATTRACT_SPEED);
+        assert_eq!(moved, vec![1, 2], "edge distance == radius is included");
+        assert_eq!(orbs.get(3), Some(&before), "outside radius must stay byte-identical");
+        assert!(orbs.get(1).unwrap().pos.0 < 1.5, "orb must move toward the player");
+        assert_eq!(orbs.get(1).unwrap().pickup_delay, items::PICKUP_DELAY_TICKS);
+    }
+
+    /// P53 A1：合并只改实体池，经验总额严格守恒；上限与溢出都拒绝合并。
+    #[test]
+    fn merge_conserves_total_xp_and_honors_group_cap() {
+        let mut orbs = XpOrbEntities::new();
+        for i in 0..3 {
+            orbs.spawn(100 + i as i32, 3 + i as i32, 0.5 + i as f64 * 0.1, 69.0, 0.5, 69.0).unwrap();
+        }
+        orbs.spawn(200, 5, 40.5, 69.0, 40.5, 69.0).unwrap();
+        let total: i32 = orbs.snapshots().iter().map(|(_, _, a)| *a).sum();
+        let groups = orbs.merge_groups(XP_MERGE_DISTANCE, XP_MERGE_MAX_ORBS);
+        assert_eq!(groups.len(), 1, "far orb must not join the group");
+        assert_eq!(groups[0].len(), 3);
+        let merged = orbs.merge_group(&groups[0], 999).unwrap();
+        assert_eq!(merged.amount, 3 + 4 + 5);
+        assert_eq!(merged.removed, vec![100, 101, 102]);
+        let after: i32 = orbs.snapshots().iter().map(|(_, _, a)| *a).sum();
+        assert_eq!(after, total, "merge must conserve total XP");
+        assert_eq!(orbs.len(), 2);
+        assert!(orbs.merge_group(&[999, 200], 999).is_none(), "duplicate new id rejected");
+        assert!(orbs.merge_groups(XP_MERGE_DISTANCE, 1).is_empty(), "group cap 1 disables merge");
+    }
+
+    /// P53 A1：超 i32 上限时整组放弃合并，不截断经验（VarInt 上限兜底）。
+    #[test]
+    fn merge_rejects_amount_overflow_without_losing_any_orb() {
+        let mut orbs = XpOrbEntities::new();
+        orbs.spawn(1, i32::MAX, 0.5, 69.0, 0.5, 69.0).unwrap();
+        orbs.spawn(2, 1, 0.6, 69.0, 0.5, 69.0).unwrap();
+        let groups = orbs.merge_groups(XP_MERGE_DISTANCE, XP_MERGE_MAX_ORBS);
+        assert!(orbs.merge_group(&groups[0], 3).is_none());
+        assert_eq!(orbs.len(), 2, "a rejected merge must not remove any orb");
     }
 }

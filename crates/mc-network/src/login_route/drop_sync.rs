@@ -592,6 +592,24 @@ pub(crate) async fn tick_drops<S: AsyncRead + AsyncWrite + Unpin>(
     // 视距一致性：遍历全量 ids（moved 仅供权威物理内部使用），进视距补 Spawn /
     // 出视距发 Remove。不发 TeleportEntitySync，避免与客户端物理打架。
     sync_view_entities(stream, opts, drops, view).await?;
+    // P53 A1：经验球吸引只由全局 ticker 改位置；这里仅按快照差集补 0x23。
+    // 新实体已由上面的 Spawn 处理，消失的实体由 known 差集补 0x4E，连接侧绝不 tick。
+    if opts.xp_merge {
+        for (id, pos) in drops.orb_position_updates(opts.conn_id) {
+            let mut body = Vec::new();
+            packets::TeleportEntitySync {
+                entity_id: id,
+                x: pos.0,
+                y: pos.1,
+                z: pos.2,
+                yaw: 0.0,
+                pitch: 0.0,
+                on_ground: false,
+            }
+            .encode_body(&mut body);
+            write_packet_any(stream, packets::PLAY_ENTITY_POSITION_SYNC_S2C_ID, &body, opts.threshold).await?;
+        }
+    }
     // 拾取：delay 到期 + 距离 <1.5 → TakeItem+Remove，入库，全量同步 + 刷盘。
     // items.pickable + items.remove 在同一把锁内，连接间先到先得，天然互斥。
     let picked: Vec<(i32, i32, i32, mc_core::ChunkPos)> = {

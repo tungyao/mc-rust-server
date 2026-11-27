@@ -51,6 +51,11 @@ pub struct PlayOptions {
     pub destroy_stage: bool,
     /// P47 工具等级/时运/精准采集开关（默认关闭，旧掉落测试口径不变）。
     pub tool_rules: bool,
+    /// P53 A1/A2/A4/A7：四项独立开关（库默认关，生产 server.toml 默认开）。
+    pub xp_merge: bool,
+    pub hunger_detail: bool,
+    pub settings_persist: bool,
+    pub stats: bool,
 }
 
 impl PlayOptions {
@@ -69,6 +74,10 @@ impl PlayOptions {
             player_visibility: false,
             destroy_stage: false,
             tool_rules: false,
+            xp_merge: false,
+            hunger_detail: false,
+            settings_persist: false,
+            stats: false,
         }
     }
 
@@ -128,6 +137,21 @@ impl PlayOptions {
     /// P47：打开工具等级/时运/精准采集判定。
     pub fn with_tool_rules(mut self, enabled: bool) -> Self {
         self.tool_rules = enabled;
+        self
+    }
+
+    /// P53：把 NetConfig 的四项玩法开关透传到 Play 连接侧。
+    pub fn with_p53_features(
+        mut self,
+        xp_merge: bool,
+        hunger_detail: bool,
+        settings_persist: bool,
+        stats: bool,
+    ) -> Self {
+        self.xp_merge = xp_merge;
+        self.hunger_detail = hunger_detail;
+        self.settings_persist = settings_persist;
+        self.stats = stats;
         self
     }
 }
@@ -444,6 +468,11 @@ async fn enter_play_inner<S: AsyncRead + AsyncWrite + Unpin>(
             addr.to_string(),
             profile.uuid.to_string(),
         );
+        // P53 A4：以落盘的 gamemode/tool_enchant 作为本次会话的权威内存初值；
+        // 只在 hub 注册完成后改内存，不插任何包、不改 Join 八段包序。
+        if let Some(drops) = &opts.drops {
+            drops.apply_persisted_settings(opts.conn_id);
+        }
         if opts.player_visibility {
             // P43：对外实体 id 与客户端自身 id=1 严格分离；自己永远不 Spawn。
             let state = crate::PlayerEntityState {

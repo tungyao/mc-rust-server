@@ -404,6 +404,21 @@ pub(crate) async fn apply_block_outcome<S: AsyncRead + AsyncWrite + Unpin>(
                 new_id: c.new_id,
             },
         );
+        // P53 A7：在既有 PlayEvent::BlockEdit 路径累加本地统计（不发包、不新增 ticker）。
+        if opts.stats && c.old_id != c.new_id {
+            if let Some(ds) = &opts.drops {
+                let stat = if c.new_id == mc_world::AIR_BLOCK_ID {
+                    mc_world::store::stat_id::MINED
+                } else if c.old_id == mc_world::AIR_BLOCK_ID {
+                    mc_world::store::stat_id::PLACED
+                } else {
+                    0
+                };
+                if stat != 0 {
+                    ds.record_stat(opts.conn_id, stat);
+                }
+            }
+        }
     }
     let mut ack = Vec::new();
     mc_protocol::write_varint(outcome.sequence, &mut ack);

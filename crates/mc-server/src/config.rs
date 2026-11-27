@@ -99,6 +99,51 @@ pub fn load_socket_mode(path: impl AsRef<Path>) -> mc_network::SocketMode {
     }
 }
 
+/// P53 批次 1：四项玩法开关（生产默认全开，server.toml 可单独关）。
+/// 与 `world_storage`/`socket_mode` 一样走独立 toml 键，绝不给穷举字面量的
+/// `ServerConfig` 加字段（旧 528 测试一字不改的硬约束）。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct FeatureToggles {
+    pub xp_merge: bool,
+    pub hunger_detail: bool,
+    pub settings_persist: bool,
+    pub stats: bool,
+}
+
+impl Default for FeatureToggles {
+    fn default() -> Self {
+        Self { xp_merge: true, hunger_detail: true, settings_persist: true, stats: true }
+    }
+}
+
+/// 缺键时补一行 `key = <default>`，返回当前值；非法值警告后回退默认。
+fn load_bool_key(path: &Path, key: &str, default: bool, comment: &str) -> bool {
+    let Ok(text) = std::fs::read_to_string(path) else { return default };
+    let value = toml::from_str::<toml::Value>(&text)
+        .ok()
+        .and_then(|v| v.get(key).and_then(|x| x.as_bool()));
+    if value.is_none() && !text.contains(key) {
+        let mut updated = text;
+        if !updated.ends_with('\n') {
+            updated.push('\n');
+        }
+        updated.push_str(&format!("\n# {comment}\n{key} = {default}\n"));
+        let _ = std::fs::write(path, updated);
+    }
+    value.unwrap_or(default)
+}
+
+/// 读取四项 P53 开关：旧 server.toml 缺键时逐项补默认值（全开）。
+pub fn load_feature_toggles(path: impl AsRef<Path>) -> FeatureToggles {
+    let path = path.as_ref();
+    FeatureToggles {
+        xp_merge: load_bool_key(path, "xp_merge", true, "P53 A1: XP orb attraction/merge (default true)"),
+        hunger_detail: load_bool_key(path, "hunger_detail", true, "P53 A2: sprint/jump/swim exhaustion (default true)"),
+        settings_persist: load_bool_key(path, "settings_persist", true, "P53 A4: persist gamemode/tool_enchant across reconnect (default true)"),
+        stats: load_bool_key(path, "stats", true, "P53 A7: local stats accumulation (default true, no packets)"),
+    }
+}
+
 /// 生成器版本默认值：v1=legacy 永久冻结；v2 只对新 seed / 显式配置启用。
 pub const DEFAULT_GENERATOR_VERSION: u32 = 1;
 
@@ -369,6 +414,27 @@ mod tests {
         assert_eq!(load_world_storage(&p), WorldStorage::Redb);
         std::fs::write(&p, "seed = 42\nworld_storage = \"nonsense\"\n").unwrap();
         assert_eq!(load_world_storage(&p), WorldStorage::Redb, "unknown value falls back to default");
+        let _ = std::fs::remove_file(&p);
+    }
+
+    /// P53：旧 toml 缺键补四项默认开；显式 false 可单独关闭任一项。
+    #[test]
+    fn p53_feature_toggles_default_on_and_allow_off() {
+        let p = tmp_toml();
+        let _ = std::fs::remove_file(&p);
+        std::fs::write(&p, "seed = 42\n").unwrap();
+        assert_eq!(load_feature_toggles(&p), FeatureToggles::default());
+        let filled = std::fs::read_to_string(&p).unwrap();
+        for key in ["xp_merge", "hunger_detail", "settings_persist", "stats"] {
+            assert!(filled.contains(&format!("{key} = true")), "old toml gains {key}");
+        }
+        std::fs::write(
+            &p,
+            "seed = 42\nxp_merge = false\nhunger_detail = true\nsettings_persist = false\nstats = true\n",
+        )
+        .unwrap();
+        let toggles = load_feature_toggles(&p);
+        assert!(!toggles.xp_merge && toggles.hunger_detail && !toggles.settings_persist && toggles.stats);
         let _ = std::fs::remove_file(&p);
     }
 

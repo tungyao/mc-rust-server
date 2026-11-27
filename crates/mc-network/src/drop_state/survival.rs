@@ -13,7 +13,7 @@ use mc_world::{MutableWorld, SurvivalState};
 use std::sync::atomic::Ordering;
 
 impl DropState {
-    fn lock_surv(&self) -> std::sync::MutexGuard<'_, std::collections::HashMap<u64, SurvivalState>> {
+    pub(crate) fn lock_surv(&self) -> std::sync::MutexGuard<'_, std::collections::HashMap<u64, SurvivalState>> {
         self.survival.lock().unwrap_or_else(|p| p.into_inner())
     }
 
@@ -117,7 +117,7 @@ impl DropState {
     }
 
     /// 经广播 hub 给单连接排队一个 SetHealth（ticker 内无 socket）。
-    fn unicast_health(&self, conn_id: u64, state: &SurvivalState) {
+    pub(crate) fn unicast_health(&self, conn_id: u64, state: &SurvivalState) {
         let hub = self.hub.lock().unwrap_or_else(|p| p.into_inner());
         if let Some(hub) = hub.as_ref() {
             hub.unicast(conn_id, packets::PLAY_SET_HEALTH_S2C_ID, build_set_health_body(state));
@@ -127,6 +127,13 @@ impl DropState {
     /// 死亡闭环：背包全部内容按既有掉落路径生成实体并广播；清空背包；
     /// 满状态复活；回出生点（PlayerPositionSync 0x49 + SetHealth + 全量 Content）。
     fn handle_death(&self, conn_id: u64, world: &MutableWorld) {
+        // P53 A7：死亡计数在既有死亡路径本地累加（不发包、不新增 ticker）。
+        self.record_stat(conn_id, mc_world::store::stat_id::DEATHS);
+        // P53 A2：复活回满状态时疲劳度也归零（与背包存档同步）。
+        self.exhaustions.lock().unwrap_or_else(|p| p.into_inner()).insert(conn_id, 0.0);
+        if let Some(inv) = self.lock_invs().get_mut(&conn_id) {
+            inv.set_exhaustion(0.0);
+        }
         let pos = self.death_position(conn_id, world);
         let (items, tag) = {
             let mut invs = self.lock_invs();

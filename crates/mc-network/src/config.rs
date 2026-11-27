@@ -18,6 +18,14 @@ pub const DEFAULT_VIEW_DISTANCE: i32 = 10;
 /// 默认压缩阈值：-1=禁用（原行为）。
 pub const DEFAULT_COMPRESSION_THRESHOLD: i32 = -1;
 
+/// P53 A1：原版经验球吸引半径（7.25 格）与合并上限（每组最多 16 个球）。
+pub const XP_ATTRACT_RADIUS: f64 = mc_world::xp::XP_ATTRACT_RADIUS;
+pub const XP_MERGE_MAX_ORBS: usize = mc_world::xp::XP_MERGE_MAX_ORBS;
+pub const XP_MERGE_DISTANCE: f64 = mc_world::xp::XP_MERGE_DISTANCE;
+pub const XP_ATTRACT_SPEED: f64 = mc_world::xp::XP_ATTRACT_SPEED;
+/// P53 A2：每 tick 疲劳推进阈值（跨 4.0 扣一格饥饿，余量保留）。
+pub const EXHAUSTION_THRESHOLD: f32 = mc_world::survival::EXHAUSTION_THRESHOLD;
+
 /// 网络配置：由 mc-server 从 `ServerConfig` 透传。
 #[derive(Debug, Clone)]
 pub struct NetConfig {
@@ -51,6 +59,14 @@ pub struct NetConfig {
     pub socket_mode: SocketMode,
     /// ECS 模式下的 accept 交接通道；由 `SocketEcsRuntime::incoming_sender()` 注入。
     pub socket_accept: Option<Sender<AcceptedSocket>>,
+    /// P53 A1：经验球 7.25 格吸引 + 邻近合并（库默认关保持旧 e2e 包流，生产 server.toml 默认开）。
+    pub xp_merge: bool,
+    /// P53 A2：疾跑/跳跃/游泳疲劳度细节（库默认关，生产默认开）。
+    pub hunger_detail: bool,
+    /// P53 A4：后台设置（gamemode/tool_enchant）跨重连落盘（库默认关，生产默认开）。
+    pub settings_persist: bool,
+    /// P53 A7：本地统计累积（库默认关，生产默认开；不发包）。
+    pub stats: bool,
 }
 
 impl Default for NetConfig {
@@ -73,6 +89,10 @@ impl Default for NetConfig {
             tool_rules: false,
             socket_mode: SocketMode::Net,
             socket_accept: None,
+            xp_merge: false,
+            hunger_detail: false,
+            settings_persist: false,
+            stats: false,
         }
     }
 }
@@ -99,6 +119,10 @@ impl NetConfig {
             tool_rules: false,
             socket_mode: SocketMode::Net,
             socket_accept: None,
+            xp_merge: false,
+            hunger_detail: false,
+            settings_persist: false,
+            stats: false,
         }
     }
 
@@ -191,6 +215,30 @@ impl NetConfig {
         self.socket_accept = Some(tx);
         self
     }
+
+    /// P53 A1：开启经验球 7.25 格吸引 + 合并（只走全服唯一 ticker）。
+    pub fn with_xp_merge(mut self, enabled: bool) -> Self {
+        self.xp_merge = enabled;
+        self
+    }
+
+    /// P53 A2：开启疾跑/跳跃/游泳疲劳度细节。
+    pub fn with_hunger_detail(mut self, enabled: bool) -> Self {
+        self.hunger_detail = enabled;
+        self
+    }
+
+    /// P53 A4：开启后台设置跨重连落盘/恢复。
+    pub fn with_settings_persist(mut self, enabled: bool) -> Self {
+        self.settings_persist = enabled;
+        self
+    }
+
+    /// P53 A7：开启本地统计累积（仅服务端，不推 `award_stats`）。
+    pub fn with_stats(mut self, enabled: bool) -> Self {
+        self.stats = enabled;
+        self
+    }
 }
 
 #[cfg(test)]
@@ -241,6 +289,22 @@ mod tests {
         assert_eq!(mk(10), 10);
         assert_eq!(mk(11), 10);
         assert_eq!(mk(i32::MAX), 10);
+    }
+
+    /// P53：四个新开关库默认全关（旧 e2e 包流逐字节不变），可独立打开。
+    #[test]
+    fn p53_feature_switches_are_opt_in() {
+        let base = NetConfig::default();
+        assert!(!base.xp_merge && !base.hunger_detail && !base.settings_persist && !base.stats);
+        let cfg = NetConfig::default()
+            .with_xp_merge(true)
+            .with_hunger_detail(true)
+            .with_settings_persist(true)
+            .with_stats(true);
+        assert!(cfg.xp_merge && cfg.hunger_detail && cfg.settings_persist && cfg.stats);
+        assert_eq!(XP_ATTRACT_RADIUS, 7.25);
+        assert_eq!(XP_MERGE_MAX_ORBS, 16);
+        assert_eq!(EXHAUSTION_THRESHOLD, 4.0);
     }
 
     #[test]

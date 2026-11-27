@@ -16,6 +16,7 @@
 
 use mc_world::crops::PlantKind;
 use mc_world::store::{TimerKind, TimerRecord, WorldStore};
+use mc_world::survival::Activity;
 use mc_world::{ItemEntities, MutableWorld, PlayerInventory, SurvivalState, XpOrbEntities};
 use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
@@ -31,6 +32,8 @@ use super::chunk_cache::ChunkCache;
 use super::timer_spec::{self, Restored};
 mod timer_io;
 mod survival;
+mod gameplay;
+pub use gameplay::{enchant_code, gamemode_code, stat_name};
 
 /// 全服掉落物物理节拍（ms）：只由 [`DropState::start_global_tick`] 的一个 ticker 驱动。
 pub const DROP_TICK_MS: u64 = 50;
@@ -150,6 +153,21 @@ pub struct DropState {
     tool_enchants: Mutex<HashMap<u64, mc_world::tools::ToolEnchant>>,
     /// P47 工作台 3×3 会话（仅当前连接/进程内；无 block entity 存档 MVP）。
     craft9: Mutex<HashMap<u64, Craft9Session>>,
+    // --- P53 批次 1：四项独立开关 + 纯服务端状态（全服唯一 ticker 推进） ---
+    xp_merge_enabled: AtomicBool,
+    hunger_detail_enabled: AtomicBool,
+    settings_persist_enabled: AtomicBool,
+    stats_enabled: AtomicBool,
+    /// per-conn 活动标记（连接侧只设置，ticker 才推进疲劳度）。
+    activities: Mutex<HashMap<u64, Activity>>,
+    /// per-conn 疲劳度浮点伴随状态（与背包 exhaustion 字段同步落盘）。
+    exhaustions: Mutex<HashMap<u64, f32>>,
+    /// per-conn 上次已同步的经验球位置（0x23 位置差；新实体由 Spawn 路径处理）。
+    orb_synced: Mutex<HashMap<u64, HashMap<i32, (f64, f64, f64)>>>,
+    /// Join 读盘得到的后台设置（hub 注册后应用，避免改 Join 包序）。
+    pending_settings: Mutex<HashMap<u64, (u8, u8)>>,
+    /// legacy（无 redb）模式的内存统计兜底；redb 模式真相源是 `stats` 表。
+    stats_mem: Mutex<HashMap<(String, u32, u32), u64>>,
 }
 
 impl DropState {
@@ -201,6 +219,15 @@ impl DropState {
             player_uuids: Mutex::new(HashMap::new()),
             tool_enchants: Mutex::new(HashMap::new()),
             craft9: Mutex::new(HashMap::new()),
+            xp_merge_enabled: AtomicBool::new(false),
+            hunger_detail_enabled: AtomicBool::new(false),
+            settings_persist_enabled: AtomicBool::new(false),
+            stats_enabled: AtomicBool::new(false),
+            activities: Mutex::new(HashMap::new()),
+            exhaustions: Mutex::new(HashMap::new()),
+            orb_synced: Mutex::new(HashMap::new()),
+            pending_settings: Mutex::new(HashMap::new()),
+            stats_mem: Mutex::new(HashMap::new()),
         };
         if let Some(store) = &me.store {
             match store.timers() {
@@ -351,6 +378,15 @@ impl DropState {
         }
         orbs.tick();
         drop(orbs);
+        // P53 A1：7.25 格吸引 + 邻近合并（总经验守恒）只在本唯一 ticker 内做；
+        // 连接侧只按快照差集发 0x23/0x4E，绝不推进时间/IPO。
+        if self.xp_merge_enabled.load(Ordering::Relaxed) {
+            self.tick_xp_attract_merge();
+        }
+        // P53 A2：疲劳度只在本 ticker 内推进（疾跑/跳跃/游泳标记由连接侧写入）。
+        if self.hunger_detail_enabled.load(Ordering::Relaxed) {
+            self.tick_activity_exhaustion();
+        }
         // P40 生存：饥饿衰减/饿死伤害/死亡处理都在本唯一 ticker 内推进，连接侧绝不 tick
         //（P18.1 R1 不重犯）。放在其它物理之后，保持既有物理时序不变。
         self.tick_survival(world);
@@ -1265,6 +1301,18 @@ impl DropState {
         self.lock_tags().insert(conn_id, user_tag.to_string());
         // P40：生存状态跟随背包读盘（旧档满状态）；与背包一起由本连接负责刷盘。
         self.survival.lock().unwrap_or_else(|p| p.into_inner()).insert(conn_id, inv.survival());
+        // P53：疲劳度与后台设置随背包一起读盘（旧档缺省 0 / survival / none）。
+        self.exhaustions
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
+            .insert(conn_id, inv.exhaustion());
+        self.pending_settings
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
+            .insert(
+                conn_id,
+                (inv.persisted_gamemode(), inv.persisted_tool_enchant()),
+            );
         self.lock_invs().insert(conn_id, inv);
         self.lock_known().insert(conn_id, HashSet::new());
         let _ = (filled, held);
@@ -1275,6 +1323,11 @@ impl DropState {
     pub fn unload_inventory(&self, conn_id: u64, user_tag: &str) {
         self.lock_tags().remove(&conn_id);
         self.survival.lock().unwrap_or_else(|p| p.into_inner()).remove(&conn_id);
+        // P53：连接级玩法状态随断线清理；背包里的存档字段保留。
+        self.activities.lock().unwrap_or_else(|p| p.into_inner()).remove(&conn_id);
+        self.exhaustions.lock().unwrap_or_else(|p| p.into_inner()).remove(&conn_id);
+        self.orb_synced.lock().unwrap_or_else(|p| p.into_inner()).remove(&conn_id);
+        self.pending_settings.lock().unwrap_or_else(|p| p.into_inner()).remove(&conn_id);
         if let Some(mut inv) = self.lock_invs().remove(&conn_id) {
             inv.stow_cursor();
             self.persist_inventory(conn_id, user_tag, &inv);
