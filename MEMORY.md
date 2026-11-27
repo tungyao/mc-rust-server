@@ -126,3 +126,5 @@
 - [2026-11-27 01:57 UTC] agent=main task=p52-socket-ecs-b status=todo detail=C1 方案B：socket I/O 全移 ECS + 全量切换 + 无限队列 files=
 - [2026-11-27 01:57 UTC] agent=subagent-socket-b task=p52-socket-ecs-b status=start detail=claim files=
 - [2026-11-27 02:19 UTC] agent=subagent-socket-b task=p52-socket-ecs-b status=done detail=方案B全量ECS: serve只accept+交接; Bevy非阻塞register; 每连接reader/writer/logic三任务; Join/Ack/视距flush红线保持; 无限队列; /api/world socket_mode; 进程冒烟正常; 516 passed; merge见main files=crates/mc-network/src/socket_ecs.rs,crates/mc-network/tests/socket_ecs_e2e.rs,crates/mc-server/src/{main,config,admin,net_thread,resources,systems}.rs,docs/socket-ecs-p52.md
+- [2026-11-27 02:19 UTC] agent=subagent-uuid task=p51-uuid-identity status=start detail=claim files=
+- [2026-11-27 02:52 UTC] agent=subagent-uuid task=p51-uuid-identity status=done detail=稳定离线UUID(原版OfflinePlayer+MD5 v3);LoginSuccess/P43 UUID;存档迁UUID主键+用户名镜像/旧档.bak;后台全部端点支持uuid并重建面板;528 passed;merge见main files=crates/mc-protocol/src/packets/login.rs,crates/mc-world/src/uuid_migration.rs,crates/mc-network/src/drop_state.rs,crates/mc-network/src/broadcast.rs,crates/mc-server/src/admin.rs,admin-ui/src/Dashboard.js

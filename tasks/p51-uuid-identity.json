@@ -1,13 +1,20 @@
 {
   "id": "p51-uuid-identity",
   "title": "UUID 稳定化 + 玩家存档/后台迁移",
-  "status": "todo",
-  "owner": "",
+  "status": "done",
+  "owner": "subagent-uuid",
   "priority": "p1",
   "deps": [],
   "branch": "",
   "created": "2026-11-27T01:50:19+00:00",
-  "updated": "2026-11-27T01:50:19+00:00",
-  "detail": "",
-  "files": []
+  "updated": "2026-11-27T02:52:32+00:00",
+  "detail": "稳定离线UUID(原版OfflinePlayer+MD5 v3);LoginSuccess/P43 UUID;存档迁UUID主键+用户名镜像/旧档.bak;后台全部端点支持uuid并重建面板;528 passed;merge见main",
+  "files": [
+    "crates/mc-protocol/src/packets/login.rs",
+    "crates/mc-world/src/uuid_migration.rs",
+    "crates/mc-network/src/drop_state.rs",
+    "crates/mc-network/src/broadcast.rs",
+    "crates/mc-server/src/admin.rs",
+    "admin-ui/src/Dashboard.js"
+  ]
 }

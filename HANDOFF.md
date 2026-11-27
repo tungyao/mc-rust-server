@@ -18,7 +18,7 @@
 > v2 流动水/游泳/block light/遗迹均已合入（见 §5.29）；地图生成三阶段全部落地；
 > `p47-gameplay-admin` 工具等级/3×3 工作台/游戏模式/挖掘动画 + 后台联动已合入（见 §5.31）；
 > **真机复验仍未做**；用户决策：`p32` 保持 blocked、v2 较慢可接受（不强制回退 v1）、
-> 身份采用 **UUID 稳定化 + 存档迁移**（任务 `p51-uuid-identity` 排 socket 完成后派发）；
+> UUID 稳定化 + 存档/后台迁移（`p51-uuid-identity`）已合入（见 §5.35）；
 > `p50` 立项评估已完成，`p52-socket-ecs-b` 方案 B 全量切换已合入（见 §5.34），
 > **真机对比待用户执行**；
 > 后台管理面板已用 Vue 3 + Naive UI 重写并**完全离线化**合入（`p34-admin-vue` / `53f1016`、
@@ -32,7 +32,7 @@
 全服唯一 50ms tick；已移除每连接每 tick 的 TeleportEntitySync 覆盖），靠近 <1.5 格
 （挖掘掉落 delay 10 ticks / 手扔 40 ticks 后）拾取（TakeItem 动画+Remove+入库+全量背包同步）；
 C2S SetHeldItem 切手持，放置按手持映射扣 1（单槽同步），空手/不可放置物品只 Ack、不落子
-（P18.3，已无石头回退）。背包存档 `world/player-<user>-<seed>.dat`（用户名键、seed 隔离），
+（P18.3，已无石头回退）。背包存档 `world/player-<user>-<seed>.dat`（P18 原用户名键、seed 隔离；P51 已迁到稳定 UUID 主键并保留用户名镜像，见 §5.35），
 断线/拾取/放置即刷；重启重进石头与背包都在。原版 26.3 真机进服正常
 （Join 441 块 304ms 缓存命中 Rendertime 无 DecoderException，站稳 y=73 on_ground；
 真人游玩挖 17/放 12 块，放置精确扣 12 石头，无超时/tick lag）。
@@ -420,10 +420,12 @@ $natives = 'C:\Users\qwe\AppData\Local\Temp\mc263natives'
 
 ### 本地检查
 
-- `cargo test --workspace`：全部通过（2026-11-27 实跑 **516 passed / 0 failed**；
+- `cargo test --workspace`：全部通过（2026-11-27 实跑 **528 passed / 0 failed**；
   P18 当时 215，之后 P18.1–P52 又追加单测与 play_stream / play_actions / play_crops /
   play_all_crops / timer_persist / play_survival / play_recipes / player_visibility /
-  fluid / play_tools / socket_ecs_e2e / admin_e2e 集成测试）。
+  fluid / play_tools / socket_ecs_e2e / uuid_identity / admin_e2e 集成测试）。
+  已知 flake：`p27_bonemeal_advances_wheat_and_grows_sapling` 在并行负载下偶发失败一次
+  （ticker/骨粉跟踪竞态，测试未改、隔离与复跑全过），多轮全量中出现过 2–3 次，继续观察。
 - redb 生产核心真机进程冒烟（2026-11-26）：临时 `server.toml` 设 `world_storage="redb"`、
   独立端口与 world_dir，启动后日志 `redb world opened seed=... / world loaded storage=Redb`
   → `listening` → ticker/keepalive 正常，目录下生成 `state-<seed>.redb` 与 `migration-<seed>.json`，
@@ -473,9 +475,9 @@ $natives = 'C:\Users\qwe\AppData\Local\Temp\mc263natives'
 10. **P18 剩余（生存完整版）**：~~窗口点击整理（ClickContainer 只忽略，整理留后续）~~ **已过时：P18.1 已实现
     PICKUP/SWAP/QUICK_MOVE（仅整箱 SHIFT 整理未做）**；
    工具等级/精准采集（掉落无视工具，TODO）；经验球（entity 50，已由 §5.26 实现）；
-   创造/生存模式切换（全按即时破坏+开局石头）；背包键为用户名（离线 uuid 随机，
-   在线模式落地后切回 uuid，见 inventory 文档）；实体 UUID 为 id 派生（非随机，
-   客户端仅 warn，不影响）；掉落落地高度重算已实现（`ItemEntity.support` 记录支撑坐标，
+   创造/生存模式切换（已由 §5.31 实现 per-conn 模式）；~~背包键为用户名（离线 uuid 随机，
+   在线模式落地后切回 uuid，）~~ **已由 §5.35 P51 改为稳定 UUID 主键 + 用户名镜像**；~~实体 UUID 为 id 派生（非随机，
+   客户端仅 warn）~~ **已由 §5.35 P51 改为玩家稳定 UUID**；掉落落地高度重算已实现（`ItemEntity.support` 记录支撑坐标，
    `tick_drops` 每 tick 检测悬空并重算 `rest_y`）。
 11. **P18.2 掉落修复待真机测试**：本轮修了四处（见 §3 掉落/实体/背包）：
     - Spawn 带真实初速、删除每 50ms `TeleportEntitySync`(0x23) → 验证不再原地蹦跶、
@@ -1024,6 +1026,22 @@ $natives = 'C:\Users\qwe\AppData\Local\Temp\mc263natives'
     opened → listening → global drop physics ticker started → keepalive`，无 panic。
     **真机待验**：清单 §1/§3/§5/§8 的 ECS vs net 对比、慢连接 RSS、tick lag=0。
 
+35. **P51 UUID 稳定化 + 存档/后台迁移（已合入，`p51-uuid-identity` / `826f5b3`）**：
+    `packets::stable_offline_uuid(name)` = 原版 `OfflinePlayer:<name>` 裸字节 MD5 +
+    version 3 / RFC4122 variant（自包含 MD5，不增 uuid crate 依赖），向量
+    `Notch=b50ad385-829d-3141-a216-7e7d7539ba7f`、`Steve=5627dd98-e6be-3c21-b8a8-e92344183641`。
+    LoginSuccess 与 P43 Spawn Player 实体 UUID 一律用稳定值（自己仍 entity_id=1、不给自己 Spawn）；
+    客户端 LoginStart 自带的随机 v4 忽略。迁移模块 `uuid_migration.rs` 启动时一次：
+    `player-<user>-<seed>.dat` 逐字节复制到 `player-<uuid>-<seed>.dat`、旧档 `.bak`（冲突 `.bak.N`），
+    redb `players` username key 复制到 UUID key 并**保留旧键兜底**，报告 `uuid-migration-<seed>.json`；
+    幂等、失败回滚，XP/背包/生存/合成格与 v1–v3 兼容不变。DropState 以 UUID 主键读写，
+    同时维护 username 兼容镜像。后台：`/api/online` 增 `uuid`（旧字段不删）；
+    give/inventory/kick/gamemode/tool-enchant 都接受 `uuid`（大小写/连字符归一），
+    hub 增 `find_conn_by_uuid`；Vue 面板显示短 UUID 并用 UUID 请求，离线单文件已重建、
+    `check-offline.mjs` 零外链。旧 516 测试一字未改；合并后 **528 passed / 0 failed**
+    （本轮审查时 `p27_bonemeal_advances_wheat_and_grows_sapling` 偶发失败一次，隔离/复跑全绿）。
+    未做：真实在线模式 UUID、`player_info_update 0x47` 名字/皮肤、挖掘动画 0x05（无抓包不猜字节）。
+
 ## 6. 关键文件
 
 ```
@@ -1052,6 +1070,7 @@ crates/mc-network/src/
   tests/player_visibility.rs  P43 双连接玩家互见 e2e
   tests/fluid.rs              P46 流体存档/广播/游泳互见 e2e
   tests/socket_ecs_e2e.rs     P52 ECS/net Join 逐字节、Ack 相邻无广播、断线清理 e2e
+  tests/uuid_identity.rs      P51 稳定 UUID、迁移兜底、双用户与面板按 uuid e2e
   chunk_view.rs              clamp_view_radius/view_chunk_count、per-connection 视距集合/去重/跨区块 add/remove 规划
   chunk_cache.rs             共享已编码 ChunkData 0x2E 包体缓存（Mutex+HashMap+FIFO，默认 1024；`bodies` rayon 并行批量；P17 `with_mutable` + `invalidate`）
   play_events.rs             net 线程 → ECS 的移动/KeepAlive/Disconnect/BlockEdit 事件（conn_id 实体键）
@@ -1068,6 +1087,7 @@ crates/mc-world/src/
   crafting.rs                P40/P41/P47 2×2 283 条配方 + 3×3 `match_recipe_9`/`consume_grid9`
   survival.rs                P40 生存状态（health/food/saturation）与食物表纯逻辑
   store.rs                   P36/P38/P39 redb 存储（生产核心 + 计时）
+  uuid_migration.rs          P51 用户名→稳定 UUID 存档迁移（幂等/回退/报告）
   worldgen/
     mod.rs                   WorldGen + GeneratorVersion(v1 冻结/v2 显式)、高度/出生保护/biome/洞穴/树、跨 chunk 扫描
     ores.rs / features.rs    P44 v2 矿种高度带 / 地表材质·多树种·草花水岸植被
