@@ -1,13 +1,21 @@
 {
   "id": "p54-batch1-infra",
   "title": "批次1B：广播限流 + journal运维 + 时间/天气 + 工作台会话落盘 (A3/A5/A6/A8)",
-  "status": "doing",
+  "status": "done",
   "owner": "subagent-batch1b",
   "priority": "p1",
   "deps": [],
   "branch": "",
   "created": "2026-11-27T02:55:57+00:00",
-  "updated": "2026-11-27T03:30:18+00:00",
-  "detail": "",
-  "files": []
+  "updated": "2026-11-27T04:12:10+00:00",
+  "detail": "A3广播合并默认关Ack不合并+A5 journal裁剪落盘后+A6 set_time 0x73/天气不发包+A8会话落盘;新表block_entities/meta;后台时间天气运维会话卡;565 passed;merge见main",
+  "files": [
+    "crates/mc-world/src/{world_time.rs",
+    "store/p54.rs",
+    "mutable.rs}",
+    "crates/mc-network/src/broadcast.rs",
+    "crates/mc-protocol/src/packets/play_chunk.rs",
+    "crates/mc-server/src/admin.rs",
+    "admin-ui/src/Dashboard.js"
+  ]
 }

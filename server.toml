@@ -13,3 +13,9 @@ xp_merge = true
 hunger_detail = true
 settings_persist = true
 stats = true
+# P54 批次 1：基础设施开关（默认与库一致；天气广播即使打开也暂不发包，0x27 type 未确认）
+broadcast_throttle = false # A3：BlockUpdate 同 tick 合并（改包序，待真机双开确认后再开）
+journal_trim = true        # A5：journal 按 seq 保留窗口，只在落盘后裁剪
+journal_keep = 10000       # A5：保留记录数
+weather_broadcast = false  # A6：天气 game_event 保留开关，当前只更新服务端状态与面板
+craft_session_persist = true # A8：工作台会话断线落盘、重进恢复（仅服务端内存）

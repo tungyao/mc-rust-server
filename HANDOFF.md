@@ -21,7 +21,8 @@
 > UUID 稳定化 + 存档/后台迁移（`p51-uuid-identity`）已合入（见 §5.35）；
 > `p50` 立项评估已完成，`p52-socket-ecs-b` 方案 B 全量切换已合入（见 §5.34），
 > **真机对比待用户执行**；批次 1A（`p53-batch1-gameplay` / `51ba63f2`）A1–A2/A4/A7
-> 四项已合入（见 §5.36），批次 1B（`p54-batch1-infra`：A3/A5/A6/A8）待派发；
+> 四项已合入（见 §5.36），批次 1B（`p54-batch1-infra` / `93a8996`）
+> A3/A5/A6/A8 四项亦已合入（见 §5.37），**批次 1 全部完成**；
 > 后台管理面板已用 Vue 3 + Naive UI 重写并**完全离线化**合入（`p34-admin-vue` / `53f1016`、
 > `p35-admin-offline` / `48e14bd`，见 §5.25）。
 
@@ -77,6 +78,11 @@ xp_merge = true               # P53 A1：经验球 7.25 格吸引 + 邻近合并
 hunger_detail = true          # P53 A2：疾跑/跳跃/游泳疲劳度
 settings_persist = true       # P53 A4：gamemode/tool_enchant 跨重连持久化
 stats = true                  # P53 A7：本地统计（不发包；B13 才推 award_stats）
+broadcast_throttle = false    # P54 A3：BlockUpdate 合并（改包序，真机双开确认前保持关）
+journal_trim = true           # P54 A5：journal 窗口裁剪（落盘后才裁）
+journal_keep = 10000          # P54 A5：保留条数
+weather_broadcast = false     # P54 A6：天气事件开关（0x27 type 未确认，当前不发包）
+craft_session_persist = true  # P54 A8：工作台会话断线落盘
 ```
 
 P16 的 seed 示例：默认 seed 视野（radius 10）内只有树林/丘陵、没有水面（P14 高度分布下 h<63 的列约 0.2%，且不在出生视距内）；`seed=42` 出生点朝南约 40 格是沙岸+池塘，`seed=-987654321` 出生点东侧约 25 格水域更大，两者都有大量 oak 树，真机截图见 §4。
@@ -425,10 +431,11 @@ $natives = 'C:\Users\qwe\AppData\Local\Temp\mc263natives'
 
 ### 本地检查
 
-- `cargo test --workspace`：全部通过（2026-11-27 实跑 **550 passed / 0 failed**；
-  P18 当时 215，之后 P18.1–P53 又追加单测与 play_stream / play_actions / play_crops /
+- `cargo test --workspace`：全部通过（2026-11-27 实跑 **565 passed / 0 failed**；
+  P18 当时 215，之后 P18.1–P54 又追加单测与 play_stream / play_actions / play_crops /
   play_all_crops / timer_persist / play_survival / play_recipes / player_visibility /
-  fluid / play_tools / socket_ecs_e2e / uuid_identity / gameplay_batch1_e2e / admin_e2e 集成测试）。
+  fluid / play_tools / socket_ecs_e2e / uuid_identity / gameplay_batch1_e2e /
+  infra_batch1_e2e / infra_admin_e2e / admin_e2e 集成测试）。
   已知 flake：`p27_bonemeal_advances_wheat_and_grows_sapling` 在并行负载下偶发失败一次
   （ticker/骨粉跟踪竞态，测试未改、隔离与复跑全过），多轮全量中出现过 2–3 次，继续观察。
 - redb 生产核心真机进程冒烟（2026-11-26）：临时 `server.toml` 设 `world_storage="redb"`、
@@ -1070,6 +1077,33 @@ $natives = 'C:\Users\qwe\AppData\Local\Temp\mc263natives'
     `p53 features all=true → socket_mode=ecs → redb opened → global ticker → keepalive`，无 panic。
     **真机待验**：吸引手感、疲劳度平衡、重进模式/统计显示（清单 §4/§7/§9）。
 
+37. **批次 1B：广播限流/journal/时间天气/工作台落盘（已合入，`p54-batch1-infra` / `93a8996`）**：
+    - **A3**（`broadcast_throttle`，**默认关**）：`BroadcastHub` per-conn `VecDeque`，只把同 chunk/section/同格的
+      `BlockUpdate 0x08` 按 last-write-wins 合并；`Ack 0x04` 仍直连操作者、绝不入 hub；
+      `0x56` wire format 未确认故不用。`play_loop` 在 50ms 读超时分支先 `maybe_flush_view`
+      再 `drain_outbox`，视距 flush 先于方块/掉落包。后台 `/api/world` 增
+      `broadcast_queue/dropped/merged_blocks` + `POST /api/broadcast-throttle`。
+    - **A5**（默认开）：journal 按 seq 保留窗口（`journal_keep=10000`），只在 60s autosave/admin
+      `POST /api/journal-trim` 触发且**先 `flush_blocks` 后裁剪**，不占唯一 50ms ticker；
+      net 同步判定区间用 `with_journal_actor(conn_id, …)` 把 actor 写进 journal
+      （thread-local、不跨 `.await`，ticker 系统写仍 actor=0）。后台 `/api/world` 增 journal 指标。
+    - **A6**（时间开/天气广播关）：`WorldTimeState` 挂在 `DropState` 唯一 ticker 推进、`meta` 落盘；
+      `set_time 0x73` 的 ID 来自 `data/777/packets.json`（115=0x73）、包体按 wiki `Long + Bool`，
+      **只在 admin 手动设置时发给在线连接，Join 不补包**。`game_event 0x27` 天气 type 未抓包确认，
+      **即使开关打开也只更新服务端状态与面板、绝不发天气包**；本轮选手动切换 + 到期回晴，
+      未做 seed 派生自动昼夜循环（§5.2 Q6 未决策，避免改存档/真机基线）。
+      `GET|POST /api/time`、`GET|POST /api/weather` + 面板时间滑块/天气下拉（标注待真机确认）。
+    - **A8**（默认开）：redb 新表 `block_entities`（key=owner+pos，value=10 槽快照/owner/last_saved），
+      断线写盘、Join 按稳定 UUID 恢复内存会话（**不补发任何包，Join 八段逐字节不变**）；
+      复用 `0x12/0x14`、不上 `0x06`、不改 window id。`/api/craft9` 增 `persisted/owner/last_saved`
+      与 `POST /api/craft9-clear`，面板加落盘标识/清空按钮。
+    - 存档：只增表与 `meta` 键，`SCHEMA_VERSION` 仍 1，P53 v4 档与 `stats` 表逐字节不变；
+      旧库缺表/缺键按空或白天/晴回退。旧 550 测试一字未改，合并后 **565 passed / 0 failed**。
+      进程冒烟：`p54 features broadcast_throttle=false journal_trim=true/10000
+      weather_broadcast=false craft_persist=true`，无 panic。
+    - **未做/真机待验**：天气包、0x56、seed 派生昼夜循环、客户端工作台 GUI 恢复后的
+      `0x12` 补发（B6 未做，恢复目前只到服务端内存）；清单 §2/§5/§11。
+
 ## 6. 关键文件
 
 ```
@@ -1100,6 +1134,8 @@ crates/mc-network/src/
   tests/socket_ecs_e2e.rs     P52 ECS/net Join 逐字节、Ack 相邻无广播、断线清理 e2e
   tests/uuid_identity.rs      P51 稳定 UUID、迁移兜底、双用户与面板按 uuid e2e
   tests/gameplay_batch1_e2e.rs P53 XP/模式/食物/统计同名重进、ticker 吸引合并守恒 e2e
+  tests/infra_batch1_e2e.rs   P54 A3 双连接合并默认关/开、Ack 不入 hub e2e
+  tests/infra_admin_e2e.rs    P54 时间/天气 API、工作台会话落盘恢复 e2e
   chunk_view.rs              clamp_view_radius/view_chunk_count、per-connection 视距集合/去重/跨区块 add/remove 规划
   chunk_cache.rs             共享已编码 ChunkData 0x2E 包体缓存（Mutex+HashMap+FIFO，默认 1024；`bodies` rayon 并行批量；P17 `with_mutable` + `invalidate`）
   play_events.rs             net 线程 → ECS 的移动/KeepAlive/Disconnect/BlockEdit 事件（conn_id 实体键）
@@ -1120,6 +1156,9 @@ crates/mc-world/src/
   xp.rs                      P31 经验球 + P53 A1 吸引/合并（总经验守恒） A1 牵引只在唯一 ticker
   survival.rs                P40 生存 + P53 A2 疲劳度推进（4.0 阈值）
   drop_state/gameplay.rs     P53 四开关、ticker 内 XP/疲劳度推进、统计与设置持久化
+  world_time.rs              P54 A6 全局时间/天气状态（唯一 ticker 推进、meta 落盘）
+  store/p54.rs               P54 A5/A6/A8 redb 扩展（journal 裁剪/时间/容器快照）
+  broadcast.rs               P21 hub + P54 A3 per-conn 合并队列（Ack 永不合并）
   worldgen/
     mod.rs                   WorldGen + GeneratorVersion(v1 冻结/v2 显式)、高度/出生保护/biome/洞穴/树、跨 chunk 扫描
     ores.rs / features.rs    P44 v2 矿种高度带 / 地表材质·多树种·草花水岸植被
